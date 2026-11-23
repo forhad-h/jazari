@@ -239,6 +239,15 @@ pub fn suggest_key(lib: &[Rule], preferred: &str, title: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Why `rule` can't be copied into the user's library, or None when it can. Agent teams keep the
+/// coordination rules with the lead by their key, so a copy under another name would reach every
+/// teammate.
+pub fn copy_problem(rule: &Rule) -> Option<String> {
+    (rule.key == COORDINATION).then(|| {
+        "the coordination rules can't be copied: an agent team recognises them by name to keep them with the lead".to_string()
+    })
+}
+
 /// Saves `body` as the user's prompt `key`, replacing the file in one step. When `replacing` names
 /// another of the user's prompts (a rename), that file is removed once the new one is written.
 /// Returns the new file's path.
@@ -875,6 +884,13 @@ mod tests {
         assert!(save_in(&dir, &lib, "mine", "# Mine\n", Some("coordination")).is_err(), "a built-in is never replaced");
         assert!(save_in(&dir, &lib, "-flag", "# Flag\n", None).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn coordination_is_never_copied_under_another_name() {
+        let lib = builtins();
+        assert!(copy_problem(&lib[0]).unwrap().contains("agent team"));
+        assert_eq!(copy_problem(&lib[1]), None, "output hygiene copies fine");
     }
 
     #[test]

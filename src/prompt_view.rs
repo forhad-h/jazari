@@ -45,8 +45,8 @@ pub enum Outcome {
     Stay,
     /// Discarded or cancelled.
     Close,
-    /// Saved under this key.
-    Saved(String),
+    /// Saved under `key`; `replaced` is the user's prompt it replaced (an edit or a rename).
+    Saved { key: String, replaced: Option<String> },
     /// Suspend the dashboard and open this text in the user's editor.
     Edit(String),
 }
@@ -76,7 +76,10 @@ impl TextBox {
     /// Handles an editing key; false when the key isn't one.
     fn on_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => self.insert(c),
+            // Ctrl+Alt together is AltGr on Windows, which types characters such as `@` and `{`.
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                self.insert(c)
+            }
             KeyCode::Backspace if self.cursor > 0 => {
                 self.cursor -= 1;
                 self.chars.remove(self.cursor);
@@ -296,7 +299,7 @@ impl PromptView {
             return Outcome::Stay;
         }
         match (self.env.save)(&self.key, &draft.body, self.replacing.as_deref()) {
-            Ok(_) => Outcome::Saved(self.key.clone()),
+            Ok(_) => Outcome::Saved { key: self.key.clone(), replaced: self.replacing.clone() },
             Err(why) => {
                 self.warning = Some(format!("Couldn't save: {why}"));
                 Outcome::Stay
@@ -384,7 +387,7 @@ impl PromptView {
                 let questions = self.draft.as_ref().map_or(0, |d| d.questions.len());
                 (self.warning, self.notice) = (None, None);
                 match code {
-                    KeyCode::Esc | KeyCode::Char('q') => return Outcome::Close,
+                    KeyCode::Esc => return Outcome::Close,
                     KeyCode::Enter => return self.save(),
                     KeyCode::Char('e') => {
                         self.editing_draft = true;
@@ -540,7 +543,7 @@ mod tests {
         assert!(revision.previous.unwrap().starts_with("# Short pull requests\n"));
         assert_eq!(v.key, "short-pull-requests", "a revision keeps the name");
 
-        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved("short-pull-requests".into()));
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "short-pull-requests".into(), replaced: None });
         assert_eq!(saved.lock().unwrap()[0], ("short-pull-requests".into(), second.body, None));
     }
 
@@ -600,7 +603,7 @@ mod tests {
             v.on_key(key(k));
         }
         assert_eq!(v.key, "short-pull-requests-x");
-        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved("short-pull-requests-x".into()));
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "short-pull-requests-x".into(), replaced: None });
         assert_eq!(saved.lock().unwrap().len(), 1);
     }
 
@@ -614,15 +617,29 @@ mod tests {
         assert_eq!(v.on_key(key(KeyCode::Char('e'))), Outcome::Edit("# tone\n\nMine.".into()));
         v.edited(Ok("# Tone\n\nWarmer.\n".into()));
         assert_eq!(v.draft.as_ref().unwrap().summary, "Warmer.", "the summary follows the edit");
-        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved("tone".into()), "keeping its own name is fine");
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "tone".into(), replaced: Some("tone".into()) }, "keeping its own name is fine");
         assert_eq!(saved.lock().unwrap()[0].2.as_deref(), Some("tone"));
 
         let (e, _, saved) = fake(Vec::new(), lib.clone());
-        let mut v = PromptView::revise(e, &lib[0]);
-        assert_eq!((v.title(), v.key.as_str()), (" Copy prompt ", "coordination-copy"));
+        let mut v = PromptView::revise(e, &lib[1]);
+        assert_eq!((v.title(), v.key.as_str()), (" Copy prompt ", "output-hygiene-copy"));
         assert!(v.notice.as_deref().unwrap().contains("saves a copy"));
-        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved("coordination-copy".into()));
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "output-hygiene-copy".into(), replaced: None });
         assert_eq!(saved.lock().unwrap()[0].2, None, "a copy replaces nothing");
+    }
+
+    #[test]
+    fn q_is_a_letter_and_altgr_types() {
+        let (env, ..) = fake(vec![Ok(draft("Short pull requests", &[]))], Vec::new());
+        let mut v = PromptView::new(env);
+        typed(&mut v, "q");
+        v.on_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL | KeyModifiers::ALT));
+        v.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert_eq!(v.idea.text(), "q@", "AltGr types, Ctrl alone doesn't");
+        v.on_key(key(KeyCode::Enter));
+        wait(&mut v);
+        assert_eq!(v.on_key(key(KeyCode::Char('q'))), Outcome::Stay, "q doesn't throw a draft away");
+        assert!(matches!(v.screen(), Screen::Review { .. }));
     }
 
     #[test]

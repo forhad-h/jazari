@@ -20,6 +20,10 @@ pub const DEFAULT_MODEL: &str = "fable";
 /// Tried when the configured alias is rejected, before the session default.
 const FALLBACK_MODEL: &str = "opus";
 
+/// Turns the run may take. Tools are off, but the structured reply comes back through a tool call,
+/// and Claude Code asks again when the model first answers in plain text.
+const MAX_TURNS: &str = "3";
+
 /// Set on the `claude` run, so `marsad hook` ignores its events.
 pub const MARKER_ENV: &str = "MARSAD_GENERATOR";
 
@@ -32,8 +36,11 @@ const WAIT: Duration = Duration::from_secs(10 * 60);
 const INSTRUCTIONS: &str = include_str!("../assets/PROMPT-GENERATOR.md");
 const OUTPUT_HYGIENE: &str = include_str!("../assets/OUTPUT-HYGIENE.md");
 
+/// The most questions a draft carries.
+pub const MAX_QUESTIONS: usize = 9;
+
 /// The shape the reply must take.
-pub const SCHEMA: &str = r#"{"type":"object","required":["key","title","summary","body","assumptions","questions"],"properties":{"key":{"type":"string","pattern":"^[a-z0-9][a-z0-9-]{1,40}$"},"title":{"type":"string"},"summary":{"type":"string","description":"one line, at most 80 characters"},"body":{"type":"string","description":"the whole file, starting with '# <title>'"},"assumptions":{"type":"array","items":{"type":"string"}},"questions":{"type":"array","items":{"type":"string"}}}}"#;
+pub const SCHEMA: &str = r#"{"type":"object","required":["key","title","summary","body","assumptions","questions"],"properties":{"key":{"type":"string","pattern":"^[a-z0-9][a-z0-9-]{1,40}$"},"title":{"type":"string"},"summary":{"type":"string","description":"one line, at most 80 characters"},"body":{"type":"string","description":"the whole file, starting with '# <title>'"},"assumptions":{"type":"array","items":{"type":"string"}},"questions":{"type":"array","maxItems":9,"items":{"type":"string"}}}}"#;
 
 /// A generated prompt and the decisions it leaves open.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -76,6 +83,8 @@ impl Draft {
         }
         self.assumptions.retain(|a| !a.trim().is_empty());
         self.questions.retain(|q| !q.trim().is_empty());
+        // One key answers each, 1 to 9.
+        self.questions.truncate(MAX_QUESTIONS);
         self
     }
 }
@@ -129,7 +138,7 @@ fn prompt_file(data: &Path) -> anyhow::Result<PathBuf> {
 /// The arguments for one run; without a model, Claude Code's default is used.
 pub fn args(model: Option<&str>, prompt_file: &Path) -> Vec<String> {
     let mut args: Vec<String> =
-        ["-p", "--safe-mode", "--no-session-persistence", "--tools", "", "--max-turns", "1"].map(String::from).to_vec();
+        ["-p", "--safe-mode", "--no-session-persistence", "--tools", "", "--max-turns", MAX_TURNS].map(String::from).to_vec();
     if let Some(model) = model.filter(|m| !m.trim().is_empty()) {
         args.extend(["--model".into(), model.trim().into()]);
     }
@@ -336,12 +345,12 @@ fn run_edit(args: EditArgs) -> anyhow::Result<()> {
     let rule = lib.iter().find(|r| r.key == args.key).ok_or_else(|| anyhow::anyhow!("no prompt named {:?}", args.key))?;
     anyhow::ensure!(
         rule.own,
-        "{} is built in and can't be edited; `marsad prompt copy {}` saves a copy you can edit",
+        "{} is built in and can't be edited{}",
         rule.key,
-        rule.key
+        if crate::rules::copy_problem(rule).is_none() { format!("; `marsad prompt copy {}` saves a copy you can edit", rule.key) } else { String::new() }
     );
     let Some(feedback) = args.with else {
-        let edited = crate::share_view::edit_in_editor(rule.body()).map_err(|e| anyhow::anyhow!(e))?;
+        let edited = crate::share_view::edit_in_editor(rule.body(), "prompt", ".md").map_err(|e| anyhow::anyhow!(e))?;
         if edited.trim() == rule.body().trim() {
             println!("No changes.");
             return Ok(());
@@ -359,6 +368,9 @@ fn run_edit(args: EditArgs) -> anyhow::Result<()> {
 fn run_copy(args: CopyArgs) -> anyhow::Result<()> {
     let lib = crate::rules::library();
     let rule = lib.iter().find(|r| r.key == args.key).ok_or_else(|| anyhow::anyhow!("no prompt named {:?}", args.key))?;
+    if let Some(why) = crate::rules::copy_problem(rule) {
+        anyhow::bail!(why);
+    }
     let key = args.new_key.unwrap_or_else(|| crate::rules::suggest_key(&lib, &format!("{}-copy", rule.key), &rule.title));
     let path = crate::rules::save_own(&key, rule.body(), None)?;
     println!("Saved a copy of {} as {key}: {}", rule.key, path.display());
@@ -403,7 +415,7 @@ fn finish(mut draft: Draft, mut key: String, replacing: Option<String>, mut req:
                 println!("Saved {}", path.display());
                 return Ok(());
             }
-            "e" | "E" => match crate::share_view::edit_in_editor(&draft.body) {
+            "e" | "E" => match crate::share_view::edit_in_editor(&draft.body, "prompt", ".md") {
                 Ok(text) if !text.trim().is_empty() => draft = Draft { body: text, ..draft }.normalized_keeping_key(),
                 Ok(_) => eprintln!("The edited prompt was empty, so it was not used."),
                 Err(why) => eprintln!("Couldn't edit the prompt: {why}"),
@@ -495,7 +507,7 @@ mod tests {
         for flag in ["--safe-mode", "--no-session-persistence"] {
             assert!(a.iter().any(|x| x == flag), "{flag} missing: {a:?}");
         }
-        assert!(has("--tools", "") && has("--max-turns", "1") && has("--model", "fable") && has("--effort", "high"));
+        assert!(has("--tools", "") && has("--max-turns", MAX_TURNS) && has("--model", "fable") && has("--effort", "high"));
         assert!(has("--output-format", "json") && has("--json-schema", SCHEMA));
         assert_eq!(a[a.len() - 2..], ["--append-system-prompt-file".to_string(), "/d/generator/abc.md".into()], "the only, so last, prompt file");
         assert!(!a.iter().any(|x| x == "--bare"), "--bare needs an API key");
@@ -544,6 +556,10 @@ mod tests {
         assert_eq!((d.key.as_str(), d.title.as_str()), ("short-pull-requests", "Short pull requests"));
         assert_eq!(d.summary, "Keeps pull request descriptions short and to the point.");
         assert_eq!(d.questions, ["Should commit messages follow the same limit?"], "blank questions are dropped");
+        let many = Draft { body: "# T\n\nx".into(), questions: (1..=12).map(|n| format!("q{n}")).collect(), ..Draft::default() }.normalized();
+        assert_eq!(many.questions.len(), MAX_QUESTIONS, "a key answers each");
+        let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+        assert_eq!(schema["properties"]["questions"]["maxItems"], MAX_QUESTIONS);
         assert_eq!(d.assumptions.len(), 1);
     }
 

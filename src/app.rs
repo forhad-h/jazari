@@ -201,10 +201,11 @@ impl RulesPicker {
         }
     }
 
-    /// Re-reads the library, keeping the ticks, and ticks and highlights `select` when given.
-    fn reload(&mut self, library: Vec<crate::rules::Rule>, select: Option<&str>) {
+    /// Re-reads the library, keeping the ticks, and highlights `select` when given, ticking it
+    /// when `tick`.
+    fn reload(&mut self, library: Vec<crate::rules::Rule>, select: Option<&str>, tick: bool) {
         let keep: Vec<String> = self.chosen().iter().map(|r| r.key.clone()).collect();
-        self.ticked = library.iter().map(|r| keep.contains(&r.key) || Some(r.key.as_str()) == select).collect();
+        self.ticked = library.iter().map(|r| keep.contains(&r.key) || (tick && Some(r.key.as_str()) == select)).collect();
         self.cursor = select.and_then(|k| library.iter().position(|r| r.key == k)).unwrap_or(self.cursor).min(library.len().saturating_sub(1));
         self.library = library;
     }
@@ -565,12 +566,15 @@ impl App {
             Outcome::Stay => {}
             Outcome::Close => self.prompt_view = None,
             Outcome::Edit(text) => return Action::EditPrompt(text),
-            Outcome::Saved(key) => {
+            Outcome::Saved { key, replaced } => {
                 self.prompt_view = None;
                 match self.rules_picker.as_mut() {
                     Some(picker) => {
-                        picker.reload(crate::rules::library(), Some(&key));
-                        self.info = Some(format!("saved {key} to your prompts and ticked it "));
+                        // A new prompt or a copy is ticked; an edit or rename keeps the tick it had.
+                        let tick = replaced.is_none_or(|old| picker.chosen().iter().any(|r| r.key == old));
+                        picker.reload(crate::rules::library(), Some(&key), tick);
+                        let ticked = if tick { " and ticked it" } else { "" };
+                        self.info = Some(format!("saved {key} to your prompts{ticked} "));
                     }
                     None => self.info = Some(format!("saved {key} to your prompts · c to start a session with it ")),
                 }
@@ -589,7 +593,7 @@ impl App {
         let key = picker.library[i].key.clone();
         match crate::rules::remove_own(&key) {
             Ok(_) => {
-                picker.reload(crate::rules::library(), None);
+                picker.reload(crate::rules::library(), None, false);
                 self.info = Some(format!("deleted {key} "));
             }
             Err(e) => self.error = Some(format!("{e:#} ")),
@@ -633,8 +637,10 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q' | 'c') => self.rules_picker = None,
             KeyCode::Char('n') => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real())),
             KeyCode::Char('e') => {
-                if let Some(rule) = highlighted {
-                    self.prompt_view = Some(crate::prompt_view::PromptView::revise(crate::prompt_view::Env::real(), rule));
+                match highlighted.map(|rule| (rule, crate::rules::copy_problem(rule))) {
+                    Some((_, Some(why))) => self.error = Some(format!("{why} ")),
+                    Some((rule, None)) => self.prompt_view = Some(crate::prompt_view::PromptView::revise(crate::prompt_view::Env::real(), rule)),
+                    None => {}
                 }
             }
             KeyCode::Char('d') => match highlighted {
@@ -976,10 +982,10 @@ fn init_terminal() -> std::io::Result<Tui> {
 
 /// Hands the terminal to the user's editor for `text`, then takes it back: a fresh terminal and what
 /// was saved.
-fn edit_suspended(text: &str) -> std::io::Result<(Tui, Result<String, String>)> {
+fn edit_suspended(text: &str, kind: &str, ext: &str) -> std::io::Result<(Tui, Result<String, String>)> {
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
-    let edited = crate::share_view::edit_in_editor(text);
+    let edited = crate::share_view::edit_in_editor(text, kind, ext);
     let terminal = init_terminal()?;
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     Ok((terminal, edited))
@@ -1010,14 +1016,14 @@ pub fn run() -> anyhow::Result<()> {
                         Action::Quit => return Ok(()),
                         Action::EditPost(text) => {
                             let edited;
-                            (terminal, edited) = edit_suspended(&text)?;
+                            (terminal, edited) = edit_suspended(&text, "post", ".txt")?;
                             if let Some(share) = app.share.as_mut() {
                                 share.edited_post(edited);
                             }
                         }
                         Action::EditPrompt(text) => {
                             let edited;
-                            (terminal, edited) = edit_suspended(&text)?;
+                            (terminal, edited) = edit_suspended(&text, "prompt", ".md")?;
                             if let Some(view) = app.prompt_view.as_mut() {
                                 view.edited(edited);
                             }
