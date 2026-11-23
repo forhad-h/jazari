@@ -5,6 +5,14 @@ GitHub release. Keep each bullet to one short line.
 
 ## Unreleased
 
+- Every action marsad takes (messages, stops, interrupts, cleanups, settings, updates) goes through one gate
+- `marsad actions` lists what marsad did, refused or held, and who asked
+- `marsad pause [--for 2h]` / `marsad resume` hold everything marsad does on its own
+- A session gets a permission prompt before a marsad command that stops sessions, removes items or changes a guard
+- A message from another session is marked as not from you
+- The same interrupt can't fire twice within 30 seconds
+- `marsad disk --guard off` also stops the watcher's emergency interrupts
+- `MARSAD_DRY_RUN=1` shows what any action would do without doing it
 - The panel below the session list splits in two: the session's id and model, and a System panel
 - Disk, memory and CPU meters move from the header into the System panel
 - The selected session's context shows in the header beside the 5h and 7d limits

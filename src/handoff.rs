@@ -48,9 +48,7 @@ enum HandoffCmd {
     #[command(hide = true)]
     Close {
         #[arg(long)]
-        pid: u32,
-        #[arg(long)]
-        since: f64,
+        session: String,
         #[arg(long)]
         tmux_pane: Option<String>,
     },
@@ -84,9 +82,10 @@ pub fn run(a: HandoffArgs) -> anyhow::Result<()> {
     match a.cmd {
         Some(HandoffCmd::Resume { id }) => return resume(&id),
         Some(HandoffCmd::List) => return list(),
-        Some(HandoffCmd::Close { pid, since, tmux_pane }) => {
-            close(pid, since, tmux_pane.as_deref());
-            return Ok(());
+        Some(HandoffCmd::Close { session, tmux_pane }) => {
+            std::thread::sleep(CLOSE_DELAY);
+            let a = crate::act::Action::new(crate::act::Kind::EndSession, session.as_str()).detail("after a handoff").on_its_own(true);
+            return crate::act::run(&a, || close(&session, tmux_pane.as_deref()));
         }
         None => {}
     }
@@ -148,13 +147,17 @@ pub fn run(a: HandoffArgs) -> anyhow::Result<()> {
         println!("Kept this session running: marsad couldn't tell which session this is.");
         return Ok(());
     };
-    let Some(pid) = s.pid else {
+    if s.pid.is_none() {
         println!("Kept this session running: its process isn't known yet.");
         return Ok(());
-    };
-    let since = s.run_started.max(s.started);
+    }
+    // From inside a session, only that session can be ended this way.
+    if let Some(me) = crate::act::origin().session().filter(|me| *me != s.id) {
+        println!("Kept {} running: session {} can only end itself after a handoff.", s.project(), &me[..me.len().min(8)]);
+        return Ok(());
+    }
     let mut cmd = std::process::Command::new(&exe);
-    cmd.args(["handoff", "close", "--pid", &pid.to_string(), "--since", &since.to_string()]);
+    cmd.args(["handoff", "close", "--session", &s.id]);
     if env.tmux
         && let Some(pane) = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())
     {
@@ -275,11 +278,16 @@ fn resume(id: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Waits for the old session to finish its tool call, then ends it: the tmux pane when it runs in
-/// tmux, otherwise its Claude Code process.
-fn close(pid: u32, since: f64, tmux_pane: Option<&str>) {
-    std::thread::sleep(CLOSE_DELAY);
-    if let Some(pane) = tmux_pane {
+/// Ends the old session once it has finished its tool call: the tmux pane when it runs in tmux and
+/// the pane holds its Claude Code process, otherwise that process. The process and its start are
+/// read from marsad's own records now, not from arguments.
+fn close(session: &str, tmux_pane: Option<&str>) -> anyhow::Result<()> {
+    let sessions = crate::live::load_sessions(false);
+    let s = sessions.get(session).ok_or_else(|| anyhow::anyhow!("the session has already ended"))?;
+    let pid = s.pid.ok_or_else(|| anyhow::anyhow!("its process isn't known"))?;
+    if let Some(pane) = tmux_pane.filter(|p| valid_pane(p))
+        && pane_holds(pane, pid)
+    {
         let ok = std::process::Command::new("tmux")
             .args(["kill-pane", "-t", pane])
             .stdout(std::process::Stdio::null())
@@ -287,10 +295,35 @@ fn close(pid: u32, since: f64, tmux_pane: Option<&str>) {
             .status()
             .is_ok_and(|s| s.success());
         if ok {
-            return;
+            return Ok(());
         }
     }
-    crate::watch::end_session(pid, since);
+    anyhow::ensure!(crate::watch::end_session(pid, s.run_started.max(s.started)), "its Claude Code process has changed or ended");
+    Ok(())
+}
+
+/// A tmux pane id, such as `%12`.
+fn valid_pane(p: &str) -> bool {
+    p.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether the pane's shell is `pid` or one of its ancestors.
+fn pane_holds(pane: &str, pid: u32) -> bool {
+    let Ok(out) = std::process::Command::new("tmux").args(["display-message", "-p", "-t", pane, "#{pane_pid}"]).stderr(std::process::Stdio::null()).output() else { return false };
+    let Some(shell) = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok() else { return false };
+    let mut sys = sysinfo::System::new();
+    let mut at = sysinfo::Pid::from_u32(pid);
+    for _ in 0..12 {
+        if at.as_u32() == shell {
+            return true;
+        }
+        sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[at]), true, sysinfo::ProcessRefreshKind::nothing());
+        match sys.process(at).and_then(|p| p.parent()) {
+            Some(parent) => at = parent,
+            None => return false,
+        }
+    }
+    false
 }
 
 /// The note the context hook adds once a session passes the warning threshold.
@@ -314,6 +347,14 @@ pub fn context_note(pct: f64, exe: &str, close: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_plain_tmux_pane_id_is_closed() {
+        assert!(valid_pane("%12") && valid_pane("%0"));
+        for p in ["%", "12", "%1;kill-server", "-t %1", "%1 "] {
+            assert!(!valid_pane(p), "{p}");
+        }
+    }
     use chrono::TimeZone;
 
     fn temp(name: &str) -> PathBuf {

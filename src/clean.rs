@@ -769,11 +769,20 @@ pub fn run_item(item: &Item, env: &Env, measure: &dyn Fn() -> Option<u64>) -> Ou
     }
 }
 
-/// Runs one item and records it in the usage history when it ran.
+/// Runs one item through marsad's action gate and records it in the usage history when it ran.
 pub fn run_and_record(item: &Item, env: &Env, auto: bool) -> Outcome {
+    let action = crate::act::Action::new(crate::act::Kind::Clean, item.id.as_str()).detail(item.what.as_str()).on_its_own(auto);
+    if let Err(why) = crate::act::check(&action) {
+        return Outcome::Kept(why);
+    }
     let home = env.home.clone();
     let measure = move || crate::disk::measure(&home).map(|r| r.available);
     let outcome = run_item(item, env, &measure);
+    match &outcome {
+        Outcome::Done { freed } => crate::act::record(&action, "done", &format!("freed {}", fmt_bytes(*freed))),
+        Outcome::Kept(why) => crate::act::record(&action, "kept", why),
+        Outcome::Failed(e) => crate::act::record(&action, "failed", e),
+    }
     if let Outcome::Done { freed } = &outcome
         && let Ok(conn) = crate::store::open()
     {
@@ -821,7 +830,7 @@ fn stamp_path() -> PathBuf {
 /// level (critical without auto-clean) and none ran in the last half hour. One stat when not due.
 pub fn maybe_start(level: crate::disk::Level) {
     use crate::disk::Level;
-    if level < Level::Warning || (level < Level::Critical && !auto_enabled()) {
+    if level < Level::Warning || (level < Level::Critical && !auto_enabled()) || crate::act::paused() {
         return;
     }
     let stamp = stamp_path();
@@ -834,6 +843,28 @@ pub fn maybe_start(level: crate::disk::Level) {
     }
 }
 
+/// Held while a cleanup runs, so two never remove things at once; released when dropped.
+pub struct CleanLock(PathBuf);
+
+impl CleanLock {
+    pub fn take() -> Option<Self> {
+        let lock = crate::claude_data_dir().join("clean.lock");
+        // A lock older than an hour was left by a cleanup that died.
+        if std::fs::metadata(&lock).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > Duration::from_secs(3600)) {
+            let _ = std::fs::remove_file(&lock);
+        }
+        std::fs::create_dir_all(crate::claude_data_dir()).ok()?;
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&lock).ok()?;
+        Some(CleanLock(lock))
+    }
+}
+
+impl Drop for CleanLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// `marsad clean --auto`: tier A only, then one notification saying what was freed.
 fn auto() -> anyhow::Result<()> {
     let cfg = crate::disk::Config::load();
@@ -842,19 +873,15 @@ fn auto() -> anyhow::Result<()> {
     if level < crate::disk::Level::Warning || (level < crate::disk::Level::Critical && !auto_enabled()) {
         return Ok(());
     }
-    let lock = crate::claude_data_dir().join("clean.lock");
-    // A lock older than an hour was left by a cleanup that died.
-    if std::fs::metadata(&lock).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > Duration::from_secs(3600)) {
-        let _ = std::fs::remove_file(&lock);
-    }
-    if std::fs::OpenOptions::new().write(true).create_new(true).open(&lock).is_err() {
+    if crate::act::paused() {
         return Ok(());
     }
+    let Some(lock) = CleanLock::take() else { return Ok(()) };
     let env = Env::real();
     let items = plan(&env);
     let tier_a: Vec<&Item> = items.iter().filter(|i| i.tier == Tier::A).collect();
     let results = run_all(&tier_a, &env, true);
-    let _ = std::fs::remove_file(&lock);
+    drop(lock);
     let done: Vec<String> = results
         .iter()
         .filter(|(_, _, o)| matches!(o, Outcome::Done { .. }))
@@ -1131,6 +1158,7 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
             }
         }
         chosen.retain(|i| matches!(i.tier, Tier::A | Tier::B));
+        let Some(_lock) = CleanLock::take() else { anyhow::bail!("another cleanup is running; try again when it finishes") };
         for (what, bytes, outcome) in run_all(&chosen, &env, false) {
             match outcome {
                 Outcome::Done { freed } => println!("removed  {what} ({}, disk gained {})", fmt_bytes(bytes), fmt_bytes(freed)),

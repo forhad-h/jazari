@@ -44,6 +44,8 @@ marsad install --no-statusline   # hooks only; context size is then estimated fr
 marsad             # open the dashboard
 marsad uninstall   # removes only marsad's hooks, skill and generated prompt files (your own prompts stay)
 marsad update      # install the latest version (shows current → latest and what's new)
+marsad pause --for 2h   # hold what marsad does on its own; `marsad resume` turns it back on
+marsad actions     # what marsad did, refused or held, and who asked
 ```
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
@@ -371,6 +373,39 @@ a script that fetches its payload later, or a command split across several tool 
 them, and a refused command can be reached another way. Claude Code's `/sandbox`, which limits what
 commands can read, write and reach on the network, is the stronger layer; this check sits in front
 of it, not in place of it.
+
+### Safety net for marsad's own actions
+
+marsad changes things outside its own reports: it messages, stops, interrupts and ends sessions,
+removes caches, changes settings and updates itself. Every one of those goes through one gate:
+
+- **Who asked** is recorded with each action: you in the dashboard or a terminal, a Claude Code
+  session (by its id), the background watcher, or a hook. A message one session sends another
+  reaches it marked as not from you, so Claude weighs it instead of following it.
+- **A session asks you first.** Before a session runs a marsad command that stops, interrupts or
+  ends a session, removes cleanup items with `--run`, changes a guard or setting, pauses marsad,
+  updates or installs it, the hook shows Claude Code's permission prompt with the reason. Edits to
+  marsad's data folder by a session ask too. Reading status, `say`, `tell` with a message, a
+  handoff of its own session and `marsad clean --tier-a` run without asking.
+- **No double fire.** The same interrupt can't hit a session twice within 30 seconds (a second
+  Ctrl-C quits Claude Code), nor the same end-session within a minute, even from two dashboards.
+- **Checked at the last moment.** Before an interrupt or end, the process must still be Claude
+  Code and older than the session's run; `node` counts only when it runs Claude Code. Ending a
+  session after a handoff reads its process from marsad's records, never from arguments, and
+  closes a tmux pane only when the pane holds that session. A session can only end itself.
+- **Limits on messages.** Control characters are dropped, a message is cut at 2,000 characters,
+  and no more than 20 wait for one session.
+- **One cleanup at a time.** Cleanups from the dashboard, the command line and the automatic one
+  share a lock.
+- **`marsad pause`** (`--for 30m`, `2h`, `1d`) holds everything marsad does on its own:
+  interrupting sessions at the disk emergency, ending a session after a handoff, automatic
+  cleanups and automatic updates. Warnings, the command check and what you ask for still work.
+- **`MARSAD_DRY_RUN=1`** makes every action report what it would do and do nothing.
+- **`marsad actions`** (`-n 50`, `--format json`) lists what marsad did, refused, held or
+  dry-ran, with who asked and why, from `actions.jsonl` in marsad's data folder.
+
+`marsad disk --guard off` now also stops the background watcher from interrupting sessions at the
+emergency level, as it says; it only warns.
 
 ### Session history
 
