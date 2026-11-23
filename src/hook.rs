@@ -42,8 +42,13 @@ pub fn run() -> anyhow::Result<()> {
     // Record a finished session in the usage history right away, so it is kept even if
     // the dashboard isn't opened before Claude Code deletes the transcript. Detached, so
     // the hook returns at once and the sync survives Claude Code exiting.
-    if raw.get("hook_event_name").and_then(Value::as_str) == Some("SessionEnd") {
-        let _ = detached(std::process::Command::new(std::env::current_exe()?).arg("sync")).spawn();
+    match raw.get("hook_event_name").and_then(Value::as_str) {
+        Some("SessionEnd") => {
+            let _ = detached(std::process::Command::new(std::env::current_exe()?).arg("sync")).spawn();
+        }
+        // The disk watcher runs while any session does.
+        Some("SessionStart") => crate::watch::ensure_running(),
+        _ => {}
     }
     Ok(())
 }

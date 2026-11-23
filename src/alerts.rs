@@ -90,6 +90,11 @@ pub(crate) fn detached(cmd: &str, args: &[&str]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The sound for something that needs the user now.
+pub(crate) fn attention_sound() {
+    play(Sound::Attention);
+}
+
 /// The platform's own sound, or the terminal bell when there is none.
 fn play(sound: Sound) {
     if !play_system(sound) {

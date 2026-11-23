@@ -32,6 +32,7 @@ mod transcript;
 mod ui;
 mod update;
 mod usage;
+mod watch;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -104,7 +105,8 @@ enum Cmd {
     Clean(clean::CleanArgs),
     /// Disk, memory, swap and CPU in one reading, with what to be careful about before heavy work.
     System(system::SystemArgs),
-    /// Synchronous hook that checks the disk before each tool call and prompt.
+    /// Background disk watcher (started by the SessionStart hook), or with --hook the synchronous
+    /// hook that checks the disk before each tool call and prompt.
     #[command(hide = true)]
     Guard {
         /// Hook entrypoint called by Claude Code on PreToolUse and UserPromptSubmit.
@@ -199,8 +201,11 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::System(args)) => system::run(args),
         Some(Cmd::Clean(args)) => clean::run(args),
         Some(Cmd::Guard { hook }) => {
+            if !hook {
+                return watch::run();
+            }
             // Never fail or print anything but the verdict: a hook must not disturb the session.
-            if hook && let Some(out) = disk::hook() {
+            if let Some(out) = disk::hook() {
                 println!("{out}");
             }
             Ok(())

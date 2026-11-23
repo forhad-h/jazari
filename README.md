@@ -127,7 +127,7 @@ and counts only space a process can write (not APFS purgeable space).
 | notice | 80% full or under 30 GB free | shown in the meters |
 | warning | 90% or 15 GB | Claude is told once to finish the step, start no large builds, pulls or installs, and write a handoff |
 | critical | 95% or 8 GB | the next tool call is refused and the session stops, with its state saved; `claude --resume <id>` continues it once space is freed |
-| emergency | 98% or 3 GB | shown in the meters |
+| emergency | 98% or 3 GB | the watcher deletes its ballast and interrupts running sessions (SIGINT) |
 
 Each level fires at the percent or the free space, whichever comes first, so large disks aren't
 left with 100 GB "full". A warning comes back only after usage drops 2 points below the level. A
@@ -148,6 +148,34 @@ marsad system --format json  # `ok` and `concerns` for a session deciding whethe
 
 The dashboard's second header row shows the same disk, memory (with swap) and CPU meters, colored
 by how close each is to trouble.
+
+#### The background watcher
+
+The first session's `SessionStart` hook starts `marsad guard`, a small background process that
+checks the same volumes every 20 seconds, so a disk filled between tool calls (a build, an image
+pull) is caught too, with or without the dashboard. Only one runs at a time (`~/.marsad/claude/guard.pid`),
+and it exits once no session has run for 10 minutes. It needs no launchd or systemd unit.
+
+- **Desktop notification and sound** once per crossing of notice, warning, critical and emergency.
+- **Cleanup** of rebuildable data from the warning level, as `marsad clean` describes.
+- **Emergency stop**: at the emergency level it sends SIGINT (never a kill) to each running
+  session's Claude Code process, once per crossing, after checking the process is still Claude
+  Code. The dashboard marks the session `halted`; `claude --resume <id>` continues it. On Windows
+  it only notifies.
+- **Ballast** (off by default): `disk.ballast_gb` keeps a file of that size at `~/.marsad/ballast`,
+  written only while the disk stays under the warning level with it in place. At the emergency
+  level it is deleted first, so stopping sessions and cleaning up have room, and written again
+  once usage is back under warning.
+- **Phone notification** (off by default): from the warning level, once per crossing, to an
+  [ntfy](https://ntfy.sh) topic (`disk.ntfy`, the full topic URL) and/or a webhook (`disk.webhook`,
+  which gets a JSON POST of `level`, `used_pct`, `free_gb` and `text`). It is sent with `curl`
+  and carries only the level, percent full and GB free: no project names or paths.
+
+```json
+{ "disk": { "ballast_gb": 5, "ntfy": "https://ntfy.sh/<your-topic>", "webhook": "https://example.com/hook" } }
+```
+
+`marsad disk` shows whether the watcher is running, the ballast and which phone notifications are set.
 
 ### Session history
 

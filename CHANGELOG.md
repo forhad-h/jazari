@@ -12,6 +12,11 @@ GitHub release. Keep each bullet to one short line.
 - The dashboard has disk, memory and CPU meters under the header
 - All-time tokens read in B once past a billion
 - A session stopped for disk space shows why, with its resume command
+- A background watcher checks the disk every 20 s while sessions run and notifies once per level
+- At the emergency level (98% or 3 GB free) running sessions are interrupted
+- Optional ballast file (`disk.ballast_gb`) that is deleted at the emergency level to free space
+- Optional phone notifications through ntfy or a webhook (`disk.ntfy`, `disk.webhook`)
+- `marsad disk` shows the watcher, the ballast and phone notifications
 
 ## 0.12.0 - 2026-11-23
 
