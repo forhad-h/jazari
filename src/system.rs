@@ -24,6 +24,11 @@ pub struct Snapshot {
     /// 1, 5 and 15 minute load averages (all 0 where the platform has none).
     pub load: [f64; 3],
     pub cores: usize,
+    /// marsad's own process: CPU (percent of one core) and resident memory in bytes.
+    pub own_cpu: Option<f32>,
+    pub own_mem: u64,
+    /// Size of marsad's data folder on disk, re-measured every minute.
+    pub own_data: Option<u64>,
 }
 
 impl Snapshot {
@@ -60,20 +65,36 @@ impl Snapshot {
 pub struct Sampler {
     sys: System,
     primed: bool,
+    data: Option<(std::time::Instant, u64)>,
 }
 
 impl Default for Sampler {
     fn default() -> Self {
-        Sampler { sys: System::new(), primed: false }
+        Sampler { sys: System::new(), primed: false, data: None }
     }
 }
+
+/// How often the data folder's size is walked again.
+const DATA_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Sampler {
     pub fn sample<'a>(&mut self, paths: impl IntoIterator<Item = &'a Path>, t: &crate::disk::Thresholds) -> Snapshot {
         self.sys.refresh_memory_specifics(MemoryRefreshKind::everything());
         self.sys.refresh_cpu_usage();
         let cpu = self.primed.then(|| self.sys.global_cpu_usage());
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        self.sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_cpu().with_memory(),
+        );
+        let own = self.sys.process(pid);
+        let own_cpu = own.filter(|_| self.primed).map(|p| p.cpu_usage());
+        let own_mem = own.map_or(0, |p| p.memory());
         self.primed = true;
+        if self.data.is_none_or(|(at, _)| at.elapsed() >= DATA_EVERY) {
+            self.data = Some((std::time::Instant::now(), crate::clean::dir_size(&crate::data_dir())));
+        }
         let load = System::load_average();
         Snapshot {
             disk: crate::disk::worst(paths, t, crate::disk::measure),
@@ -84,6 +105,9 @@ impl Sampler {
             cpu_pct: cpu,
             load: [load.one, load.five, load.fifteen],
             cores: self.sys.cpus().len().max(std::thread::available_parallelism().map_or(0, |n| n.get())),
+            own_cpu,
+            own_mem,
+            own_data: self.data.map(|(_, n)| n),
         }
     }
 }
@@ -139,6 +163,7 @@ pub fn run(a: SystemArgs) -> anyhow::Result<()> {
                     "swap_used_gib": round(snap.swap_used as f64 / GIB),
                     "swap_total_gib": round(snap.swap_total as f64 / GIB),
                 },
+                "marsad_data_bytes": snap.own_data,
                 "cpu": {
                     "used_pct": snap.cpu_pct.map(|c| round(c as f64)),
                     "load": snap.load.map(round),
@@ -173,6 +198,9 @@ pub fn run(a: SystemArgs) -> anyhow::Result<()> {
                 snap.load[2],
                 snap.cores
             );
+            if let Some(n) = snap.own_data {
+                println!("marsad  data folder {}", crate::clean::fmt_bytes(n));
+            }
             if concerns.is_empty() {
                 println!("OK: room for heavy work.");
             } else {
@@ -197,7 +225,7 @@ mod tests {
     fn a_roomy_machine_has_no_concerns() {
         let t = crate::disk::Thresholds::default();
         let mut s = snap();
-        s.disk = Some((Level::Ok, Reading { path: "/x".into(), total: 228_000_000_000, available: 105_000_000_000 }));
+        s.disk = Some((Level::Ok, Reading { system: true, path: "/x".into(), total: 228_000_000_000, available: 105_000_000_000 }));
         assert!(s.concerns(&t).is_empty());
     }
 
@@ -205,7 +233,7 @@ mod tests {
     fn concerns_name_the_disk_memory_swap_and_load() {
         let t = crate::disk::Thresholds::default();
         let mut s = snap();
-        let r = Reading { path: "/x".into(), total: 228_000_000_000, available: 10_000_000_000 };
+        let r = Reading { system: true, path: "/x".into(), total: 228_000_000_000, available: 10_000_000_000 };
         s.disk = Some((t.level(&r), r));
         s.mem_available = GIB as u64;
         s.swap_used = 10 * GIB as u64;

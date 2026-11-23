@@ -29,15 +29,30 @@ Live data is not in the usage database; use `marsad status` for it.
 
 ```sh
 marsad system --format json        # ok, concerns, disk (used_pct, free_gb, level), memory (used_pct, available_gib, swap_used_gib), cpu (used_pct, load, cores)
-marsad disk --format json          # every volume in use, the levels, and whether the guard is on
+marsad disk --format json          # every volume in use, the levels, the guard, the watcher, ballast and phone notifications
 ```
+
+To free space, `marsad clean --format json` lists items by tier (`A` rebuilt automatically, `B`
+slow to get back, `C` holds data) with `id`, `bytes` and Claude's advice. Run tier A with
+`marsad clean --tier-a`. Run tier B items (`marsad clean --run <id>`) only after the user agrees.
+Tier C can't be removed from the command line: point the user to `D` in the dashboard. Never
+delete these things yourself with `rm`, `docker volume rm` or similar; marsad rechecks every target
+before removing it.
 
 Before a large build, a Docker build or image pull, a package install, or a long unattended run,
 check `marsad system`. If `ok` is false, tell the user the `concerns`, and prefer smaller steps or
 waiting over starting the heavy work. A full disk hangs the machine. At the disk `warning` level
 marsad adds a note telling you to finish the current step and write a handoff: do that. At
 `critical` marsad refuses tool calls and stops the session until space is freed. Don't try to get
-around it. Never change the guard (`marsad disk --guard off`) or the thresholds unless the user asks.
+around it. At `emergency` marsad interrupts running sessions. Never change the guard (`marsad disk --guard off`) or the thresholds unless the user asks.
+
+marsad also checks each tool call for risky shapes. It asks the user first about piping downloads
+into a shell, decoding and running hidden data, persistence (LaunchAgents, crontab, shell startup
+files, `authorized_keys`), weakening security, remote shells and look-alike package names, and it
+refuses deleting the home folder or root, wiping disks and sending secrets out. When marsad refuses a
+call, don't retry it or look for another way to do the same thing: tell the user what you were
+trying to do. `marsad risk --check '<command>'` shows what the check decides without running the
+command. Never turn the check off (`marsad risk --guard off`) unless the user asks.
 
 ## This session's context and handoffs
 

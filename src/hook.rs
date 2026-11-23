@@ -42,10 +42,28 @@ pub fn run() -> anyhow::Result<()> {
     // Record a finished session in the usage history right away, so it is kept even if
     // the dashboard isn't opened before Claude Code deletes the transcript. Detached, so
     // the hook returns at once and the sync survives Claude Code exiting.
-    if raw.get("hook_event_name").and_then(Value::as_str) == Some("SessionEnd") {
-        let _ = detached(std::process::Command::new(std::env::current_exe()?).arg("sync")).spawn();
+    match raw.get("hook_event_name").and_then(Value::as_str) {
+        Some("SessionEnd") => {
+            let _ = detached(std::process::Command::new(std::env::current_exe()?).arg("sync")).spawn();
+            after_task(&raw);
+        }
+        Some("Stop") => after_task(&raw),
+        // The disk watcher runs while any session does.
+        Some("SessionStart") => crate::watch::ensure_running(),
+        _ => {}
     }
     Ok(())
+}
+
+/// When a turn or session ends, the work it did may have filled the disk: start the automatic
+/// cleanup if the disk is at the warning level (rate-limited inside `maybe_start`).
+fn after_task(raw: &Value) {
+    let cfg = crate::disk::Config::load();
+    let home = dirs::home_dir();
+    let cwd = raw.get("cwd").and_then(Value::as_str).map(std::path::Path::new);
+    if let Some((level, _)) = crate::disk::worst(cwd.into_iter().chain(home.as_deref()), &cfg.thresholds, crate::disk::measure) {
+        crate::clean::maybe_start(level);
+    }
 }
 
 /// Appends one event line to the log in `dir`, rotating it once it is too big.
@@ -62,7 +80,7 @@ pub(crate) fn append(dir: &std::path::Path, line: &[u8]) -> anyhow::Result<()> {
 
 /// No stdio and its own process group, so Claude Code cleaning up its hooks on exit
 /// doesn't take the child with it (and on Windows, no console window).
-fn detached(cmd: &mut std::process::Command) -> &mut std::process::Command {
+pub(crate) fn detached(cmd: &mut std::process::Command) -> &mut std::process::Command {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(cmd, 0);

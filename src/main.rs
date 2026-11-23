@@ -4,6 +4,9 @@ mod badge_art;
 mod badges;
 mod board;
 mod card;
+mod clean;
+mod clean_judge;
+mod clean_view;
 mod clipboard;
 mod context;
 mod disk;
@@ -18,6 +21,7 @@ mod portable;
 mod prompt_gen;
 mod prompt_view;
 mod report;
+mod risk;
 mod rules;
 mod settings;
 mod share;
@@ -31,6 +35,7 @@ mod transcript;
 mod ui;
 mod update;
 mod usage;
+mod watch;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -99,9 +104,14 @@ enum Cmd {
     Coordination(rules::CoordinationArgs),
     /// Free disk space and the levels at which sessions are warned and stopped (--guard on/off).
     Disk(disk::DiskArgs),
+    /// Find caches, build output and Docker data that can be rebuilt, and remove them safely.
+    Clean(clean::CleanArgs),
     /// Disk, memory, swap and CPU in one reading, with what to be careful about before heavy work.
     System(system::SystemArgs),
-    /// Synchronous hook that checks the disk before each tool call and prompt.
+    /// Ask about or refuse risky tool calls: check a command (--check), turn it on/off, list findings.
+    Risk(risk::RiskArgs),
+    /// Background disk watcher (started by the SessionStart hook), or with --hook the synchronous
+    /// hook that checks the disk and risky commands before each tool call and prompt.
     #[command(hide = true)]
     Guard {
         /// Hook entrypoint called by Claude Code on PreToolUse and UserPromptSubmit.
@@ -150,7 +160,11 @@ fn main() -> anyhow::Result<()> {
     let cmd = Cli::parse().cmd;
     // Before anything reads or writes data. The hooks and the status line must stay quiet.
     let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_) | Cmd::Guard { .. }));
-    match migrate::from_legacy(if quiet { migrate::HOOK_WAIT } else { migrate::WAIT }, !quiet) {
+    // Claude Code waits on the guard hook before every tool call: it never copies data, which can
+    // take longer than the hook may. Any other marsad run does that.
+    let sync_hook = matches!(cmd, Some(Cmd::Guard { hook: true }));
+    let outcome = if sync_hook { migrate::Outcome::Idle } else { migrate::from_legacy(if quiet { migrate::HOOK_WAIT } else { migrate::WAIT }, !quiet) };
+    match outcome {
         migrate::Outcome::Busy if !quiet => {
             anyhow::bail!("marsad's data is being copied to {} by another marsad; try again in a moment", data_dir().display())
         }
@@ -194,9 +208,16 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
         Some(Cmd::Disk(args)) => disk::run(args),
         Some(Cmd::System(args)) => system::run(args),
+        Some(Cmd::Clean(args)) => clean::run(args),
+        Some(Cmd::Risk(args)) => risk::run(args),
         Some(Cmd::Guard { hook }) => {
-            // Never fail or print anything but the verdict: a hook must not disturb the session.
-            if hook && let Some(out) = disk::hook() {
+            if !hook {
+                return watch::run();
+            }
+            // Never fail or print anything but the verdict: a hook must not disturb the session, so
+            // even a panic prints nothing and exits 0.
+            std::panic::set_hook(Box::new(|_| {}));
+            if let Ok(Some(out)) = std::panic::catch_unwind(disk::hook) {
                 println!("{out}");
             }
             Ok(())

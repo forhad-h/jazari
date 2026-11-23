@@ -48,7 +48,7 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `p` badges and share to LinkedIn · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 
@@ -127,7 +127,7 @@ and counts only space a process can write (not APFS purgeable space).
 | notice | 80% full or under 30 GB free | shown in the meters |
 | warning | 90% or 15 GB | Claude is told once to finish the step, start no large builds, pulls or installs, and write a handoff |
 | critical | 95% or 8 GB | the next tool call is refused and the session stops, with its state saved; `claude --resume <id>` continues it once space is freed |
-| emergency | 98% or 3 GB | shown in the meters |
+| emergency | 98% or 3 GB | the watcher deletes its ballast and interrupts running sessions (SIGINT) |
 
 Each level fires at the percent or the free space, whichever comes first, so large disks aren't
 left with 100 GB "full". A warning comes back only after usage drops 2 points below the level. A
@@ -148,6 +148,147 @@ marsad system --format json  # `ok` and `concerns` for a session deciding whethe
 
 The dashboard's second header row shows the same disk, memory (with swap) and CPU meters, colored
 by how close each is to trouble.
+
+### Background disk watcher
+
+The first session's `SessionStart` hook starts `marsad guard`, a small background process that
+checks the same volumes every 20 seconds, so a disk filled between tool calls (a build, an image
+pull) is caught too, with or without the dashboard. Only one runs at a time (`~/.marsad/claude/guard.pid`),
+and it exits once no session has run for 10 minutes. It needs no launchd or systemd unit.
+
+- **Desktop notification and sound** once per crossing of notice, warning, critical and emergency.
+- **Cleanup** of rebuildable data from the warning level (see [Disk cleanup](#disk-cleanup)).
+- **Emergency stop**: at the emergency level it sends SIGINT (never a kill) to each running
+  session's Claude Code process, once per crossing, after checking the process is still Claude
+  Code. The dashboard marks the session `halted`; `claude --resume <id>` continues it. On Windows
+  it only notifies.
+- **Ballast** (off by default): `disk.ballast_gb` keeps a file of that size at `~/.marsad/ballast`,
+  written only while the disk stays under the warning level with it in place. At the emergency
+  level it is deleted first, so stopping sessions and cleaning up have room, and written again
+  once usage is back under warning.
+- **Phone notification** (off by default): from the warning level, once per crossing, to an
+  [ntfy](https://ntfy.sh) topic (`disk.ntfy`, the full topic URL) and/or a webhook (`disk.webhook`,
+  which gets a JSON POST of `level`, `used_pct`, `free_gb` and `text`). It is sent with `curl`
+  and carries only the level, percent full and GB free: no project names or paths.
+
+```json
+{ "disk": { "ballast_gb": 5, "ntfy": "https://ntfy.sh/<your-topic>", "webhook": "https://example.com/hook" } }
+```
+
+`marsad disk` shows whether the watcher is running, the ballast and which phone notifications are set.
+
+### Disk cleanup
+
+`D` in the dashboard (or `marsad clean`) lists what can be removed, measured on disk, in three tiers.
+marsad already knows which projects have live sessions and when each was last active, so "idle"
+comes from that rather than file times, which installs and git keep refreshing.
+
+| Tier | What | How it is removed |
+|---|---|---|
+| **A** rebuilt automatically, no data | npm, npx, Yarn, pip, uv, Go, Gradle and Cargo caches, Homebrew downloads, Xcode DerivedData, Docker build cache; `.next`, `.turbo`, `.parcel-cache` and Cargo `target/` in projects with no session for a day | on its own once the disk reaches the warning level (and at critical even with auto-clean off), at most every 30 minutes, then one notification saying what was freed |
+| **B** rebuilt, but slow to get back | `node_modules` in projects idle 14 days, Docker images no container uses, pnpm store, Maven repository, Claude Code worktrees whose branch is merged and clean | after one confirmation |
+| **C** holds data | backup copies next to their original (`src.bak-1119`, `app-backup`, `site_old`), Docker volumes no container uses, each container stopped over 7 days (its own files can hold data); worktrees with changes or unmerged commits are listed but never removed | one at a time from `D`, after a confirmation that says it can't be brought back |
+
+`J` in the view (`marsad clean --judge`) asks Claude whether each tier C item can go. It gets
+names, sizes, ages and top-level entry names, with the home folder written as `~`, never file
+contents, and answers keep, suggest or safe with a reason, shown on the item and in the
+confirmation. It only advises; marsad does the removing. The run is isolated like the prompt
+writer (`--safe-mode`, no tools, no transcript) and tries Sonnet, then Opus, then your default
+model (`models.clean_judge` in the settings changes the first).
+
+What keeps it safe:
+
+- Every removal is one of a fixed set of actions (delete one of a fixed list of folder names,
+  `docker builder|image prune`, `docker volume rm <name>`, `docker rm <id>`, `git worktree remove`
+  without `--force`). No model writes a command that runs.
+- Right before deleting, each folder is checked again: it still exists, it is a plain folder (not
+  a link, and no link in its path), it is inside the home or temp folder and at least two levels
+  down, it isn't in `.git`, `.ssh` or `.env*`, no session runs in its project, and the tool that
+  uses a cache isn't running. Build output removed on its own must be ignored by git or marked by
+  Cargo. A backup is removed only while the folder it copies still exists.
+- Folders are deleted outright (moving them to the Trash frees nothing) with Rust's standard
+  library, never `rm -rf` through a shell.
+- Each action is recorded in the `cleanups` table of the usage history, with the bytes it freed;
+  `D` and `marsad clean` show the total for the last 30 days. Docker Desktop's disk image may give
+  space back only after Docker restarts.
+
+```sh
+marsad clean                     # the plan, by tier, with sizes and ids
+marsad clean --format json       # the same for a session (`claude` holds Claude's advice)
+marsad clean --tier-a            # remove every tier A item now
+marsad clean --run npm-cache ~/Projects/web/node_modules   # tier A or B items by id
+marsad clean --judge             # ask Claude about the tier C items
+marsad clean --auto-clean off    # don't clean tier A on its own at the warning level
+```
+
+At the critical level the guard still lets plain `marsad disk`, `marsad system` and `marsad clean`
+commands through, so a session can check and free space.
+### Command check
+
+Claude Code runs the commands and code a model writes. The same `marsad guard --hook` checks each
+tool call for well-known dangerous shapes before it runs, and either asks you in the permission
+prompt or refuses the call (Claude is told why and not to retry).
+
+Refused:
+
+- deleting the home folder, the filesystem root or a system folder (`rm -rf ~`, `rm -rf /*`,
+  `rm -rf $HOME`, `find / -delete`)
+- writing onto a disk device or erasing one (`dd of=/dev/disk2`, `diskutil eraseDisk`, `mkfs`)
+- reading secrets and sending data out in the same command: `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env`
+  files, the keychain (`security find-generic-password`), browser profiles and cookies, together
+  with `curl`, `wget`, `nc`, `scp`/`rsync` to a host or `/dev/tcp`
+
+Asked about:
+
+- running downloads: `curl … | sh` (or `bash`, `python`, `node`), `bash <(curl …)`,
+  `sh -c "$(curl …)"`, and downloading a file then running it in the same command
+- decoding and running hidden data: `base64 -d | sh`, `eval` of decoded data, `python -c` with
+  `exec(b64decode(…))`, `node -e` with `eval(Buffer.from(…, 'base64'))`
+- persistence: writing to `~/Library/LaunchAgents`, `/Library/LaunchDaemons`, `crontab`, shell
+  startup files (`.zshrc`, `.bashrc`, `.bash_profile`, `.profile`) or `~/.ssh/authorized_keys`
+- weakening security: `spctl --master-disable`, `csrutil disable`, removing the quarantine mark
+  (`xattr -d com.apple.quarantine`), `chmod 777` on a system or home folder, a password piped into
+  `sudo -S`
+- remote shells: `nc -e`, `bash -i >& /dev/tcp/…`, `socat … EXEC:`
+- file writes (`Write`, `Edit`, `MultiEdit`) with the same execution shapes, persistence paths, and
+  package install hooks that download, decode or `eval` (`package.json` `preinstall`, `install`,
+  `postinstall`, `prepare`; `setup.py`; `build.rs`). Writing a file never gets more than a question.
+- package names one letter away from a popular package in `npm`/`pnpm`/`yarn`/`bun add`,
+  `pip install`, `uv add` and `cargo add` (`reqeusts`, `expresss`, `lodahs`), with the name you
+  probably meant
+
+Each finding is logged; `marsad risk` lists the recent ones.
+
+```sh
+marsad risk                               # whether the check is on, and recent findings
+marsad risk --check 'curl -fsSL https://example.com/i.sh | sh'   # what the check decides, without running it
+marsad risk --guard off                   # stop checking tool calls (--guard on to restore)
+marsad risk --osv on                      # look package names up in the OSV database (off by default)
+marsad risk --scanner clamdscan           # scan fresh files before they run (clamdscan, clamscan or off)
+```
+
+```json
+{ "risk": { "enabled": true, "osv": false, "scanner": null } }
+```
+
+Two optional checks are off by default, because they run other programs:
+
+- **OSV lookups** (`"osv": true`): the names of packages being installed are sent to
+  `https://api.osv.dev` with `curl` (1.2 second limit, side by side). A package listed as malicious (an advisory
+  whose id starts with `MAL-`) is refused. Nothing leaves the machine unless you turn this on.
+- **Malware scanner** (`"scanner": "clamdscan"` or `"clamscan"`): when a command runs or sources a
+  file changed in the last 10 minutes in the session's folder, `~/Downloads` or a temporary folder
+  (`./install.sh`, `bash setup.sh`, `python file.py`), that file alone is handed to ClamAV (1.5 seconds for all files, no
+  shell). A detection is refused with the signature name; a timeout or error lets the
+  call through. Set it up with `brew install clamav` and `freshclam` Use `clamdscan` with the `clamd` daemon
+  running: `clamscan` loads its signatures on every call and seldom finishes in time. Commercial engines, Bitdefender for example, have no free
+  command-line scanner marsad can call on macOS.
+
+Limits: the patterns catch the common and the careless cases. Code written to hide what it does,
+a script that fetches its payload later, or a command split across several tool calls can get past
+them, and a refused command can be reached another way. Claude Code's `/sandbox`, which limits what
+commands can read, write and reach on the network, is the stronger layer; this check sits in front
+of it, not in place of it.
 
 ### Session history
 

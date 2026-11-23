@@ -99,6 +99,15 @@ CREATE TABLE IF NOT EXISTS badge_best (   -- highest value ever computed per bad
     key         TEXT PRIMARY KEY,   -- e.g. 'rank', 'streak', 'skills', 'subagents', 'busiest_day'
     value       INTEGER
 );
+CREATE TABLE IF NOT EXISTS cleanups (     -- every cleanup action marsad ran, never pruned
+    at          REAL,       -- Unix seconds
+    item        TEXT,       -- the action's id, e.g. 'npm-cache' or 'build:/path/.next'
+    tier        TEXT,       -- 'A' (rebuilt automatically) or 'B' (slow to get back)
+    path        TEXT,
+    estimated   INTEGER,    -- bytes measured before running
+    freed       INTEGER,    -- growth in available disk space across the action (Docker may give it back later)
+    auto        INTEGER     -- 1 when marsad ran it on its own
+);
 CREATE INDEX IF NOT EXISTS usage_daily_day ON usage_daily(day);
 CREATE INDEX IF NOT EXISTS token_days_day ON token_days(day);
 CREATE INDEX IF NOT EXISTS skill_runs_day ON skill_runs(day);
@@ -487,6 +496,37 @@ fn prune(conn: &mut Connection, cutoff: &str) -> anyhow::Result<usize> {
 // ---------- queries shared by the TUI and `marsad report` ----------
 
 /// Highest value ever stored per badge stat.
+/// Each project folder with the latest time a session ran in it.
+pub fn project_activity(conn: &Connection) -> anyhow::Result<Vec<(String, String)>> {
+    let mut st = conn.prepare("SELECT cwd, MAX(last_at) FROM sessions WHERE cwd IS NOT NULL AND cwd <> '' AND last_at IS NOT NULL GROUP BY cwd")?;
+    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub struct Cleanup<'a> {
+    pub item: &'a str,
+    pub tier: &'a str,
+    pub path: &'a str,
+    pub estimated: u64,
+    pub freed: u64,
+    pub auto: bool,
+}
+
+pub fn record_cleanup(conn: &Connection, at: f64, c: &Cleanup) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO cleanups (at, item, tier, path, estimated, freed, auto) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![at, c.item, c.tier, c.path, c.estimated as i64, c.freed as i64, c.auto],
+    )?;
+    Ok(())
+}
+
+/// Bytes freed since `since` (Unix seconds): the larger of the measured and the estimated amount
+/// per action, since Docker hands space back only later.
+pub fn freed_since(conn: &Connection, since: f64) -> anyhow::Result<u64> {
+    let n: i64 = conn.query_row("SELECT COALESCE(SUM(MAX(freed, estimated)), 0) FROM cleanups WHERE at >= ?1", [since], |r| r.get(0))?;
+    Ok(n.max(0) as u64)
+}
+
 pub fn badge_best(conn: &Connection) -> anyhow::Result<std::collections::HashMap<String, i64>> {
     let mut stmt = conn.prepare("SELECT key, value FROM badge_best")?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;

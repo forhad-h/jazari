@@ -12,6 +12,22 @@ GitHub release. Keep each bullet to one short line.
 - The dashboard has disk, memory and CPU meters under the header
 - All-time tokens read in B once past a billion
 - A session stopped for disk space shows why, with its resume command
+- A background watcher checks the disk every 20 s while sessions run and notifies once per level
+- At the emergency level (98% or 3 GB free) running sessions are interrupted
+- Optional ballast file (`disk.ballast_gb`) that is deleted at the emergency level to free space
+- Optional phone notifications through ntfy or a webhook (`disk.ntfy`, `disk.webhook`)
+- `marsad disk` shows the watcher, the ballast and phone notifications
+- `D` and `marsad clean` list caches, build output and Docker data that can go, by tier, with sizes
+- Rebuildable caches and build output are cleaned on their own once the disk reaches the warning level
+- Backups, unused Docker volumes and merged worktrees are removed one at a time, after a confirmation
+- `J` asks Claude whether each data-holding item can go; it only advises
+- marsad's own CPU, memory and data folder size show beside the meters
+- Tool calls that delete the home folder or root, wipe a disk, or send secrets out are refused
+- `curl | sh`, decode-and-run, persistence, security changes and remote shells ask first
+- File writes are checked too, including package install scripts that download or `eval` code
+- Package names one letter away from a popular package ask "did you mean"
+- `marsad risk` lists findings; `--check` tests a command; `--guard off` turns the check off
+- Optional, off by default: OSV lookups for malicious packages, and ClamAV scans of fresh files before they run
 
 ## 0.12.0 - 2026-11-23
 

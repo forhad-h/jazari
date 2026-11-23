@@ -90,6 +90,11 @@ pub(crate) fn detached(cmd: &str, args: &[&str]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The sound for something that needs the user now.
+pub(crate) fn attention_sound() {
+    play(Sound::Attention);
+}
+
 /// The platform's own sound, or the terminal bell when there is none.
 fn play(sound: Sound) {
     if !play_system(sound) {
@@ -133,7 +138,7 @@ fn play_system(_: Sound) -> bool {
 }
 
 /// A desktop notification. Text goes in as arguments, never through a shell.
-fn notify(title: &str, body: &str) {
+pub(crate) fn notify(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     spawn("osascript", &[
         "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run",
