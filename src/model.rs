@@ -25,6 +25,15 @@ impl Status {
         }
     }
 
+    /// 0 while the session is at work or waiting on the user, 1 when idle, 2 once ended.
+    pub fn group(self) -> u8 {
+        match self {
+            Status::Idle => 1,
+            Status::Ended => 2,
+            _ => 0,
+        }
+    }
+
     pub fn needs_user(self) -> bool {
         matches!(self, Status::Approve | Status::Question)
     }
@@ -247,18 +256,18 @@ pub fn fmt_count(n: u64) -> String {
     }
 }
 
-/// Local wall-clock time a rate-limit window resets: `16:30` today,
-/// `Tue 09:00` within the week, `Oct 21 09:00` beyond.
+/// Local wall-clock time a rate-limit window resets, on a 12-hour clock: `4:30pm` today,
+/// `Tue 9:00am` within the week, `Oct 21 9:00am` beyond.
 pub fn fmt_reset(ts: f64) -> String {
     use chrono::{Local, TimeZone};
     let Some(t) = Local.timestamp_opt(ts as i64, 0).single() else { return "—".into() };
     let days = (t.date_naive() - Local::now().date_naive()).num_days();
+    let clock = t.format("%-I:%M%P");
     match days {
-        ..=0 => t.format("%H:%M"),
-        1..7 => t.format("%a %H:%M"),
-        _ => t.format("%b %d %H:%M"),
+        ..=0 => clock.to_string(),
+        1..7 => format!("{} {clock}", t.format("%a")),
+        _ => format!("{} {clock}", t.format("%b %-d")),
     }
-    .to_string()
 }
 
 /// The user's auto-compact window, from `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or the
@@ -458,6 +467,16 @@ impl Session {
             self.set_idle(IdleCause::Interrupted, now);
             self.detail.clear();
         }
+        // Background agents that outlive the main agent's Stop keep the session active through their
+        // own hooks; once the last one stops and the hooks settle, the work is done.
+        // Only subagent hooks came after the Stop; a finished background shell instead waits for the
+        // follow-up turn Claude runs on its result.
+        let agents = self.subagents.values().any(|a| a.running);
+        let after_stop = self.last_event > self.last_hook;
+        if self.stopped && after_stop && self.status == Status::Active && !agents && !running && now - self.last_event >= INTERRUPT_GRACE_SECS {
+            self.set_idle(IdleCause::Finished, now);
+            self.detail.clear();
+        }
         if self.status == Status::Idle && running {
             let shells: Vec<&str> = self.shells().collect();
             let more = if shells.len() > 1 { format!(" +{}", shells.len() - 1) } else { String::new() };
@@ -486,6 +505,15 @@ impl Session {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.id.chars().take(8).collect())
+    }
+
+    /// The session's name: its title from Claude Code, else the start of its id.
+    pub fn name(&self) -> String {
+        self.title
+            .clone()
+            .or_else(|| self.stats.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| format!("session {}", self.id.chars().take(8).collect::<String>()))
     }
 
     /// Main agent plus all subagents.
@@ -576,7 +604,8 @@ impl Session {
 /// Column the live session list is sorted by; `s` cycles through them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SortKey {
-    /// Most urgent first, then most recent activity.
+    /// Sessions at work (active or waiting on the user) on top, the rest below; each group keeps
+    /// first-seen order, so rows don't move as sessions send events.
     #[default]
     Status,
     /// Alphabetical; stays put while sessions work, which keeps selection steady.
@@ -618,7 +647,7 @@ pub fn sort_sessions(list: &mut [&Session], key: SortKey, reversed: bool, compac
     let now = crate::now();
     list.sort_by(|a, b| {
         let ord = match key {
-            SortKey::Status => a.status.cmp(&b.status).then(b.last_event.total_cmp(&a.last_event)),
+            SortKey::Status => a.status.group().cmp(&b.status.group()),
             SortKey::Project => a.project().to_lowercase().cmp(&b.project().to_lowercase()),
             SortKey::Context => match (left(a), left(b)) {
                 (Some(x), Some(y)) => x.cmp(&y),
@@ -650,6 +679,18 @@ mod tests {
         assert_eq!(fmt_count(999_960_000), "1B", "no 1000M");
         assert_eq!(fmt_count(999_960_000_000), "1T", "no 1000B");
         assert_eq!(fmt_count(999_900), "999.9k");
+    }
+
+    #[test]
+    fn reset_times_use_a_12_hour_clock() {
+        use chrono::{Local, TimeZone};
+        let today = Local::now().date_naive();
+        let at = |days: i64, h: u32, m: u32| Local.from_local_datetime(&(today + chrono::Days::new(days as u64)).and_hms_opt(h, m, 0).unwrap()).unwrap().timestamp() as f64;
+        assert_eq!(fmt_reset(at(0, 16, 30)), "4:30pm");
+        assert_eq!(fmt_reset(at(0, 0, 5)), "12:05am");
+        let tue = Local.timestamp_opt(at(2, 9, 0) as i64, 0).unwrap().format("%a").to_string();
+        assert_eq!(fmt_reset(at(2, 9, 0)), format!("{tue} 9:00am"));
+        assert!(fmt_reset(at(20, 12, 0)).ends_with(" 12:00pm"));
     }
 
     #[test]
@@ -697,6 +738,13 @@ mod tests {
             list.iter().map(|s| s.id.as_str()).collect::<String>()
         };
         assert_eq!(order(SortKey::Status, false), "bca");
+        // Newer events don't reorder a group: first-seen order holds.
+        let (mut d, mut e) = (mk("d", "/x/d", Status::Idle, 4.0, None), mk("e", "/x/e", Status::Active, 5.0, None));
+        d.last_event = 100.0;
+        e.last_event = 1.0;
+        let mut list = vec![&d, &a, &e, &b, &c];
+        sort_sessions(&mut list, SortKey::Status, false, None);
+        assert_eq!(list.iter().map(|s| s.id.as_str()).collect::<String>(), "bcead");
         assert_eq!(order(SortKey::Project, false), "bac", "case-insensitive");
         assert_eq!(order(SortKey::Project, true), "cab");
         assert_eq!(order(SortKey::Context, false), "cab", "least left first, unknown last");

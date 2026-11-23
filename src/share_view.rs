@@ -16,6 +16,7 @@ pub const MAX_POST: usize = 3000;
 type DraftFn = dyn Fn(&Snapshot, &AtomicBool) -> Draft + Send + Sync;
 type RunFn = dyn Fn(&Step) -> Result<(), String> + Send + Sync;
 type SaveImageFn = dyn Fn(&crate::badges::Badges) -> Result<String, String> + Send + Sync;
+type RecordFn = dyn Fn(&str, &str) + Send + Sync;
 
 /// What the share view runs: the real thing in the dashboard, fakes in tests.
 #[derive(Clone)]
@@ -30,6 +31,8 @@ pub struct Env {
     pub desktop: Desktop,
     /// Writes the badge view as an image; the note says where it went.
     pub save_image: Arc<SaveImageFn>,
+    /// Keeps a shared or copied line, with its day, so later drafts don't repeat it.
+    pub record: Arc<RecordFn>,
 }
 
 impl Env {
@@ -43,6 +46,8 @@ impl Env {
             run: Arc::new(share::launch),
             desktop: Desktop::current(),
             save_image: Arc::new(|b| save_image(b, &crate::shot::default_path(), &Desktop::current(), &share::launch)),
+            // A post that can't be remembered still shares; the next draft is only less varied.
+            record: Arc::new(|date, line| _ = crate::share_history::record(&crate::data_dir(), date, line)),
         }
     }
 }
@@ -54,7 +59,9 @@ fn prepare(rank_total: i64) -> anyhow::Result<Snapshot> {
     crate::store::open_and_sync()?;
     let conn = crate::store::open_readonly()?;
     let total = rank_total.max(crate::store::lifetime(&conn)?.total);
-    share::snapshot(&conn, &crate::store::day_n_ago(0), total, dirs::home_dir(), name.join().ok().flatten())
+    let mut s = share::snapshot(&conn, &crate::store::day_n_ago(0), total, dirs::home_dir(), name.join().ok().flatten())?;
+    s.recent = crate::share_history::recent(&crate::data_dir(), &s.date);
+    Ok(s)
 }
 
 /// Writes the badge image to `path` and shows it in the file manager; the note says what each step did.
@@ -151,7 +158,12 @@ pub struct ShareView {
     env: Env,
     phase: Phase,
     snapshot: Option<Snapshot>,
+    /// The line as it stands: the chosen variant, or the user's edit of it.
     line: String,
+    /// The drafted (or template) variants; an edited line replaces its own.
+    variants: Vec<String>,
+    /// Which variant the line is.
+    variant: usize,
     note: Option<Note>,
     /// The whole post after an `E` edit; editing or regenerating the line replaces it.
     custom: Option<String>,
@@ -194,6 +206,8 @@ impl ShareView {
             phase: Phase::Drafting(rx),
             snapshot: None,
             line: String::new(),
+            variants: Vec::new(),
+            variant: 0,
             note: None,
             custom: None,
             warning: None,
@@ -239,7 +253,7 @@ impl ShareView {
     /// The keys the footer offers now.
     pub fn keys(&self) -> Vec<(&'static str, &'static str)> {
         match &self.phase {
-            Phase::Preview => vec![("enter", "share to LinkedIn"), ("c", "copy text"), ("s", "save image"), ("e", "edit line"), ("E", "edit post"), ("r", "regenerate"), ("↑↓", "scroll"), ("q/esc", "cancel")],
+            Phase::Preview => vec![("enter", "share to LinkedIn"), ("v", "next variant"), ("c", "copy text"), ("s", "save image"), ("e", "edit line"), ("E", "edit post"), ("r", "regenerate"), ("↑↓", "scroll"), ("q/esc", "cancel")],
             Phase::Editing { .. } => vec![("enter", "keep"), ("esc", "discard")],
             Phase::Drafting(_) => vec![("q/esc", "cancel")],
             Phase::Regenerating(_) => vec![("esc", "keep the current line"), ("q", "cancel")],
@@ -263,7 +277,7 @@ impl ShareView {
                 Ok(Ok((s, d))) => {
                     self.prepared = Some(s.badges.clone());
                     self.snapshot = Some(s);
-                    (self.line, self.note) = (d.line, d.note);
+                    self.take_draft(d);
                     self.phase = Phase::Preview;
                 }
                 Ok(Err(why)) => self.phase = Phase::Failed(why),
@@ -285,6 +299,7 @@ impl ShareView {
                 Ok(Ok(())) => {
                     let post = self.post();
                     let copied = (self.env.copy)(&post);
+                    self.remember(&post);
                     self.phase = Phase::Opening { rx: self.open(post), copied };
                 }
                 Ok(Err(why)) => {
@@ -318,10 +333,45 @@ impl ShareView {
         match (&d.note, &self.note) {
             (Some(note), None) => self.warning = Some(format!("Couldn't regenerate, so the current line stays. {}", note.message())),
             _ => {
-                (self.line, self.note, self.custom, self.warning) = (d.line, d.note, None, None);
+                (self.custom, self.warning) = (None, None);
+                self.take_draft(d);
                 self.scroll = 0;
             }
         }
+    }
+
+    /// Shows a new draft's variants, from the first.
+    fn take_draft(&mut self, d: Draft) {
+        self.variants = d.variants;
+        self.variant = 0;
+        self.line = self.variants.first().cloned().unwrap_or_default();
+        self.note = d.note;
+        self.notice = self.variant().map(|(i, n)| variant_notice(i, n));
+    }
+
+    /// Which variant is on screen and how many there are, when there is more than one.
+    pub fn variant(&self) -> Option<(usize, usize)> {
+        (self.variants.len() > 1).then(|| (self.variant + 1, self.variants.len()))
+    }
+
+    /// Shows the next variant, dropping an edit of the whole post.
+    fn next_variant(&mut self) {
+        self.warning = None;
+        if self.variants.len() < 2 {
+            self.notice = Some("There is only one variant; r drafts new ones.".into());
+            return;
+        }
+        self.variant = (self.variant + 1) % self.variants.len();
+        (self.line, self.custom) = (self.variants[self.variant].clone(), None);
+        self.scroll = 0;
+        self.notice = self.variant().map(|(i, n)| variant_notice(i, n));
+    }
+
+    /// Keeps the post's line (its first paragraph) so later drafts steer away from it.
+    fn remember(&self, post: &str) {
+        let Some(s) = &self.snapshot else { return };
+        let line = post.split("\n\n").next().unwrap_or_default().trim();
+        (self.env.record)(&s.date, line);
     }
 
     fn card_path(&self) -> PathBuf {
@@ -421,6 +471,7 @@ impl ShareView {
                 }
                 KeyCode::Char('E') => return Outcome::EditPost(self.post()),
                 KeyCode::Char('r') => self.regenerate(),
+                KeyCode::Char('v') => self.next_variant(),
                 KeyCode::Down | KeyCode::Char('j') => self.scroll_by(1),
                 KeyCode::Up | KeyCode::Char('k') => self.scroll_by(-1),
                 KeyCode::PageDown | KeyCode::Char(' ') => self.scroll_by(10),
@@ -432,6 +483,9 @@ impl ShareView {
                     let line: String = text.iter().collect::<String>().trim().to_string();
                     if !line.is_empty() {
                         // The user's own line: no longer the template, so a failed regenerate keeps it.
+                        if let Some(v) = self.variants.get_mut(self.variant) {
+                            v.clone_from(&line);
+                        }
                         (self.line, self.custom, self.note) = (line, None, None);
                     }
                     self.phase = Phase::Preview;
@@ -470,7 +524,12 @@ impl ShareView {
     fn copy_post(&mut self) {
         self.notice = None;
         self.warning = None;
-        match (self.env.copy)(&self.post()) {
+        let post = self.post();
+        let copied = (self.env.copy)(&post);
+        if copied != Copied::Failed {
+            self.remember(&post);
+        }
+        match copied {
             Copied::Native(tool) => self.notice = Some(format!("Copied the post to your clipboard ({tool}).")),
             Copied::Terminal => self.notice = Some("Sent the post to your terminal's clipboard, if it allows that.".into()),
             Copied::Failed => self.warning = Some("Couldn't reach a clipboard; press E to open the post in your editor and copy it there.".into()),
@@ -505,6 +564,11 @@ impl ShareView {
     fn scroll_by(&mut self, delta: i32) {
         self.scroll = (self.scroll as i32 + delta).clamp(0, self.max_scroll.get() as i32) as u16;
     }
+}
+
+/// "Variant 2 of 3", with the key that moves on.
+fn variant_notice(i: usize, n: usize) -> String {
+    format!("Variant {i} of {n} · v shows the next.")
 }
 
 /// Opens `text` in `$VISUAL`, `$EDITOR`, or `vi` (`notepad` on Windows), and returns what was saved.
@@ -567,6 +631,7 @@ mod tests {
             name: Some("Test User".into()),
             work: share::Work::default(),
             home: None,
+            recent: Vec::new(),
         }
     }
 
@@ -574,11 +639,15 @@ mod tests {
     struct Fake {
         copies: Arc<Mutex<Vec<String>>>,
         runs: Arc<Mutex<Vec<Step>>>,
+        /// Every remembered (day, line).
+        records: Arc<Mutex<Vec<(String, String)>>>,
     }
 
     fn env(dir: &Path, line: &'static str, wait: Duration, copied: Copied) -> (Env, Fake) {
         let (copies, runs) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
         let (c, r, dir) = (copies.clone(), runs.clone(), dir.to_path_buf());
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let kept = records.clone();
         let image = dir.join("badge.png");
         let env = Env {
             prepare: Arc::new(|| Ok(snapshot())),
@@ -587,7 +656,7 @@ mod tests {
                 while Instant::now() < until && !cancel.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                Draft { line: line.into(), note: None }
+                Draft::line(line)
             }),
             card_path: Arc::new(move |s| dir.join(format!("marsad-{}.png", s.date))),
             copy: Arc::new(move |text| {
@@ -600,8 +669,9 @@ mod tests {
             }),
             desktop: Desktop::for_tests(),
             save_image: Arc::new(move |b| save_image(b, &image, &Desktop::for_tests(), &|_| Ok(()))),
+            record: Arc::new(move |date, line| kept.lock().unwrap().push((date.to_string(), line.to_string()))),
         };
-        (env, Fake { copies, runs })
+        (env, Fake { copies, runs, records })
     }
 
     /// Ticks until the view leaves its busy phase.
@@ -656,7 +726,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
             *seen.lock().unwrap() = Some(cancel.load(Ordering::SeqCst));
-            Draft { line: String::new(), note: None }
+            Draft::line("")
         });
         let v = ShareView::start(env);
         std::thread::sleep(Duration::from_millis(50));
@@ -818,6 +888,48 @@ mod tests {
         let Screen::Preview { post, warning: Some(w), .. } = v.screen() else { panic!("no warning") };
         assert!(post.starts_with("I shipped"), "{post}");
         assert!(w.contains("Couldn't regenerate"));
+    }
+
+    #[test]
+    fn v_cycles_the_variants_and_an_edit_stays_with_its_variant() {
+        let dir = scratch("variants");
+        let (mut env, _) = env(&dir, "", Duration::ZERO, Copied::Native("pbcopy"));
+        env.draft = Arc::new(|_, _| Draft { variants: vec!["One.".into(), "Two.".into(), "Three.".into()], note: None });
+        let mut v = ShareView::start(env);
+        settle(&mut v);
+        assert_eq!((v.variant(), v.status().0), (Some((1, 3)), Some("Variant 1 of 3 · v shows the next.")));
+        assert!(v.post().starts_with("One.\n\n"));
+        v.on_key(key(KeyCode::Char('v')));
+        assert!(v.post().starts_with("Two.\n\n") && v.variant() == Some((2, 3)));
+        v.on_key(key(KeyCode::Char('e')));
+        v.on_paste(" Mine.");
+        v.on_key(key(KeyCode::Enter));
+        v.on_key(key(KeyCode::Char('v')));
+        v.on_key(key(KeyCode::Char('v')));
+        assert!(v.post().starts_with("One."), "it wraps around");
+        v.on_key(key(KeyCode::Char('v')));
+        assert!(v.post().starts_with("Two. Mine."), "{}", v.post());
+        v.edited_post(Ok("Whole post.".into()));
+        v.on_key(key(KeyCode::Char('v')));
+        assert!(v.post().starts_with("Three."), "the next variant replaces an edited post");
+    }
+
+    #[test]
+    fn a_shared_or_copied_line_is_remembered_once_per_day() {
+        let dir = scratch("remember");
+        let (mut v, fake) = preview(&dir);
+        v.on_key(key(KeyCode::Char('c')));
+        v.on_key(key(KeyCode::Enter));
+        settle(&mut v);
+        let line = "I shipped a parser with two agents.".to_string();
+        let records = fake.records.lock().unwrap().clone();
+        assert_eq!(records, [("2026-10-24".to_string(), line.clone()), ("2026-10-24".to_string(), line)], "the log drops the repeat");
+
+        let (env, fake) = env(&dir, "line", Duration::ZERO, Copied::Failed);
+        let mut v = ShareView::start(env);
+        settle(&mut v);
+        v.on_key(key(KeyCode::Char('c')));
+        assert!(fake.records.lock().unwrap().is_empty(), "a copy that failed keeps nothing");
     }
 
     #[test]

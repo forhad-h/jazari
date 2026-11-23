@@ -175,6 +175,8 @@ pub struct App {
     /// The cleanup view's state while it is open.
     pub clean: Option<crate::clean_view::CleanView>,
     sampler: crate::system::Sampler,
+    /// The always-on-top window while it is open (`P`).
+    pub pin: Option<crate::pin::Pin>,
 }
 
 /// Shown above the footer when `c` couldn't put the launch command on a clipboard it can confirm.
@@ -501,10 +503,11 @@ impl App {
             system: None,
             clean: None,
             sampler: crate::system::Sampler::default(),
+            pin: None,
         }
     }
 
-    /// Sessions to show, in the chosen sort order (most urgent first by default).
+    /// Sessions to show, in the chosen sort order (working sessions on top by default).
     pub fn visible(&self) -> Vec<&Session> {
         let now = crate::now();
         let mut list: Vec<&Session> = self
@@ -768,6 +771,49 @@ impl App {
         true
     }
 
+    /// Opens or closes the always-on-top window with the sessions' statuses.
+    fn toggle_pin(&mut self) {
+        if self.pin.take().is_some() {
+            self.info = Some("closed the window on top ".into());
+            return;
+        }
+        match crate::pin::Pin::open(&self.pin_text()) {
+            Ok(pin) => {
+                self.pin = Some(pin);
+                self.info = Some("opened a window that stays on top of other apps · P closes it ".into());
+            }
+            Err(e) => self.error = Some(format!("{e:#} ")),
+        }
+    }
+
+    fn pin_text(&self) -> String {
+        crate::pin::text(&self.visible(), self.rate_limits())
+    }
+
+    /// Keeps the window on top current, and notices when the user closed it.
+    fn refresh_pin(&mut self) {
+        if self.pin.is_none() {
+            return;
+        }
+        let text = self.pin_text();
+        let Some(pin) = self.pin.as_mut() else { return };
+        if pin.is_open() {
+            pin.show(&text);
+        } else {
+            self.pin = None;
+        }
+    }
+
+    /// Copies the selected session's full id, for `claude --resume` or a bug report.
+    fn copy_session_id(&mut self) {
+        let Some(id) = self.selected_session().map(|s| s.id.clone()) else { return };
+        match crate::clipboard::copy(&id) {
+            crate::clipboard::Copied::Native(_) => self.info = Some(format!("copied session id {id} ")),
+            crate::clipboard::Copied::Terminal => self.info = Some(format!("sent session id {id} to your terminal's clipboard ")),
+            crate::clipboard::Copied::Failed => self.error = Some(format!("couldn't reach a clipboard; the id is {id} ")),
+        }
+    }
+
     /// The rank and achievements now, with the header's all-time figure as the rank total.
     fn load_badges(&self) -> anyhow::Result<Badges> {
         let conn = crate::store::open_readonly()?;
@@ -843,10 +889,11 @@ impl App {
         self.sort_reversed = reversed;
     }
 
-    /// The selected session's history events that pass the filter.
+    /// The selected session's history events that pass the filter, newest first.
     pub fn history<'a>(&self, s: &'a Session) -> Vec<TimelineEntry<'a>> {
         let mut list = s.timeline();
         list.retain(|e| self.history_filter.matches(&e.event.kind));
+        list.reverse();
         list
     }
 
@@ -914,6 +961,7 @@ impl App {
             self.refresh_snapshots();
             self.counter.reload_if_due();
             self.sample_system();
+            self.refresh_pin();
             if self.view == View::Board {
                 self.refresh_board();
             }
@@ -1047,6 +1095,8 @@ impl App {
                 }
             }
             (View::List, KeyCode::Char('p')) => self.open_share(),
+            (View::List, KeyCode::Char('P')) => self.toggle_pin(),
+            (View::List | View::History | View::Agents, KeyCode::Char('y')) => self.copy_session_id(),
             (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
             (View::List | View::Board, KeyCode::Char('c')) => self.open_rules_picker(),
             (View::List, KeyCode::Char('n')) => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real())),

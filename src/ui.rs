@@ -203,6 +203,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("f", format!("filter: {}", app.history_filter.label())),
                 ("g/G", "top/bottom".into()),
                 ("tab", "subagents".into()),
+                ("y", "copy id".into()),
                 ("b", "board".into()),
                 ("esc", "back".into()),
                 ("q", "quit".into()),
@@ -214,6 +215,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("↑↓", "scroll".into()),
                 ("g/G", "top/bottom".into()),
                 ("tab", "history".into()),
+                ("y", "copy id".into()),
                 ("b", "board".into()),
                 ("esc", "back".into()),
                 ("q", "quit".into()),
@@ -236,9 +238,11 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("↑↓", "select".into()),
                 ("enter", "history".into()),
                 ("tab", "subagents".into()),
+                ("y", "copy id".into()),
                 ("u", "usage".into()),
                 ("D", "disk cleanup".into()),
                 ("p", "share".into()),
+                ("P", if app.pin.is_some() { "unpin" } else { "pin on top" }.into()),
                 ("b", "board".into()),
                 ("c", "launch cmd".into()),
                 ("n", "new prompt".into()),
@@ -517,7 +521,7 @@ fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: 
 
 fn draw_list(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let selected = app.selected_session();
-    let details_height = if selected.is_some() { 9 } else { 0 };
+    let details_height = if selected.is_some() { 6 } else { 0 };
     let [table, details] =
         Layout::vertical([Constraint::Min(4), Constraint::Length(details_height)]).areas(area);
     if visible.is_empty() {
@@ -1184,6 +1188,7 @@ fn draw_board(f: &mut Frame, area: Rect, app: &App) {
         _ => Span::raw(""),
     };
 
+    relation_map(&mut lines, board, &stale.agents);
     heading(&mut lines, "Agents", board.agents.len());
     for (a, &is_stale) in board.agents.iter().zip(&stale.agents) {
         let name = if is_stale { dim(a.name.clone()) } else { a.name.clone().bold() };
@@ -1240,6 +1245,50 @@ fn draw_board(f: &mut Frame, area: Rect, app: &App) {
     state.max_scroll.set(rows.len().saturating_sub(inner.height as usize));
     let scroll = state.scroll.min(state.max_scroll.get()) as u16;
     f.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+}
+
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
+}
+
+/// The agents as nodes, then who messages whom, who is in conflict and whose claims overlap.
+fn relation_map(lines: &mut Vec<Line<'static>>, board: &crate::board::Board, stale: &[bool]) {
+    use crate::board::{ConflictStatus, Link};
+    let links = crate::board::relations(board);
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled("Relations", Style::new().fg(ACCENT).bold()), dim(format!("  {} · {}", plural(board.agents.len(), "agent"), plural(links.len(), "link")))]));
+    let mut nodes = vec![Span::raw("  ")];
+    for (a, &is_stale) in board.agents.iter().zip(stale) {
+        let style = if is_stale { Style::new().dark_gray() } else { Style::new().fg(Color::Green).bold() };
+        nodes.extend([dim("["), Span::styled(format!(" {} ", a.name), style), dim("]  ")]);
+    }
+    if board.agents.is_empty() {
+        nodes.push(dim("(no agents registered)"));
+    }
+    lines.push(Line::from(nodes));
+    let name = |n: &str| if n == "all" { Span::styled("everyone".to_string(), Style::new().italic()) } else { Span::styled(n.to_string(), Style::new().bold()) };
+    for r in &links {
+        let (arrow, style) = match &r.link {
+            Link::Messages(n) => (format!(" ──✉ {n}──▶ "), Style::new().fg(ACCENT)),
+            Link::Conflict(status) => {
+                let (what, color) = match status {
+                    ConflictStatus::NeedsHuman => ("needs human", Color::Yellow),
+                    ConflictStatus::Resolved => ("resolved", Color::DarkGray),
+                    _ => ("open", Color::Red),
+                };
+                (format!(" ◀──✗ conflict, {what}──▶ "), Style::new().fg(color))
+            }
+            Link::Overlap(path) => (format!(" ◀┄┄ both claim {path} ┄┄▶ "), Style::new().fg(Color::Yellow)),
+        };
+        lines.push(Line::from(vec![Span::raw("  "), name(&r.from), Span::styled(arrow, style), name(&r.to)]));
+    }
+    let linked = |n: &str| links.iter().any(|r| r.from == n || r.to == n);
+    let alone: Vec<&str> = board.agents.iter().map(|a| a.name.as_str()).filter(|n| !linked(n)).collect();
+    if !alone.is_empty() && !links.is_empty() {
+        lines.push(Line::from(dim(format!("  no links: {}", alone.join(", ")))));
+    } else if links.is_empty() && !board.agents.is_empty() {
+        lines.push(Line::from(dim("  no messages, conflicts or overlapping claims yet")));
+    }
 }
 
 /// Splits a line into rows of at most `width` columns, breaking after whitespace where it can and
@@ -1306,12 +1355,6 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let now = crate::now();
     let rows = visible.iter().map(|s| {
         let (style, label) = status_style(s.status);
-        let activity = if !s.detail.is_empty() {
-            Span::raw(s.detail.clone())
-        } else {
-            let title = s.title.clone().or_else(|| s.stats.title.clone()).unwrap_or_default();
-            Span::styled(title, Style::new().dark_gray())
-        };
         let running = s.subagents.values().filter(|a| a.running).count();
         let agents = if running > 0 { format!("+{running}") } else { String::new() };
         let context = match s.context(app.compact_window) {
@@ -1326,9 +1369,9 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
         };
         // Status sits at the right edge so it stays visible when another window covers the left side.
         let row = Row::new(vec![
-            Cell::from(Span::styled(format!(" {}", s.project()), Style::new().bold())),
+            Cell::from(Span::styled(format!(" {}", s.name()), Style::new().bold())),
             Cell::from(Span::styled(agents, Style::new().fg(ACCENT))),
-            Cell::from(Line::from(activity)),
+            Cell::from(Span::styled(s.project(), Style::new().fg(ACCENT))),
             Cell::from(context),
             right_cell(fmt_duration(s.running_secs(now))),
             right_cell(fmt_tokens(s.total_tokens().total())),
@@ -1341,23 +1384,23 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
         if s.status == Status::Ended { row.style(Style::new().dark_gray()) } else { row }
     });
     let widths = [
-        Constraint::Length(21),
-        Constraint::Length(3),
         Constraint::Fill(1),
+        Constraint::Length(3),
+        Constraint::Length(18),
         Constraint::Length(13),
         Constraint::Length(5),
         Constraint::Length(8),
         Constraint::Length(13),
     ];
     let sorted_col = match app.sort {
-        SortKey::Project => 0,
+        SortKey::Project => 2,
         SortKey::Context => 3,
         SortKey::Age => 4,
         SortKey::Tokens => 5,
         SortKey::Status => 6,
     };
     let arrow = if app.sort_reversed { "▴" } else { "▾" };
-    let header = Row::new([" PROJECT", "", "ACTIVITY", "CONTEXT LEFT", "TIME", "TOKENS", "STATUS"].into_iter().enumerate().map(
+    let header = Row::new([" SESSION", "", "PROJECT", "CONTEXT LEFT", "TIME", "TOKENS", "STATUS"].into_iter().enumerate().map(
         |(i, h)| {
             let span = if i == sorted_col { Span::styled(format!("{h}{arrow}"), Style::new().fg(ACCENT)) } else { Span::raw(h) };
             // Status hugs the right edge, so its header does too.
@@ -1395,11 +1438,7 @@ fn dim(t: impl Into<String>) -> Span<'static> {
 }
 
 fn session_heading(s: &Session) -> Line<'static> {
-    let mut heading = vec![Span::styled(format!(" {} ", s.project()), Style::new().bold())];
-    if let Some(t) = s.title.clone().or_else(|| s.stats.title.clone()) {
-        heading.push(dim(format!("· {t} ")));
-    }
-    Line::from(heading)
+    Line::from(vec![Span::styled(format!(" {} ", s.name()), Style::new().bold()), dim(format!("· {} ", s.project()))])
 }
 
 fn context_line(s: &Session, app: &App) -> Line<'static> {
@@ -1412,21 +1451,40 @@ fn context_line(s: &Session, app: &App) -> Line<'static> {
 }
 
 fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
-    let mut meta = vec![label("session"), Span::raw(short_path(&s.cwd))];
+    let sep = || dim("   ·   ");
+    let now = if !s.detail.is_empty() {
+        Span::raw(s.detail.clone())
+    } else {
+        dim(match s.status {
+            Status::Idle => "waiting for your next prompt",
+            Status::Ended => "ended",
+            _ => "working",
+        })
+    };
+    let width = area.width.saturating_sub(12) as usize;
+    let now = Span::styled(crate::hook::truncate(&now.content, width), now.style);
+
+    let mut usage = vec![label("context")];
+    match s.context(app.compact_window) {
+        Some(ctx) => {
+            usage.extend(context_spans(&ctx, 10, false));
+            usage.push(Span::raw(format!("  {} left", fmt_tokens(ctx.left()))));
+        }
+        None => usage.push(dim("no API calls yet")),
+    }
+    usage.extend([sep(), Span::styled("tokens ", Style::new().fg(ACCENT)), Span::styled(fmt_tokens(s.total_tokens().total()), Style::new().bold())]);
     let model = s.snapshot.as_ref().and_then(|x| x.model.clone()).or(s.model.clone());
     if let Some(m) = model {
-        meta.extend([dim("   model "), Span::raw(m)]);
+        usage.extend([sep(), dim("model "), Span::raw(m)]);
     }
     if let Some(m) = s.permission_mode.as_ref() {
-        meta.extend([dim("   mode "), Span::raw(m.clone())]);
+        usage.extend([sep(), dim("mode "), Span::raw(m.clone())]);
     }
-    meta.extend([dim("   id "), dim(s.id.chars().take(8).collect::<String>())]);
 
-    let mut tokens = vec![label("tokens")];
-    tokens.extend(usage_spans(&s.total_tokens()));
+    let id = vec![label("id"), Span::styled(s.id.clone(), Style::new().fg(Color::Yellow)), dim("  y copies it"), sep(), Span::raw(short_path(&s.cwd))];
 
-    let mut agents = vec![label("agents"), Span::raw("main "), Span::styled(fmt_tokens(s.stats.tokens.total()), Style::new().bold())];
-    // Grouped by type so sessions with many subagents still fit on one line.
+    // Agents grouped by type and the skills run, on one line.
+    let mut work = vec![label("agents"), Span::raw("main "), Span::styled(fmt_tokens(s.stats.tokens.total()), Style::new().bold())];
     let mut by_type: std::collections::BTreeMap<&str, (usize, usize, u64)> = Default::default();
     for a in s.subagents.values() {
         let e = by_type.entry(a.agent_type.as_str()).or_default();
@@ -1441,45 +1499,31 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
             ("✓".to_string(), Style::new().dark_gray())
         };
         let count = if count > 1 { format!(" ×{count}") } else { String::new() };
-        agents.extend([
-            dim("  ·  "),
-            Span::raw(format!("{agent_type}{count} ")),
-            Span::styled(format!("{mark} "), mark_style),
-            Span::raw(fmt_tokens(tokens)),
-        ]);
+        work.extend([dim(" · "), Span::raw(format!("{agent_type}{count} ")), Span::styled(format!("{mark} "), mark_style), Span::raw(fmt_tokens(tokens))]);
     }
-
     let mut skills_list: Vec<_> = s.all_skills().into_iter().collect();
     skills_list.sort_by(|a, b| b.1.tokens.total().cmp(&a.1.tokens.total()).then(b.1.calls.cmp(&a.1.calls)));
-    let mut skills = vec![label("skills")];
-    if skills_list.is_empty() {
-        skills.push(dim("none yet"));
-    }
-    for (i, (name, st)) in skills_list.iter().enumerate() {
-        if i > 0 {
-            skills.push(dim("  ·  "));
+    if !skills_list.is_empty() {
+        work.extend([sep(), Span::styled("skills ", Style::new().fg(ACCENT))]);
+        for (i, (name, st)) in skills_list.iter().enumerate() {
+            if i > 0 {
+                work.push(dim(", "));
+            }
+            work.extend([Span::styled(short_skill(name).to_string(), Style::new().fg(Color::Magenta)), dim(format!(" ×{}", st.calls))]);
         }
-        skills.extend([
-            Span::styled(name.clone(), Style::new().fg(Color::Magenta)),
-            dim(format!(" ×{} ", st.calls)),
-            Span::raw(format!("≈{}", fmt_tokens(st.tokens.total()))),
-        ]);
     }
 
-    let mut lines = vec![Line::from(meta), context_line(s, app), Line::from(tokens), Line::from(agents), Line::from(skills)];
-    if !s.detail.is_empty() {
-        let width = area.width.saturating_sub(12) as usize;
-        lines.insert(1, Line::from(vec![label("now"), Span::raw(crate::hook::truncate(&s.detail, width))]));
-    }
+    let lines = vec![Line::from(vec![label("now"), now]), Line::from(usage), Line::from(id), Line::from(work)];
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
         .title(session_heading(s))
         .title_bottom(
-            Line::from(vec![dim(" enter "), Span::raw("history "), dim(" tab "), Span::raw("subagents ")])
+            Line::from(vec![dim(" enter "), Span::raw("history "), dim(" tab "), Span::raw("subagents "), dim(" y "), Span::raw("copy id ")])
                 .alignment(Alignment::Right),
         );
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
+    // Each line keeps to one row; a long one is cut rather than pushing the others out.
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 const EVENT_WIDTHS: [Constraint; 6] = [
@@ -1659,6 +1703,7 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
         return;
     }
 
+    // Newest first, numbered in the order they happened.
     let rows: Vec<Row> = events
         .iter()
         .enumerate()
@@ -1666,7 +1711,7 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
             let (kind, kind_style) = event_style(&e.event.kind);
             let agent_style = if e.agent == MAIN_AGENT { Style::new() } else { Style::new().fg(ACCENT) };
             Row::new(vec![
-                Cell::from(dim(format!("{:>3}", i + 1))),
+                Cell::from(dim(format!("{:>3}", events.len() - i))),
                 Cell::from(Span::raw(fmt_local(e.event.at.as_deref()))),
                 Cell::from(Span::styled(e.agent.to_string(), agent_style)),
                 Cell::from(Span::styled(kind, kind_style)),
