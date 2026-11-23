@@ -74,6 +74,7 @@ marsad rules                                         # lists the prompts session
 marsad rules coordination --format json              # {command, protocol_path, rules, mode}: starts a session with the coordination rules
 marsad rules coordination output-hygiene             # both, merged into one file (claude reads only one prompt file)
 marsad rules output-hygiene --team                   # starts an agent team lead that passes the prompts on to its teammates
+marsad rules coordination output-hygiene --path      # only the file path, for a session that is already running to read
 marsad prompt new "<rough idea>" --yes --format json # Claude writes a prompt from the idea and saves it: {key, title, summary, body, assumptions, questions, saved}
 marsad prompt edit <name> --with "<feedback>" --yes  # revises one of the user's prompts with Claude
 marsad prompt copy <name> --as <new-name>            # copies a prompt (a built-in one, say) into the user's library

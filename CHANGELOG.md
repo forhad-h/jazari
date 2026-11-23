@@ -28,6 +28,7 @@ GitHub release. Keep each bullet to one short line.
 - Package names one letter away from a popular package ask "did you mean"
 - `marsad risk` lists findings; `--check` tests a command; `--guard off` turns the check off
 - Optional, off by default: OSV lookups for malicious packages, and ClamAV scans of fresh files before they run
+- The `c` picker's last step can copy only the prompts' file path, to paste into a running session (`marsad rules --path`)
 
 ## 0.12.0 - 2026-11-23
 

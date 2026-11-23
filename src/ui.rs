@@ -266,7 +266,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             } else if picker.versions.is_some() && picker.mode.is_none() {
                 vec![("↑↓", "move".into()), ("enter", "restore".into()), ("esc", "back".into())]
             } else if picker.mode.is_some() {
-                vec![("↑↓", "move".into()), ("1/2", "pick".into()), ("enter", "copy".into()), ("esc", "back".into())]
+                vec![("↑↓", "move".into()), ("1-3", "pick".into()), ("enter", "copy".into()), ("esc", "back".into())]
             } else {
                 let mut keys = vec![
                     ("↑↓", "move".into()),
@@ -573,7 +573,6 @@ fn draw_copy_note(f: &mut Frame, area: Rect, note: &crate::app::CopyNote) {
 
 /// The `c` picker, a small modal: the prompts with tick boxes, then a choice of session or team.
 fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker) {
-    use crate::rules::Mode;
     let row = |selected: bool, label: String, title: String, tag: Option<Span<'static>>| {
         let mut spans = vec![Span::raw(if selected { "› " } else { "  " }), Span::styled(label, Style::new().fg(ACCENT)), title.bold()];
         spans.extend(tag);
@@ -622,11 +621,11 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
         }
         (Some(mode), _) => {
             let mut lines = vec![Line::from(dim(format!("Start {} as:", crate::rules::titles(&picker.chosen())))), Line::from("")];
-            for (i, m) in [Mode::Session, Mode::Team].into_iter().enumerate() {
+            for (i, m) in crate::rules::Choice::ALL.into_iter().enumerate() {
                 lines.push(row(m == mode, format!("{} ", i + 1), m.title().to_string(), None));
                 lines.push(Line::from(dim(format!("    {}", m.summary()))));
             }
-            let footer = vec![Line::from(""), Line::from(dim("Applies to new conversations; your choice is remembered."))];
+            let footer = vec![Line::from(""), Line::from(dim("A command applies to new conversations; your choice is remembered."))];
             (lines, footer, " Launch command · 2 of 2 ", 2)
         }
     };
@@ -2093,5 +2092,6 @@ mod tests {
         assert!(rows.iter().all(|r| r.width() <= 8));
     }
 }
+
 
 

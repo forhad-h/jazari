@@ -191,8 +191,8 @@ pub struct RulesPicker {
     pub ticked: Vec<bool>,
     /// The highlighted prompt.
     pub cursor: usize,
-    /// The highlighted mode once the prompts are chosen; None while ticking them.
-    pub mode: Option<crate::rules::Mode>,
+    /// The highlighted choice once the prompts are chosen; None while ticking them.
+    pub mode: Option<crate::rules::Choice>,
     /// The prompt waiting for `y` to be deleted.
     pub deleting: Option<usize>,
     /// The earlier versions of a prompt being browsed, opened with `v`.
@@ -657,16 +657,15 @@ impl App {
     }
 
     fn on_picker_key(&mut self, code: KeyCode) {
-        use crate::rules::Mode;
+        use crate::rules::Choice;
         let Some(picker) = self.rules_picker.as_mut() else { return };
         if let Some(mode) = picker.mode {
-            let other = if mode == Mode::Session { Mode::Team } else { Mode::Session };
             match code {
                 KeyCode::Esc => picker.mode = None,
                 KeyCode::Char('q' | 'c') => self.rules_picker = None,
-                KeyCode::Down | KeyCode::Up | KeyCode::Char('j' | 'k') | KeyCode::Tab => picker.mode = Some(other),
-                KeyCode::Char('1') => picker.mode = Some(Mode::Session),
-                KeyCode::Char('2') => picker.mode = Some(Mode::Team),
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => picker.mode = Some(mode.step(1)),
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => picker.mode = Some(mode.step(-1)),
+                KeyCode::Char(d) if Choice::numbered(d).is_some() => picker.mode = Choice::numbered(d),
                 KeyCode::Enter => {
                     let keys: Vec<String> = picker.chosen().iter().map(|r| r.key.clone()).collect();
                     let library = std::mem::take(&mut picker.library);
@@ -734,9 +733,10 @@ impl App {
         }
     }
 
-    /// Copies the command that starts `mode` with the prompts in `chosen`, writing their files first.
-    /// False when a file couldn't be written, so nothing was copied.
-    fn copy_launch_command(&mut self, chosen: &[&crate::rules::Rule], mode: crate::rules::Mode) -> bool {
+    /// Copies the command that starts `choice` with the prompts in `chosen`, or only their file's
+    /// path, writing the files first. False when a file couldn't be written, so nothing was copied.
+    fn copy_launch_command(&mut self, chosen: &[&crate::rules::Rule], choice: crate::rules::Choice) -> bool {
+        let mode = choice.mode();
         let path = match crate::rules::ensure(chosen, mode) {
             Ok(path) => path,
             Err(e) => {
@@ -744,8 +744,13 @@ impl App {
                 return false;
             }
         };
-        let command = crate::rules::launch_command(&path);
+        let path_only = choice == crate::rules::Choice::Path;
+        let command = if path_only { path.to_string_lossy().into_owned() } else { crate::rules::launch_command(&path) };
         let headline = match crate::clipboard::copy(&command) {
+            crate::clipboard::Copied::Native(_) if path_only => {
+                self.info = Some(format!("copied: the path of {} · paste it into a running session ", crate::rules::titles(chosen)));
+                return true;
+            }
             crate::clipboard::Copied::Native(_) => {
                 let lead = if mode == crate::rules::Mode::Team { " as a team lead" } else { "" };
                 self.info = Some(format!("copied: claude{lead} with {} · it applies to new conversations ", crate::rules::titles(chosen)));
@@ -755,7 +760,7 @@ impl App {
             crate::clipboard::Copied::Failed => "Couldn't reach a clipboard. Copy this command by hand:",
         };
         let path = crate::rules::quote_arg(&path.to_string_lossy());
-        let cli = crate::rules::cli_command(chosen, mode);
+        let cli = crate::rules::cli_command(chosen, mode) + if path_only { " --path" } else { "" };
         self.copy_note = Some(CopyNote { headline, command, path, cli });
         true
     }
