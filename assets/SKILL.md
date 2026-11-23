@@ -75,11 +75,25 @@ marsad context --format json       # the session this runs in: context_used / co
 marsad context --session <id-prefix>
 ```
 
-Run inside Claude Code, `marsad context` finds its own session. marsad also adds a note to the
-prompt once the context passes `warn_pct` (default 80) of the auto-compact point. When you see that
-note, or `context_pct` is high, offer to write a handoff prompt: the goal, what is done, decisions
-made, open questions, and the next steps, with file paths, so a fresh session can continue.
-`marsad context --warn <pct|off>` changes the threshold.
+Run inside Claude Code, `marsad context` finds its own session. marsad also adds a note once the
+context passes `warn_pct` (default 80) of the auto-compact point. When you see that note, finish or
+pause the current step and hand off: write a prompt a fresh session can start from with no other
+context (the goal, what is done, what is left with the next step first, decisions and why, files
+changed, dead ends, how to check the work) and pass it to `marsad handoff`:
+
+```sh
+"{{MARSAD_EXE}}" handoff <<'EOF'
+Goal: ...
+EOF
+```
+
+It saves the prompt and opens a new terminal (this terminal, else the system default, else a
+detached tmux session) running `claude` with it in the session's folder. Then tell the user where the
+new session is and stop working in this one. With `--close` (or `--auto-close on`) marsad ends this
+session 5 s later, so stop as soon as the command succeeds. If no terminal opens, it prints the
+`marsad handoff resume <id>` command for the user to run. `marsad handoff list` shows saved
+handoffs. `marsad context --warn <pct|off>` changes the threshold. Don't hand off on your own when
+the user asked you to keep going in this session.
 
 ## Several sessions in one repo
 

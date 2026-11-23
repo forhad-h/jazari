@@ -12,6 +12,7 @@ mod clipboard;
 mod context;
 mod disk;
 mod events;
+mod handoff;
 mod hook;
 mod install;
 mod jsonl;
@@ -35,6 +36,7 @@ mod statusline;
 mod store;
 mod system;
 mod term;
+mod terminal;
 mod transcript;
 mod ui;
 mod update;
@@ -99,6 +101,8 @@ enum Cmd {
     },
     /// How full this session's context is, and the automatic handoff warning (--warn).
     Context(context::ContextArgs),
+    /// Save a handoff prompt (stdin or --file) and open a new terminal where a fresh session starts from it.
+    Handoff(handoff::HandoffArgs),
     /// List the rules a Claude Code session can start with, or print the command that loads a chosen set.
     Rules(rules::RulesArgs),
     /// Write, edit, copy or delete your own prompts: `new` drafts one from a rough idea with Claude.
@@ -208,6 +212,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Cmd::Status(args)) => live::status(args),
+        Some(Cmd::Handoff(args)) => handoff::run(args),
         Some(Cmd::Context(args)) => context::run(args),
         Some(Cmd::Rules(args)) => rules::run(args),
         Some(Cmd::Prompt(cmd)) => prompt_gen::run(cmd),

@@ -1,6 +1,6 @@
 //! `marsad context`: how full a session's context is, so a session can decide to hand off before
-//! auto-compact. With `--hook` it is also the UserPromptSubmit hook that tells a session, once per
-//! crossing, that its context passed the warning threshold.
+//! auto-compact. With `--hook` it is also the UserPromptSubmit and PostToolUse hook that tells a
+//! session, once per crossing, that its context passed the warning threshold and how to hand off.
 
 use crate::model::{ContextInfo, Session, auto_compact_window, context_info, fmt_tokens};
 use crate::report::Format;
@@ -20,7 +20,7 @@ pub struct ContextArgs {
     warn: Option<String>,
     #[arg(long, value_enum, default_value = "table")]
     format: Format,
-    /// Hook entrypoint called by Claude Code on UserPromptSubmit (reads hook JSON on stdin).
+    /// Hook entrypoint called by Claude Code on UserPromptSubmit and PostToolUse (reads hook JSON on stdin).
     #[arg(long, hide = true)]
     hook: bool,
 }
@@ -152,6 +152,8 @@ fn hook() -> Option<String> {
     std::io::stdin().read_to_string(&mut input).ok()?;
     let raw: Value = serde_json::from_str(&input).ok()?;
     let threshold = crate::settings::context_warning()?;
+    // Only these events let a hook add text to the session's context.
+    let event = raw["hook_event_name"].as_str().filter(|e| matches!(*e, "UserPromptSubmit" | "PostToolUse")).unwrap_or("UserPromptSubmit");
     let id = raw["session_id"].as_str().filter(|id| !id.is_empty() && !id.contains(['/', '\\', '.']))?;
     let snapshot = crate::statusline::load(&crate::statusline::status_dir().join(format!("{id}.json")));
     let tail = raw["transcript_path"].as_str().and_then(|p| last_context(Path::new(p)));
@@ -169,11 +171,12 @@ fn hook() -> Option<String> {
     } else if was_warned && !warned {
         let _ = std::fs::remove_file(&marker);
     }
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "marsad".into());
     emit.then(|| {
         json!({
             "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": note(pct),
+                "hookEventName": event,
+                "additionalContext": crate::handoff::context_note(pct, &exe, crate::handoff::auto_close()),
             }
         })
         .to_string()
@@ -185,13 +188,6 @@ fn hook() -> Option<String> {
 fn decide(pct: f64, threshold: u32, warned: bool) -> (bool, bool) {
     let over = pct >= threshold as f64;
     (over && !warned, over)
-}
-
-fn note(pct: f64) -> String {
-    format!(
-        "[marsad] This session's context is {pct:.0}% full; Claude Code auto-compacts at 100%. \
-         Consider writing a handoff prompt for a fresh session now, before continuing."
-    )
 }
 
 fn clean_markers(dir: &Path) {

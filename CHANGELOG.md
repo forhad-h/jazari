@@ -5,6 +5,13 @@ GitHub release. Keep each bullet to one short line.
 
 ## Unreleased
 
+- At 80% context a session is asked to write a handoff and pass it to `marsad handoff`
+- `marsad handoff` opens a new session in this terminal, else the default terminal, else tmux
+- Warp, iTerm2, Terminal.app, Ghostty, WezTerm, kitty, Windows Terminal and tmux are supported
+- `marsad handoff --close` ends the old session once the new one is open (`--auto-close on` makes it the default)
+- `marsad handoff list` and `resume <id>` show and restart saved handoffs
+- The context warning also reaches long turns between tool calls
+- `marsad install` offers to install tmux when it is missing
 - Sessions stop before their next tool call when the disk is nearly full (95% or 8 GB free), so it can't hang the machine
 - At 90% or 15 GB free, sessions are told once to finish the step and write a handoff
 - `marsad disk` shows free space and the levels; `--guard off` only warns
