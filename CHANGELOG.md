@@ -17,6 +17,11 @@ GitHub release. Keep each bullet to one short line.
 - Optional ballast file (`disk.ballast_gb`) that is deleted at the emergency level to free space
 - Optional phone notifications through ntfy or a webhook (`disk.ntfy`, `disk.webhook`)
 - `marsad disk` shows the watcher, the ballast and phone notifications
+- `D` and `marsad clean` list caches, build output and Docker data that can go, by tier, with sizes
+- Rebuildable caches and build output are cleaned on their own once the disk reaches the warning level
+- Backups, unused Docker volumes and merged worktrees are removed one at a time, after a confirmation
+- `J` asks Claude whether each data-holding item can go; it only advises
+- marsad's own CPU, memory and data folder size show beside the meters
 
 ## 0.12.0 - 2026-11-23
 

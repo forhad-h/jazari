@@ -45,12 +45,25 @@ pub fn run() -> anyhow::Result<()> {
     match raw.get("hook_event_name").and_then(Value::as_str) {
         Some("SessionEnd") => {
             let _ = detached(std::process::Command::new(std::env::current_exe()?).arg("sync")).spawn();
+            after_task(&raw);
         }
+        Some("Stop") => after_task(&raw),
         // The disk watcher runs while any session does.
         Some("SessionStart") => crate::watch::ensure_running(),
         _ => {}
     }
     Ok(())
+}
+
+/// When a turn or session ends, the work it did may have filled the disk: start the automatic
+/// cleanup if the disk is at the warning level (rate-limited inside `maybe_start`).
+fn after_task(raw: &Value) {
+    let cfg = crate::disk::Config::load();
+    let home = dirs::home_dir();
+    let cwd = raw.get("cwd").and_then(Value::as_str).map(std::path::Path::new);
+    if let Some((level, _)) = crate::disk::worst(cwd.into_iter().chain(home.as_deref()), &cfg.thresholds, crate::disk::measure) {
+        crate::clean::maybe_start(level);
+    }
 }
 
 /// Appends one event line to the log in `dir`, rotating it once it is too big.

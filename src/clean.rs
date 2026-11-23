@@ -21,6 +21,8 @@ const MIN_BYTES: u64 = 50_000_000;
 const BUILD_IDLE_SECS: f64 = 86_400.0;
 /// `node_modules` is offered only for projects idle this long.
 const DEPS_IDLE_SECS: f64 = 14.0 * 86_400.0;
+/// A worktree changed more recently than this may have a subagent working in it.
+const WORKTREE_QUIET: Duration = Duration::from_secs(3600);
 /// An automatic cleanup runs at most this often.
 const AUTO_EVERY: Duration = Duration::from_secs(30 * 60);
 
@@ -405,21 +407,29 @@ fn worktree_items(roots: &[(PathBuf, f64)], env: &Env) -> Vec<Item> {
         let default = git(root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).filter(|b| !b.is_empty()).unwrap_or_else(|| "main".into());
         for e in entries.flatten() {
             let path = e.path();
-            if !e.file_type().is_ok_and(|t| t.is_dir()) || env.live.iter().any(|l| l.starts_with(&path)) {
+            // A subagent working in a worktree is not a session of its own, so recent changes count as use.
+            let recent = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a < WORKTREE_QUIET);
+            if !e.file_type().is_ok_and(|t| t.is_dir()) || recent || env.live.iter().any(|l| l.starts_with(&path)) {
                 continue;
             }
             let Some(status) = git(&path, &["status", "--porcelain"]) else { continue };
-            let branch = git(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+            let branch = match git(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default() {
+                b if b == "HEAD" || b.is_empty() => "(detached)".to_string(),
+                b => format!("branch {b}"),
+            };
             let head = git(&path, &["rev-parse", "HEAD"]).unwrap_or_default();
             let merged = !head.is_empty() && git(root, &["merge-base", "--is-ancestor", &head, &default]).is_some();
             let bytes = dir_size(&path);
+            if bytes < MIN_BYTES {
+                continue;
+            }
             let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let (tier, action, note) = if status.is_empty() && merged {
-                (Tier::B, Action::GitWorktreeRemove { repo: root.clone(), path: path.clone() }, format!("branch {branch} is merged into {default}, no changes"))
+                (Tier::B, Action::GitWorktreeRemove { repo: root.clone(), path: path.clone() }, format!("{branch} is merged into {default}, no changes"))
             } else if !status.is_empty() {
-                (Tier::C, Action::None, format!("branch {branch} has uncommitted changes; kept"))
+                (Tier::C, Action::None, format!("{branch} has uncommitted changes; kept"))
             } else {
-                (Tier::C, Action::None, format!("branch {branch} has commits not in {default}; kept"))
+                (Tier::C, Action::None, format!("{branch} has commits not in {default}; kept"))
             };
             out.push(Item { id: path.display().to_string(), tier, what: format!("Claude Code worktree in {name}"), bytes, action, note });
         }
@@ -924,6 +934,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn plans_caches_idle_build_output_and_docker_by_tier() {
         let t = tree("plan");
         let home = &t.0;
@@ -1109,11 +1120,16 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn only_merged_clean_worktrees_can_be_removed() {
         let t = tree("worktrees");
         let repo = t.0.join("Projects/app");
-        for w in ["done", "dirty", "ahead", "live"] {
-            file(&repo.join(format!(".claude/worktrees/{w}/f")), 10);
+        for w in ["done", "dirty", "ahead", "live", "fresh"] {
+            file(&repo.join(format!(".claude/worktrees/{w}/f")), 60_000_000);
+            if w != "fresh" {
+                let old = std::time::SystemTime::now() - Duration::from_secs(7200);
+                std::fs::File::open(repo.join(format!(".claude/worktrees/{w}"))).unwrap().set_modified(old).unwrap();
+            }
         }
         let mut e = env(&t.0, 0.0, &[]);
         e.live = vec![repo.join(".claude/worktrees/live")];
@@ -1138,6 +1154,7 @@ mod tests {
             items.iter().map(|i| (i.id.rsplit('/').next().unwrap().to_string(), i.tier, i.action != Action::None)).collect();
         assert_eq!(got, [("ahead".to_string(), Tier::C, false), ("dirty".into(), Tier::C, false), ("done".into(), Tier::B, true)]);
         assert!(items[0].note.contains("not in origin/main"));
+        assert!(items[2].note.starts_with("branch done-branch is merged"), "{}", items[2].note);
     }
 
     #[test]

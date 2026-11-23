@@ -32,6 +32,13 @@ marsad system --format json        # ok, concerns, disk (used_pct, free_gb, leve
 marsad disk --format json          # every volume in use, the levels, the guard, the watcher, ballast and phone notifications
 ```
 
+To free space, `marsad clean --format json` lists items by tier (`A` rebuilt automatically, `B`
+slow to get back, `C` holds data) with `id`, `bytes` and Claude's advice. Run tier A with
+`marsad clean --tier-a`. Run tier B items (`marsad clean --run <id>`) only after the user agrees.
+Tier C can't be removed from the command line: point the user to `D` in the dashboard. Never
+delete these things yourself with `rm`, `docker volume rm` or similar; marsad rechecks every target
+before removing it.
+
 Before a large build, a Docker build or image pull, a package install, or a long unattended run,
 check `marsad system`. If `ok` is false, tell the user the `concerns`, and prefer smaller steps or
 waiting over starting the heavy work. A full disk hangs the machine. At the disk `warning` level

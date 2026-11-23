@@ -48,7 +48,7 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `p` badges and share to LinkedIn · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 
@@ -149,7 +149,7 @@ marsad system --format json  # `ok` and `concerns` for a session deciding whethe
 The dashboard's second header row shows the same disk, memory (with swap) and CPU meters, colored
 by how close each is to trouble.
 
-#### The background watcher
+### Background disk watcher
 
 The first session's `SessionStart` hook starts `marsad guard`, a small background process that
 checks the same volumes every 20 seconds, so a disk filled between tool calls (a build, an image
@@ -157,7 +157,7 @@ pull) is caught too, with or without the dashboard. Only one runs at a time (`~/
 and it exits once no session has run for 10 minutes. It needs no launchd or systemd unit.
 
 - **Desktop notification and sound** once per crossing of notice, warning, critical and emergency.
-- **Cleanup** of rebuildable data from the warning level, as `marsad clean` describes.
+- **Cleanup** of rebuildable data from the warning level (see [Disk cleanup](#disk-cleanup)).
 - **Emergency stop**: at the emergency level it sends SIGINT (never a kill) to each running
   session's Claude Code process, once per crossing, after checking the process is still Claude
   Code. The dashboard marks the session `halted`; `claude --resume <id>` continues it. On Windows
@@ -176,6 +176,53 @@ and it exits once no session has run for 10 minutes. It needs no launchd or syst
 ```
 
 `marsad disk` shows whether the watcher is running, the ballast and which phone notifications are set.
+
+### Disk cleanup
+
+`D` in the dashboard (or `marsad clean`) lists what can be removed, measured on disk, in three tiers.
+marsad already knows which projects have live sessions and when each was last active, so "idle"
+comes from that rather than file times, which installs and git keep refreshing.
+
+| Tier | What | How it is removed |
+|---|---|---|
+| **A** rebuilt automatically, no data | npm, npx, Yarn, pip, uv, Go, Gradle and Cargo caches, Homebrew downloads, Xcode DerivedData, Docker build cache; `.next`, `.turbo`, `.parcel-cache` and Cargo `target/` in projects with no session for a day | on its own once the disk reaches the warning level (and at critical even with auto-clean off), at most every 30 minutes, then one notification saying what was freed |
+| **B** rebuilt, but slow to get back | `node_modules` in projects idle 14 days, Docker images no container uses, containers stopped over 7 days, pnpm store, Maven repository, Claude Code worktrees whose branch is merged and clean | after one confirmation |
+| **C** holds data | backup copies next to their original (`src.bak-1119`, `app-backup`, `site_old`), Docker volumes no container uses; worktrees with changes or unmerged commits are listed but never removed | one at a time from `D`, after a confirmation that says it can't be brought back |
+
+`J` in the view (`marsad clean --judge`) asks Claude whether each tier C item can go. It gets
+names, sizes, ages and top-level entry names, with the home folder written as `~`, never file
+contents, and answers keep, suggest or safe with a reason, shown on the item and in the
+confirmation. It only advises; marsad does the removing. The run is isolated like the prompt
+writer (`--safe-mode`, no tools, no transcript) and tries Sonnet, then Opus, then your default
+model (`models.clean_judge` in the settings changes the first).
+
+What keeps it safe:
+
+- Every removal is one of a fixed set of actions (delete one of a fixed list of folder names,
+  `docker builder|image|container prune`, `docker volume rm <name>`, `git worktree remove`
+  without `--force`). No model writes a command that runs.
+- Right before deleting, each folder is checked again: it still exists, it is a plain folder (not
+  a link, and no link in its path), it is inside the home or temp folder and at least two levels
+  down, it isn't in `.git`, `.ssh` or `.env*`, no session runs in its project, and the tool that
+  uses a cache isn't running. Build output removed on its own must be ignored by git or marked by
+  Cargo. A backup is removed only while the folder it copies still exists.
+- Folders are deleted outright (moving them to the Trash frees nothing) with Rust's standard
+  library, never `rm -rf` through a shell.
+- Each action is recorded in the `cleanups` table of the usage history, with the bytes it freed;
+  `D` and `marsad clean` show the total for the last 30 days. Docker Desktop's disk image may give
+  space back only after Docker restarts.
+
+```sh
+marsad clean                     # the plan, by tier, with sizes and ids
+marsad clean --format json       # the same for a session (`claude` holds Claude's advice)
+marsad clean --tier-a            # remove every tier A item now
+marsad clean --run npm-cache ~/Projects/web/node_modules   # tier A or B items by id
+marsad clean --judge             # ask Claude about the tier C items
+marsad clean --auto-clean off    # don't clean tier A on its own at the warning level
+```
+
+At the critical level the guard still lets plain `marsad disk`, `marsad system` and `marsad clean`
+commands through, so a session can check and free space.
 
 ### Session history
 
