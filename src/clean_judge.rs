@@ -109,6 +109,7 @@ pub fn describe(items: &[&Item], home: &Path) -> Value {
                 }
                 Action::RemoveDir { path, .. } | Action::GitWorktreeRemove { path, .. } => d["path"] = json!(redact(path, home)),
                 Action::DockerVolumeRm(name) => d["docker_volume"] = json!(name),
+                Action::DockerContainerRm(_) => d["docker_container"] = json!(item.what),
                 _ => {}
             }
             d
@@ -132,7 +133,7 @@ fn parse(stdout: &[u8], count: usize) -> Result<Vec<(usize, Verdict)>, Option<St
         o @ Value::Object(_) => o.clone(),
         _ => {
             let (a, b) = (result.find('{'), result.rfind('}'));
-            a.zip(b).and_then(|(a, b)| serde_json::from_str(&result[a..=b]).ok()).ok_or_else(|| Some("claude gave no verdicts".to_string()))?
+            a.zip(b).filter(|(a, b)| a < b).and_then(|(a, b)| serde_json::from_str(&result[a..=b]).ok()).ok_or_else(|| Some("claude gave no verdicts".to_string()))?
         }
     };
     let verdicts = out["verdicts"]
@@ -243,6 +244,8 @@ mod tests {
         let rejected = json!({ "is_error": true, "api_error_status": 404, "result": "model not found" });
         assert_eq!(parse(rejected.to_string().as_bytes(), 1), Err(None), "a rejected model tries the next");
         assert!(matches!(parse(b"nope", 1), Err(Some(_))));
+        let backwards = json!({ "result": "} then {" });
+        assert!(matches!(parse(backwards.to_string().as_bytes(), 1), Err(Some(_))), "no panic on a brace before the opening one");
     }
 
     #[test]

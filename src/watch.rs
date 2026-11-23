@@ -109,8 +109,9 @@ impl Watcher {
             paths.push(dir.to_path_buf());
         }
         if let Some((level, reading)) = crate::disk::worst(paths.iter().map(PathBuf::as_path), &t, &env.measure) {
-            // Space first, so stopping sessions cleanly and cleaning up have room to write.
-            if level == Level::Emergency {
+            // Space first, so stopping sessions cleanly and cleaning up have room to write. The
+            // ballast sits on the home volume, so only freeing that one helps.
+            if level == Level::Emergency && reading.system {
                 let _ = std::fs::remove_file(&env.ballast);
             }
             let (announce, announced) = t.step(&reading, self.announced);
@@ -131,7 +132,8 @@ impl Watcher {
                 self.interrupted.clear();
             }
             if level == Level::Emergency {
-                self.interrupt(env, &sessions, &reading);
+                let hit: Vec<Live> = on_full_volume(&sessions, &reading, &t, &env.measure).into_iter().cloned().collect();
+                self.interrupt(env, &hit, &reading);
             }
             keep_ballast(env, level, &t, &settings);
         }
@@ -309,6 +311,15 @@ pub fn running_pid(dir: &Path, is_marsad: impl Fn(u32) -> bool) -> Option<u32> {
     std::fs::read_to_string(pid_path(dir)).ok()?.trim().parse().ok().filter(|p| is_marsad(*p))
 }
 
+/// The sessions to stop for an emergency on `full`: all of them when it is the home volume, whose
+/// filling hangs the machine; otherwise only those working on a volume at the emergency level.
+fn on_full_volume<'a>(sessions: &'a [Live], full: &Reading, t: &Thresholds, measure: &Measure) -> Vec<&'a Live> {
+    sessions
+        .iter()
+        .filter(|s| full.system || measure(Path::new(&s.cwd)).is_some_and(|r| t.level(&r) == Level::Emergency))
+        .collect()
+}
+
 /// Hooks fire after the process starts; this covers a slow start and clock rounding.
 const START_SLACK_SECS: f64 = 120.0;
 
@@ -437,7 +448,7 @@ mod tests {
     /// A 1 TB disk at `p` percent full.
     fn pct(p: f64) -> Reading {
         let total = 1_000_000_000_000u64;
-        Reading { path: "/x".into(), total, available: (total as f64 * (100.0 - p) / 100.0) as u64 }
+        Reading { system: true, path: "/x".into(), total, available: (total as f64 * (100.0 - p) / 100.0) as u64 }
     }
 
     /// What a fake environment saw the watcher do.
@@ -480,7 +491,7 @@ mod tests {
             now: Box::new(move || now.get()),
             settings: Box::new(move || (Thresholds::default(), settings.borrow().clone())),
             sessions: Box::new(move || sessions.borrow().clone()),
-            measure: Box::new(move |p| Some(Reading { path: p.to_path_buf(), ..disk.borrow().clone() })),
+            measure: Box::new(move |p| Some(Reading { system: true, path: p.to_path_buf(), ..disk.borrow().clone() })),
             alert: Box::new(move |title, _| s1.borrow_mut().alerts.push(title.to_string())),
             curl: Box::new(move |args| s2.borrow_mut().curls.push(args.to_vec())),
             clean: Box::new(move |l| s3.borrow_mut().cleans.push(l)),
@@ -607,7 +618,7 @@ mod tests {
         // Not written when it would itself push the disk to warning.
         std::fs::remove_file(&path).unwrap();
         let total = 1_000_000_000_000u64;
-        *f.disk.borrow_mut() = Reading { path: "/x".into(), total, available: 100_000_000_000 + 1_000_000 };
+        *f.disk.borrow_mut() = Reading { system: true, path: "/x".into(), total, available: 100_000_000_000 + 1_000_000 };
         w.tick(&mut env);
         assert!(!path.exists());
 
@@ -642,7 +653,7 @@ mod tests {
     #[test]
     fn phone_payloads_carry_the_level_and_space_but_no_paths() {
         let s = Settings { ballast: 0, ntfy: Some("https://ntfy.sh/topic".into()), webhook: Some("https://example.com/hook".into()) };
-        let r = Reading { path: "/Users/me/secret-project".into(), ..pct(91.04) };
+        let r = Reading { system: true, path: "/Users/me/secret-project".into(), ..pct(91.04) };
         assert!(phone_requests(&s, Level::Notice, &r).is_empty());
         let reqs = phone_requests(&s, Level::Warning, &r);
         assert_eq!(reqs.len(), 2);
@@ -689,5 +700,21 @@ mod tests {
         assert!(still_the_session("node", None, 1_100, 1_010.0), "within the start slack");
         assert!(!still_the_session("node", None, 5_000, 1_010.0), "a newer process took the pid");
         assert!(!still_the_session("python", None, 1_000, 1_010.0));
+    }
+
+    #[test]
+    fn an_emergency_on_another_volume_stops_only_the_sessions_there() {
+        let t = Thresholds::default();
+        let sessions = vec![live("home", Some(1)), live("usb", Some(2))];
+        let measure: Measure = Box::new(|p| {
+            let full = p.ends_with("usb");
+            let total = 500_000_000_000u64;
+            Some(Reading { system: !full, path: p.to_path_buf(), total, available: if full { total / 100 } else { total / 2 } })
+        });
+        let usb = Reading { system: false, path: "/p/usb".into(), total: 500_000_000_000, available: 5_000_000_000 };
+        let ids: Vec<&str> = on_full_volume(&sessions, &usb, &t, &measure).iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["usb"]);
+        let home = Reading { system: true, ..usb };
+        assert_eq!(on_full_volume(&sessions, &home, &t, &measure).len(), 2, "a full home volume stops every session");
     }
 }

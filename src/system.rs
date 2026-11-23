@@ -225,7 +225,7 @@ mod tests {
     fn a_roomy_machine_has_no_concerns() {
         let t = crate::disk::Thresholds::default();
         let mut s = snap();
-        s.disk = Some((Level::Ok, Reading { path: "/x".into(), total: 228_000_000_000, available: 105_000_000_000 }));
+        s.disk = Some((Level::Ok, Reading { system: true, path: "/x".into(), total: 228_000_000_000, available: 105_000_000_000 }));
         assert!(s.concerns(&t).is_empty());
     }
 
@@ -233,7 +233,7 @@ mod tests {
     fn concerns_name_the_disk_memory_swap_and_load() {
         let t = crate::disk::Thresholds::default();
         let mut s = snap();
-        let r = Reading { path: "/x".into(), total: 228_000_000_000, available: 10_000_000_000 };
+        let r = Reading { system: true, path: "/x".into(), total: 228_000_000_000, available: 10_000_000_000 };
         s.disk = Some((t.level(&r), r));
         s.mem_available = GIB as u64;
         s.swap_used = 10 * GIB as u64;

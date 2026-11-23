@@ -186,8 +186,8 @@ comes from that rather than file times, which installs and git keep refreshing.
 | Tier | What | How it is removed |
 |---|---|---|
 | **A** rebuilt automatically, no data | npm, npx, Yarn, pip, uv, Go, Gradle and Cargo caches, Homebrew downloads, Xcode DerivedData, Docker build cache; `.next`, `.turbo`, `.parcel-cache` and Cargo `target/` in projects with no session for a day | on its own once the disk reaches the warning level (and at critical even with auto-clean off), at most every 30 minutes, then one notification saying what was freed |
-| **B** rebuilt, but slow to get back | `node_modules` in projects idle 14 days, Docker images no container uses, containers stopped over 7 days, pnpm store, Maven repository, Claude Code worktrees whose branch is merged and clean | after one confirmation |
-| **C** holds data | backup copies next to their original (`src.bak-1119`, `app-backup`, `site_old`), Docker volumes no container uses; worktrees with changes or unmerged commits are listed but never removed | one at a time from `D`, after a confirmation that says it can't be brought back |
+| **B** rebuilt, but slow to get back | `node_modules` in projects idle 14 days, Docker images no container uses, pnpm store, Maven repository, Claude Code worktrees whose branch is merged and clean | after one confirmation |
+| **C** holds data | backup copies next to their original (`src.bak-1119`, `app-backup`, `site_old`), Docker volumes no container uses, each container stopped over 7 days (its own files can hold data); worktrees with changes or unmerged commits are listed but never removed | one at a time from `D`, after a confirmation that says it can't be brought back |
 
 `J` in the view (`marsad clean --judge`) asks Claude whether each tier C item can go. It gets
 names, sizes, ages and top-level entry names, with the home folder written as `~`, never file
@@ -199,7 +199,7 @@ model (`models.clean_judge` in the settings changes the first).
 What keeps it safe:
 
 - Every removal is one of a fixed set of actions (delete one of a fixed list of folder names,
-  `docker builder|image|container prune`, `docker volume rm <name>`, `git worktree remove`
+  `docker builder|image prune`, `docker volume rm <name>`, `docker rm <id>`, `git worktree remove`
   without `--force`). No model writes a command that runs.
 - Right before deleting, each folder is checked again: it still exists, it is a plain folder (not
   a link, and no link in its path), it is inside the home or temp folder and at least two levels
@@ -274,14 +274,14 @@ marsad risk --scanner clamdscan           # scan fresh files before they run (cl
 Two optional checks are off by default, because they run other programs:
 
 - **OSV lookups** (`"osv": true`): the names of packages being installed are sent to
-  `https://api.osv.dev` with `curl` (2 second limit). A package listed as malicious (an advisory
+  `https://api.osv.dev` with `curl` (1.2 second limit, side by side). A package listed as malicious (an advisory
   whose id starts with `MAL-`) is refused. Nothing leaves the machine unless you turn this on.
 - **Malware scanner** (`"scanner": "clamdscan"` or `"clamscan"`): when a command runs or sources a
   file changed in the last 10 minutes in the session's folder, `~/Downloads` or a temporary folder
-  (`./install.sh`, `bash setup.sh`, `python file.py`), that file alone is handed to ClamAV (3 second
-  limit, no shell). A detection is refused with the signature name; a timeout or error lets the
-  call through. Set it up with `brew install clamav` and `freshclam` (`clamdscan` needs the `clamd`
-  daemon running and is much faster). Commercial engines, Bitdefender for example, have no free
+  (`./install.sh`, `bash setup.sh`, `python file.py`), that file alone is handed to ClamAV (1.5 seconds for all files, no
+  shell). A detection is refused with the signature name; a timeout or error lets the
+  call through. Set it up with `brew install clamav` and `freshclam` Use `clamdscan` with the `clamd` daemon
+  running: `clamscan` loads its signatures on every call and seldom finishes in time. Commercial engines, Bitdefender for example, have no free
   command-line scanner marsad can call on macOS.
 
 Limits: the patterns catch the common and the careless cases. Code written to hide what it does,

@@ -160,7 +160,11 @@ fn main() -> anyhow::Result<()> {
     let cmd = Cli::parse().cmd;
     // Before anything reads or writes data. The hooks and the status line must stay quiet.
     let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_) | Cmd::Guard { .. }));
-    match migrate::from_legacy(if quiet { migrate::HOOK_WAIT } else { migrate::WAIT }, !quiet) {
+    // Claude Code waits on the guard hook before every tool call: it never copies data, which can
+    // take longer than the hook may. Any other marsad run does that.
+    let sync_hook = matches!(cmd, Some(Cmd::Guard { hook: true }));
+    let outcome = if sync_hook { migrate::Outcome::Idle } else { migrate::from_legacy(if quiet { migrate::HOOK_WAIT } else { migrate::WAIT }, !quiet) };
+    match outcome {
         migrate::Outcome::Busy if !quiet => {
             anyhow::bail!("marsad's data is being copied to {} by another marsad; try again in a moment", data_dir().display())
         }
@@ -210,8 +214,10 @@ fn main() -> anyhow::Result<()> {
             if !hook {
                 return watch::run();
             }
-            // Never fail or print anything but the verdict: a hook must not disturb the session.
-            if let Some(out) = disk::hook() {
+            // Never fail or print anything but the verdict: a hook must not disturb the session, so
+            // even a panic prints nothing and exits 0.
+            std::panic::set_hook(Box::new(|_| {}));
+            if let Ok(Some(out)) = std::panic::catch_unwind(disk::hook) {
                 println!("{out}");
             }
             Ok(())
