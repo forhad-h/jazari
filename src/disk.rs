@@ -1,7 +1,8 @@
 //! Free space on the volume that holds the user's files, the levels at which marsad warns and stops
 //! Claude Code sessions, and `marsad disk`. A full disk can hang the machine: swap can't grow and
 //! Claude Code can't write its transcript. With `marsad guard --hook` as a synchronous PreToolUse
-//! and UserPromptSubmit hook, every tool call of every running session checks the disk first.
+//! and UserPromptSubmit hook, every tool call of every running session checks the disk first, and
+//! then the command check in `risk.rs`.
 
 use crate::report::Format;
 use clap::Args;
@@ -296,6 +297,28 @@ pub fn hook() -> Option<String> {
     let raw: Value = serde_json::from_str(&input).ok()?;
     let event = raw["hook_event_name"].as_str()?;
     let id = raw["session_id"].as_str().filter(|id| !id.is_empty() && !id.contains(['/', '\\', '.']))?;
+    let verdict = disk_verdict(&raw, event, id);
+    respond(event, verdict, |note| crate::risk::hook(&raw, id, note)).map(|v| v.to_string())
+}
+
+/// The output for one hook call: a disk halt wins, then a command check finding (which carries
+/// any disk note along), then the disk note.
+fn respond(event: &str, verdict: Option<Verdict>, risk: impl FnOnce(Option<&str>) -> Option<Value>) -> Option<Value> {
+    if event == "PreToolUse" && !matches!(verdict, Some(Verdict::Halt { .. })) {
+        let note = match &verdict {
+            Some(Verdict::Note(text)) => Some(text.as_str()),
+            _ => None,
+        };
+        if let Some(out) = risk(note) {
+            return Some(out);
+        }
+    }
+    Some(verdict?.to_json(event))
+}
+
+/// The disk check for one hook call, remembering the level this session was warned at and
+/// logging a halt.
+fn disk_verdict(raw: &Value, event: &str, id: &str) -> Option<Verdict> {
     let cfg = Config::load();
     let home = dirs::home_dir();
     let paths: Vec<&Path> = raw["cwd"].as_str().map(Path::new).into_iter().chain(home.as_deref()).collect();
@@ -306,7 +329,7 @@ pub fn hook() -> Option<String> {
     let was = std::fs::read_to_string(&marker).ok().and_then(|s| Level::parse(s.trim())).unwrap_or_default();
     let (mut verdict, warned) = decide(&cfg, event, id, &reading, was);
     // Checking the disk or freeing space through marsad stays possible at the critical level.
-    if matches!(verdict, Some(Verdict::Halt { .. })) && is_marsad_command(&raw) {
+    if matches!(verdict, Some(Verdict::Halt { .. })) && is_marsad_command(raw) {
         verdict = None;
     }
     if warned != was {
@@ -321,7 +344,7 @@ pub fn hook() -> Option<String> {
     if matches!(verdict, Verdict::Halt { .. }) {
         log_halt(id, &reading);
     }
-    Some(verdict.to_json(event).to_string())
+    Some(verdict)
 }
 
 /// Logs that a session was stopped for disk space, so the dashboard shows why and how to resume it.
@@ -600,6 +623,22 @@ mod tests {
         assert!(!is_marsad_command(&bash("marsad report")));
         assert!(!is_marsad_command(&bash("notmarsad disk")));
         assert!(!is_marsad_command(&json!({ "tool_name": "Write", "tool_input": { "command": "marsad disk" } })));
+    }
+
+    #[test]
+    fn a_disk_halt_wins_over_a_command_check_finding() {
+        let ask = |_: Option<&str>| Some(json!({ "hookSpecificOutput": { "permissionDecision": "ask" } }));
+        let halt = Verdict::Halt { user: "u".into(), claude: "c".into() };
+        let out = respond("PreToolUse", Some(halt), ask).unwrap();
+        assert_eq!((out["continue"].clone(), out["hookSpecificOutput"]["permissionDecision"].clone()), (json!(false), json!("deny")));
+        // Below the halt, the finding is the answer and gets the disk note.
+        let out = respond("PreToolUse", Some(Verdict::Note("disk 91%".into())), |note| Some(json!({ "note": note }))).unwrap();
+        assert_eq!(out["note"], "disk 91%");
+        // No finding: the disk note; prompts are never checked.
+        let out = respond("PreToolUse", Some(Verdict::Note("n".into())), |_| None).unwrap();
+        assert_eq!(out["hookSpecificOutput"]["additionalContext"], "n");
+        assert_eq!(respond("UserPromptSubmit", None, ask), None);
+        assert_eq!(respond("PreToolUse", None, |_| None), None);
     }
 
     #[test]

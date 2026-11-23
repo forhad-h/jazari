@@ -21,6 +21,7 @@ mod portable;
 mod prompt_gen;
 mod prompt_view;
 mod report;
+mod risk;
 mod rules;
 mod settings;
 mod share;
@@ -107,8 +108,10 @@ enum Cmd {
     Clean(clean::CleanArgs),
     /// Disk, memory, swap and CPU in one reading, with what to be careful about before heavy work.
     System(system::SystemArgs),
+    /// Ask about or refuse risky tool calls: check a command (--check), turn it on/off, list findings.
+    Risk(risk::RiskArgs),
     /// Background disk watcher (started by the SessionStart hook), or with --hook the synchronous
-    /// hook that checks the disk before each tool call and prompt.
+    /// hook that checks the disk and risky commands before each tool call and prompt.
     #[command(hide = true)]
     Guard {
         /// Hook entrypoint called by Claude Code on PreToolUse and UserPromptSubmit.
@@ -202,6 +205,7 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Disk(args)) => disk::run(args),
         Some(Cmd::System(args)) => system::run(args),
         Some(Cmd::Clean(args)) => clean::run(args),
+        Some(Cmd::Risk(args)) => risk::run(args),
         Some(Cmd::Guard { hook }) => {
             if !hook {
                 return watch::run();
