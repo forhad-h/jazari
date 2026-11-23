@@ -3,6 +3,13 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- The panel below the session list splits in two: the session's id and model, and a System panel
+- Disk, memory and CPU meters move from the header into the System panel
+- The selected session's context shows in the header beside the 5h and 7d limits
+- The session's current step, tokens, mode, folder and skills move to its history view
+
 ## 0.13.0 - 2026-11-23
 
 - Run `marsad install` again after updating: it adds the new guard, message and handoff hooks
