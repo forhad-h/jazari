@@ -301,8 +301,116 @@ pub fn staleness(board: &Board, now: NaiveDateTime) -> Staleness {
     out
 }
 
+/// How two agents on a board are linked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Link {
+    /// Messages one sent the other, or to `all`.
+    Messages(usize),
+    /// A logged conflict between them.
+    Conflict(ConflictStatus),
+    /// Claims of theirs that cover the same path.
+    Overlap(String),
+}
+
+/// One edge of the agents' relation map; `to` is `all` for a broadcast message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relation {
+    pub from: String,
+    pub to: String,
+    pub link: Link,
+}
+
+/// Who talks to whom, who disagrees, and whose claims overlap, from the board's messages, conflicts
+/// and claims. Messages between the same pair are counted together.
+pub fn relations(board: &Board) -> Vec<Relation> {
+    let mut out: Vec<Relation> = Vec::new();
+    for m in &board.messages {
+        let Some((from, to)) = message_ends(m) else { continue };
+        match out.iter_mut().find(|r| r.from == from && r.to == to && matches!(r.link, Link::Messages(_))) {
+            Some(Relation { link: Link::Messages(n), .. }) => *n += 1,
+            _ => out.push(Relation { from, to, link: Link::Messages(1) }),
+        }
+    }
+    for c in &board.conflicts {
+        let body = without_stamp(&c.text);
+        let head = body.split(':').next().unwrap_or("");
+        if let Some((a, b)) = head.split_once(" vs ") {
+            out.push(Relation { from: a.trim().to_string(), to: b.trim().to_string(), link: Link::Conflict(c.status) });
+        }
+    }
+    for (i, a) in board.claims.iter().enumerate() {
+        for b in &board.claims[i + 1..] {
+            if a.agent == b.agent || a.agent.is_empty() || b.agent.is_empty() {
+                continue;
+            }
+            if let Some(path) = shared_path(&a.path, &b.path) {
+                out.push(Relation { from: a.agent.clone(), to: b.agent.clone(), link: Link::Overlap(path) });
+            }
+        }
+    }
+    out
+}
+
+/// `2026-11-23 15:12 agent-a -> agent-b: text` gives (`agent-a`, `agent-b`).
+fn message_ends(text: &str) -> Option<(String, String)> {
+    let body = without_stamp(text);
+    let (head, _) = body.split_once(':')?;
+    let (from, to) = head.split_once("->").or_else(|| head.split_once('→'))?;
+    let (from, to) = (from.trim().trim_start_matches("from ").trim(), to.trim());
+    (!from.is_empty() && !to.is_empty() && !from.contains(' ') && !to.contains(' ')).then(|| (from.to_string(), to.to_string()))
+}
+
+/// The text after a leading `YYYY-MM-DD HH:MM` stamp, if it has one.
+fn without_stamp(text: &str) -> &str {
+    let mut rest = text.trim();
+    for _ in 0..2 {
+        match rest.split_once(' ') {
+            Some((word, after)) if word.starts_with(|c: char| c.is_ascii_digit()) => rest = after.trim_start(),
+            _ => break,
+        }
+    }
+    rest
+}
+
+/// A path two claims both cover: the same entry, or one inside the other's glob or directory.
+fn shared_path(a: &str, b: &str) -> Option<String> {
+    let entries = |s: &str| s.split(',').map(|p| p.trim().trim_matches('`').to_string()).filter(|p| !p.is_empty()).collect::<Vec<_>>();
+    let stem = |p: &str| p.split('*').next().unwrap_or(p).trim_end_matches('/').to_string();
+    for x in entries(a) {
+        for y in entries(b) {
+            let (sx, sy) = (stem(&x), stem(&y));
+            let globbed = |p: &str| p.contains('*') || p.ends_with('/');
+            let inside = |p: &str, s: &str, g: bool| p == s || (g && p.starts_with(s));
+            if x == y || inside(&y, &sx, globbed(&x)) || inside(&x, &sy, globbed(&y)) {
+                return Some(if x.len() <= y.len() { y } else { x });
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relations_come_from_messages_conflicts_and_overlapping_claims() {
+        let board = parse(
+            "## Claims\n| path/glob | agent | since | note |\n|---|---|---|---|\n\
+             | src/ui.rs, src/app.rs | agent-a | t | |\n| src/share*.rs | agent-b | t | |\n| src/ui.rs | agent-c | t | |\n| src/share_view.rs | agent-c | t | |\n\
+             ## Messages\n- 2026-11-23 15:12 agent-a -> agent-b: hi\n- 2026-11-23 15:13 agent-a -> agent-b: again\n- 2026-11-23 15:14 from agent-b -> all: sweep done\n- a note without ends\n\
+             ## Conflicts\n- 2026-11-23 15:20 agent-a vs agent-c: ui.rs | needs-human\n",
+        );
+        let r = relations(&board);
+        let has = |from: &str, to: &str, link: Link| r.iter().any(|x| x.from == from && x.to == to && x.link == link);
+        assert!(has("agent-a", "agent-b", Link::Messages(2)), "{r:?}");
+        assert!(has("agent-b", "all", Link::Messages(1)), "{r:?}");
+        assert!(has("agent-a", "agent-c", Link::Conflict(ConflictStatus::NeedsHuman)), "{r:?}");
+        assert!(has("agent-a", "agent-c", Link::Overlap("src/ui.rs".into())), "{r:?}");
+        assert!(has("agent-b", "agent-c", Link::Overlap("src/share_view.rs".into())), "{r:?}");
+        assert_eq!(r.len(), 5, "{r:?}");
+        assert_eq!(shared_path("src/", "src/a.rs").as_deref(), Some("src/a.rs"));
+        assert_eq!(shared_path("src/ab.rs", "src/a.rs"), None);
+    }
+
     use super::*;
 
     const TEMPLATE: &str = "# AGENT BOARD

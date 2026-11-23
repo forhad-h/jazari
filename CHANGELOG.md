@@ -28,6 +28,15 @@ GitHub release. Keep each bullet to one short line.
 - Package names one letter away from a popular package ask "did you mean"
 - `marsad risk` lists findings; `--check` tests a command; `--guard off` turns the check off
 - Optional, off by default: OSV lookups for malicious packages, and ClamAV scans of fresh files before they run
+- A session goes idle once background agents that outlived its turn finish, instead of staying active
+- Session history lists the newest events first
+- Sessions keep their place in the list: working ones sit on top, the rest stay in first-seen order
+- Share: three post variants (`v` cycles), each naming the features worked on and avoiding your posts of the last 10 days
+- The session list shows each session's name, with its project where the activity was
+- The details pane is shorter and shows the full session id; `y` copies it
+- The agent board shows a relation map: who messages whom, conflicts, and overlapping claims
+- Usage limit reset times use a 12-hour clock (`7:20pm`, `Fri 10:00am`)
+- `P` opens a small window that stays on top of other apps with every session's status (macOS)
 
 ## 0.12.0 - 2026-11-23
 

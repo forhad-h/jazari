@@ -6,17 +6,17 @@ doing, which ones are waiting on you, which skills they ran, and how many tokens
 ```
  marsad   3 sessions · 1 active · 2 need you                    today 2.4M · all-time 133.5M 
 ╭ Sessions ───────────────────────────────────────────────────────────────────────────────────╮
-│ PROJECT        ACTIVITY                                         TIME   TOKENS        STATUS │
-│ marsad         Bash: cargo test --all                            37s     2.0M     APPROVE ● │
-│ notes          Which database should we use?                     37s     8.1k    QUESTION ? │
-│ web         +2 › add dark mode to the settings page              12s   414.8k      ACTIVE ◐ │
+│ SESSION                            PROJECT        CONTEXT LEFT  TIME  TOKENS         STATUS │
+│ Fix the flaky login test           marsad         ▰▱▱▱▱ 801.0k   37s    2.0M      APPROVE ● │
+│ Pick a database for reports        notes          ▰▱▱▱▱ 920.4k   37s    8.1k     QUESTION ? │
+│ Dark mode settings              +2 web            ▰▰▱▱▱ 552.6k   12s  414.8k       ACTIVE ◐ │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ web · Dark mode settings ───────────────────────────────────────────────────────────────────╮
-│session  ~/Projects/web   model claude-opus-5-5   mode auto   id 1fe612e4                    │
-│tokens   in 54   out 12.8k   cache read 343.9k   cache write 58.0k   total 414.8k            │
-│agents   main 312.1k  ·  Explore ✓ 15.8k  ·  general-purpose ◐ 41.3k                         │
-│skills   code-review ×1 ≈140.9k                                                              │
-╰─────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Dark mode settings · web ───────────────────────────────────────────────────────────────────╮
+│now      › add dark mode to the settings page                                                │
+│context  ▰▰▰▰▱▱▱▱▱▱ 43%  552.6k left   ·   tokens 414.8k   ·   model claude-opus-5-5         │
+│id       1fe612e4-0c3b-4d5e-9a7f-2b8c6d1e0f93  y copies it   ·   ~/Projects/web              │
+│agents   main 312.1k · Explore ✓ 15.8k · general-purpose ◐ 1 running 41.3k                   │
+╰─────────────────────────────────────────────── enter history  tab subagents  y copy id ─────╯
 ```
 
 ## Install
@@ -48,9 +48,18 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `y` copy the session id · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
+History lists the newest events first. By default sessions that are working or waiting on you sit on top and the rest keep their place, so rows don't jump around as sessions run.
+
+### Window on top
+
+`P` opens a small window in the top-right corner that stays above every other app, listing each
+live session's status and name with your usage limits, so you can keep an eye on sessions while
+reading or browsing without switching back to the terminal. It doesn't take focus when clicked; drag
+it anywhere. `P` again or its close button closes it, and it closes with the dashboard. macOS only
+(it runs through `osascript`); on other systems use your terminal's own "always on top" setting.
 
 ### Alerts
 
@@ -85,7 +94,7 @@ binary outside a `bin` directory) can't update themselves; reinstall them the sa
 
 The **CONTEXT LEFT** column and the details pane show how many tokens remain before
 auto-compact, colored green → yellow (60%) → red (85%). The header shows your 5-hour and 7-day
-usage limits with time to reset (claude.ai Pro/Max only).
+usage limits with the local time each resets, such as `↻7:20pm` (claude.ai Pro/Max only).
 
 These exact figures come from Claude Code's status line feed, so `marsad install` sets
 `statusLine` to `marsad statusline`, which prints a compact `ctx 42% · 412k left · 5h 23% · 7d 41%`.
@@ -349,7 +358,7 @@ The prompts are added to the session's system prompt, so they survive `/clear` a
 
 Over SSH, `c` sends the command through your terminal (OSC 52, which kitty, WezTerm, Alacritty and iTerm2 with clipboard access allow; tmux needs `set-clipboard on`) and also shows it so you can copy it by hand. `marsad rules` lists the prompts and `marsad rules coordination output-hygiene` prints the command (`--team` for an agent team, `--format json` for scripts); `marsad coordination` is short for `marsad rules coordination`.
 
-`b` on a session opens its repo's board, read-only and live: agents with their last-seen times, claims, decisions, messages, conflicts and handoff notes. Agents and their claims not seen for more than 2 hours are marked `[stale]`, and `needs-human` conflicts are tagged in yellow. marsad never edits the board; the sessions own it. To change output hygiene, save a copy (`e` in the picker, or `marsad prompt copy`) and tick that instead.
+`b` on a session opens its repo's board, read-only and live: agents with their last-seen times, claims, decisions, messages, conflicts and handoff notes. Agents and their claims not seen for more than 2 hours are marked `[stale]`, and `needs-human` conflicts are tagged in yellow. A relation map at the top shows how the agents are linked: messages one sent another (or everyone), conflicts between them, and claims that cover the same file. marsad never edits the board; the sessions own it. To change output hygiene, save a copy (`e` in the picker, or `marsad prompt copy`) and tick that instead.
 
 ### Badges and sharing
 
@@ -391,8 +400,11 @@ terminal.
 the last 7 and 30 days', the daily average and all-time tokens, and your rank. You see the whole
 post beside your badges first: `enter` shares it to LinkedIn, `c` copies the whole post (and works
 again on the Done screen), `s` saves the badge image, `e` edits the line, `E` opens the whole post
-in `$VISUAL`/`$EDITOR`, `r` drafts a new line, and `q`/`esc` cancels without writing or opening
-anything. Confirming:
+in `$VISUAL`/`$EDITOR`, `r` drafts a new line, `v` shows the next of three variants of the line, and
+`q`/`esc` cancels without writing or opening anything. Each variant names the features you worked
+on that day (your busiest session titles, with project names taken out), and lines you shared or
+copied in the last 10 days are kept in `~/.marsad/share/posts.jsonl` so new drafts don't repeat
+them. Confirming:
 
 1. saves a 1200×627 card with your badge, rank, stats, achievements and `git config user.name` to
    `Downloads/marsad-YYYY-MM-DD.png` (or `~/.marsad/cards/`); sharing again the same day

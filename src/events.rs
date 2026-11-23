@@ -14,6 +14,13 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     if ev.get("agent_id").is_none() {
         session.last_hook = session.last_hook.max(ts);
         session.stopped = matches!(event, "Stop" | "SessionStart");
+    } else if let Some(aid) = s("agent_id") {
+        // A subagent whose start was missed (an older log) is still known to be working, until it stops.
+        let a = session.subagents.entry(aid.to_string()).or_default();
+        a.running = !matches!(event, "SubagentStop" | "StopFailure");
+        if a.agent_type.is_empty() {
+            a.agent_type = s("agent_type").filter(|t| !t.is_empty()).unwrap_or("agent").to_string();
+        }
     }
 
     if let Some(cwd) = s("cwd") {
@@ -301,6 +308,36 @@ mod tests {
         s.stats.turn_ended_at = Some(1.5);
         s.reconcile(10.0);
         assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Interrupted));
+    }
+
+    #[test]
+    fn a_background_agent_finishing_after_stop_leaves_the_session_idle() {
+        let mut s = run(&[
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "go"}),
+            json!({"hook_event_name": "Stop"}),
+            json!({"hook_event_name": "SubagentStart", "agent_id": "a1", "agent_type": "general-purpose"}),
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"}),
+        ]);
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Active, "the agent is still working");
+        let mut map = HashMap::from([("s1".to_string(), s)]);
+        apply(&mut map, &json!({"session_id": "s1", "ts": 11.0, "hook_event_name": "SubagentStop", "agent_id": "a1"}));
+        let mut s = map.remove("s1").unwrap();
+        s.reconcile(12.0);
+        assert_eq!(s.status, Status::Active, "hooks may still be settling");
+        s.reconcile(14.0);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Finished));
+        // A subagent that failed has stopped too.
+        let mut map = HashMap::from([("s1".to_string(), s)]);
+        apply(&mut map, &json!({"session_id": "s1", "ts": 15.0, "hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a2"}));
+        apply(&mut map, &json!({"session_id": "s1", "ts": 16.0, "hook_event_name": "StopFailure", "agent_id": "a2"}));
+        let mut s = map.remove("s1").unwrap();
+        assert!(!s.subagents["a2"].running);
+        // A running background shell still keeps it active.
+        s.set_status(Status::Active, 15.0);
+        s.stats.background = vec![(1.0, "cargo build".into())];
+        s.reconcile(30.0);
+        assert_eq!(s.status, Status::Active);
     }
 
     #[test]
