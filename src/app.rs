@@ -784,6 +784,9 @@ impl App {
 
     /// Keeps the window on top current, and notices when the user closed it.
     fn refresh_pin(&mut self) {
+        if self.pin.is_none() {
+            return;
+        }
         let text = self.pin_text();
         let Some(pin) = self.pin.as_mut() else { return };
         if pin.is_open() {
