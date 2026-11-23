@@ -537,7 +537,7 @@ fn first_line(s: &str) -> Option<&str> {
 // ---------- running a child with a deadline ----------
 
 #[derive(Debug, PartialEq, Eq)]
-enum RunError {
+pub(crate) enum RunError {
     NotFound,
     Spawn(String),
     Timeout,
@@ -545,10 +545,10 @@ enum RunError {
 }
 
 #[derive(Debug, Default)]
-struct Captured {
-    success: bool,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(crate) struct Captured {
+    pub success: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 /// Reads a pipe to its end on its own thread.
@@ -566,7 +566,7 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
 
 /// Runs `cmd` with `input` on stdin, capturing its output. Past `wait`, or once `cancel` is set,
 /// the child is killed.
-fn run_captured(cmd: &mut Command, input: &[u8], wait: Duration, cancel: &AtomicBool) -> Result<Captured, RunError> {
+pub(crate) fn run_captured(cmd: &mut Command, input: &[u8], wait: Duration, cancel: &AtomicBool) -> Result<Captured, RunError> {
     let child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
     let mut child = match child {
         Ok(child) => child,

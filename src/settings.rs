@@ -74,8 +74,23 @@ pub fn set_launch_mode(mode: crate::rules::Mode) -> anyhow::Result<()> {
     set_at(&path(), "launch_mode", json!(mode.key()))
 }
 
+fn generator_model_at(path: &Path) -> String {
+    load_at(path)
+        .get("generator_model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(crate::prompt_gen::DEFAULT_MODEL)
+        .to_string()
+}
+
+/// The model alias or name that writes prompts from a rough idea (`generator_model`).
+pub fn generator_model() -> String {
+    generator_model_at(&path())
+}
+
 /// Preferences an export carries; anything else in the file stays on this machine.
-const PORTABLE: &[&str] = &["retention_days", "alerts", "context_warning_pct", "rules", "launch_mode"];
+const PORTABLE: &[&str] = &["retention_days", "alerts", "context_warning_pct", "rules", "launch_mode", "generator_model"];
 
 /// Where versions before 0.4 kept the retention.
 fn legacy_retention_path() -> PathBuf {
@@ -207,6 +222,17 @@ mod tests {
         assert_eq!(launch_mode_at(&file), Mode::Team);
         set_at(&file, "launch_mode", json!("retired")).unwrap();
         assert_eq!(launch_mode_at(&file), Mode::Session);
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_generator_model_defaults_to_the_strongest_alias() {
+        let (file, _) = temp("generator");
+        assert_eq!(generator_model_at(&file), crate::prompt_gen::DEFAULT_MODEL);
+        set_at(&file, "generator_model", json!(" opus ")).unwrap();
+        assert_eq!(generator_model_at(&file), "opus");
+        set_at(&file, "generator_model", json!("")).unwrap();
+        assert_eq!(generator_model_at(&file), crate::prompt_gen::DEFAULT_MODEL, "blank means the default");
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 

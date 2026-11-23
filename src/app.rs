@@ -149,6 +149,8 @@ pub struct App {
     pub copy_note: Option<CopyNote>,
     /// The `c` picker for which rules the copied command loads, drawn over the current view while open.
     pub rules_picker: Option<RulesPicker>,
+    /// Writing or revising a prompt from the picker, drawn over it and given its keys while open.
+    pub prompt_view: Option<crate::prompt_view::PromptView>,
     pub board: BoardState,
     /// The rank and achievements for the badge view, refreshed after each sync.
     pub badges: Option<Badges>,
@@ -184,6 +186,8 @@ pub struct RulesPicker {
     pub cursor: usize,
     /// The highlighted mode once the prompts are chosen; None while ticking them.
     pub mode: Option<crate::rules::Mode>,
+    /// The prompt waiting for `y` to be deleted.
+    pub deleting: Option<usize>,
 }
 
 impl RulesPicker {
@@ -195,6 +199,15 @@ impl RulesPicker {
         if let Some(t) = self.ticked.get_mut(i) {
             *t = !*t;
         }
+    }
+
+    /// Re-reads the library, keeping the ticks, and highlights `select` when given, ticking it
+    /// when `tick`.
+    fn reload(&mut self, library: Vec<crate::rules::Rule>, select: Option<&str>, tick: bool) {
+        let keep: Vec<String> = self.chosen().iter().map(|r| r.key.clone()).collect();
+        self.ticked = library.iter().map(|r| keep.contains(&r.key) || (tick && Some(r.key.as_str()) == select)).collect();
+        self.cursor = select.and_then(|k| library.iter().position(|r| r.key == k)).unwrap_or(self.cursor).min(library.len().saturating_sub(1));
+        self.library = library;
     }
 }
 
@@ -353,6 +366,8 @@ enum Action {
     Quit,
     /// Suspend the terminal and edit this post text in the user's editor.
     EditPost(String),
+    /// Suspend the terminal and edit this prompt text (an idea or a draft) in the user's editor.
+    EditPrompt(String),
 }
 
 /// Indexed (session, agent) key -> tokens.
@@ -448,6 +463,7 @@ impl App {
             note_shown: None,
             copy_note: None,
             rules_picker: None,
+            prompt_view: None,
             board: BoardState::default(),
             badges: None,
             share: None,
@@ -539,7 +555,49 @@ impl App {
         let library = crate::rules::library();
         let saved = crate::settings::rules();
         let ticked = library.iter().map(|r| saved.contains(&r.key)).collect();
-        self.rules_picker = Some(RulesPicker { library, ticked, cursor: 0, mode: None });
+        self.rules_picker = Some(RulesPicker { library, ticked, cursor: 0, mode: None, deleting: None });
+    }
+
+    /// Routes a key to the prompt writer; a saved prompt joins the picker's library, ticked.
+    fn on_prompt_key(&mut self, key: KeyEvent) -> Action {
+        use crate::prompt_view::Outcome;
+        let Some(view) = self.prompt_view.as_mut() else { return Action::None };
+        match view.on_key(key) {
+            Outcome::Stay => {}
+            Outcome::Close => self.prompt_view = None,
+            Outcome::Edit(text) => return Action::EditPrompt(text),
+            Outcome::Saved { key, replaced } => {
+                self.prompt_view = None;
+                match self.rules_picker.as_mut() {
+                    Some(picker) => {
+                        // A new prompt or a copy is ticked; an edit or rename keeps the tick it had.
+                        let tick = replaced.is_none_or(|old| picker.chosen().iter().any(|r| r.key == old));
+                        picker.reload(crate::rules::library(), Some(&key), tick);
+                        let ticked = if tick { " and ticked it" } else { "" };
+                        self.info = Some(format!("saved {key} to your prompts{ticked} "));
+                    }
+                    None => self.info = Some(format!("saved {key} to your prompts · c to start a session with it ")),
+                }
+            }
+        }
+        Action::None
+    }
+
+    /// `y` deletes the prompt waiting for it; any other key keeps it.
+    fn on_delete_key(&mut self, code: KeyCode) {
+        let Some(picker) = self.rules_picker.as_mut() else { return };
+        let Some(i) = picker.deleting.take() else { return };
+        if code != KeyCode::Char('y') {
+            return;
+        }
+        let key = picker.library[i].key.clone();
+        match crate::rules::remove_own(&key) {
+            Ok(_) => {
+                picker.reload(crate::rules::library(), None, false);
+                self.info = Some(format!("deleted {key} "));
+            }
+            Err(e) => self.error = Some(format!("{e:#} ")),
+        }
     }
 
     fn on_picker_key(&mut self, code: KeyCode) {
@@ -569,9 +627,27 @@ impl App {
             }
             return;
         }
+        if picker.deleting.is_some() {
+            self.on_delete_key(code);
+            return;
+        }
         let last = picker.library.len().saturating_sub(1);
+        let highlighted = picker.library.get(picker.cursor);
         match code {
             KeyCode::Esc | KeyCode::Char('q' | 'c') => self.rules_picker = None,
+            KeyCode::Char('n') => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real())),
+            KeyCode::Char('e') => {
+                match highlighted.map(|rule| (rule, crate::rules::copy_problem(rule))) {
+                    Some((_, Some(why))) => self.error = Some(format!("{why} ")),
+                    Some((rule, None)) => self.prompt_view = Some(crate::prompt_view::PromptView::revise(crate::prompt_view::Env::real(), rule)),
+                    None => {}
+                }
+            }
+            KeyCode::Char('d') => match highlighted {
+                Some(rule) if rule.own => picker.deleting = Some(picker.cursor),
+                Some(rule) => self.error = Some(format!("{} is built in and can't be deleted; e saves a copy you can change ", rule.title)),
+                None => {}
+            },
             KeyCode::Down | KeyCode::Char('j') => picker.cursor = (picker.cursor + 1).min(last),
             KeyCode::Up | KeyCode::Char('k') => picker.cursor = picker.cursor.saturating_sub(1),
             KeyCode::Char(' ' | 'x') => picker.toggle(picker.cursor),
@@ -719,6 +795,9 @@ impl App {
         if let Some(stats) = self.usage.tick() {
             self.after_sync(stats);
         }
+        if let Some(view) = self.prompt_view.as_mut() {
+            view.tick();
+        }
         let prepared = self.share.as_mut().and_then(|share| {
             share.tick();
             share.take_prepared()
@@ -818,6 +897,10 @@ impl App {
             }
             return Action::None;
         }
+        if self.prompt_view.is_some() {
+            (self.error, self.info, self.note_shown) = (None, None, None);
+            return self.on_prompt_key(key);
+        }
         if self.rules_picker.is_some() {
             (self.error, self.info, self.note_shown) = (None, None, None);
             self.on_picker_key(key.code);
@@ -855,6 +938,7 @@ impl App {
             (View::List, KeyCode::Char('p')) => self.open_share(),
             (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
             (View::List | View::Board, KeyCode::Char('c')) => self.open_rules_picker(),
+            (View::List, KeyCode::Char('n')) => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real())),
             (View::Board, KeyCode::Esc | KeyCode::Char('b') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
             (View::Board, KeyCode::Down | KeyCode::Char('j')) => self.board.scroll(1),
             (View::Board, KeyCode::Up | KeyCode::Char('k')) => self.board.scroll(-1),
@@ -887,11 +971,24 @@ impl App {
     }
 }
 
+type Tui = ratatui::Terminal<crate::term::Aligned<ratatui::backend::CrosstermBackend<std::io::Stdout>>>;
+
 /// ratatui's terminal setup (raw mode, alternate screen, panic hook), drawing through
 /// `term::Aligned` so complex-script text can't shift a row's columns.
-fn init_terminal() -> std::io::Result<ratatui::Terminal<crate::term::Aligned<ratatui::backend::CrosstermBackend<std::io::Stdout>>>> {
+fn init_terminal() -> std::io::Result<Tui> {
     drop(ratatui::init());
     ratatui::Terminal::new(crate::term::Aligned::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())))
+}
+
+/// Hands the terminal to the user's editor for `text`, then takes it back: a fresh terminal and what
+/// was saved.
+fn edit_suspended(text: &str, kind: &str, ext: &str) -> std::io::Result<(Tui, Result<String, String>)> {
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    ratatui::restore();
+    let edited = crate::share_view::edit_in_editor(text, kind, ext);
+    let terminal = init_terminal()?;
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    Ok((terminal, edited))
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -910,19 +1007,25 @@ pub fn run() -> anyhow::Result<()> {
                     Event::Paste(text) => {
                         if let Some(share) = app.share.as_mut() {
                             share.on_paste(&text);
+                        } else if let Some(view) = app.prompt_view.as_mut() {
+                            view.on_paste(&text);
                         }
                     }
                     Event::Key(key) if key.kind == KeyEventKind::Press => match app.on_key(key) {
                         Action::None => {}
                         Action::Quit => return Ok(()),
                         Action::EditPost(text) => {
-                            let _ = execute!(std::io::stdout(), DisableBracketedPaste);
-                            ratatui::restore();
-                            let edited = crate::share_view::edit_in_editor(&text);
-                            terminal = init_terminal()?;
-                            let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+                            let edited;
+                            (terminal, edited) = edit_suspended(&text, "post", ".txt")?;
                             if let Some(share) = app.share.as_mut() {
                                 share.edited_post(edited);
+                            }
+                        }
+                        Action::EditPrompt(text) => {
+                            let edited;
+                            (terminal, edited) = edit_suspended(&text, "prompt", ".md")?;
+                            if let Some(view) = app.prompt_view.as_mut() {
+                                view.edited(edited);
                             }
                         }
                     },

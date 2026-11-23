@@ -3,6 +3,15 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.10.0 - 2026-11-23
+
+- `n` writes a new prompt from a rough idea with Claude, from the session list or the `c` picker
+- The idea box has Write prompt and Cancel buttons; `tab` reaches them
+- The review shows what Claude assumed and the questions it left open; a number answers one
+- `e` in the picker edits your prompt, or saves a copy of a built-in one; `d` deletes yours
+- `marsad prompt new|edit|copy|rm` does the same from the command line
+- The `generator_model` setting picks the model that writes prompts (default `fable`)
+
 ## 0.9.0 - 2026-11-23
 
 - `c` lists your own prompts too: add `.md` files to `~/.claude/marsad/prompts/`
