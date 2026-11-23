@@ -51,6 +51,10 @@ marsad prompt copy <name> --as <new-name>            # copies a prompt (a built-
 marsad prompt rm <name>                              # deletes one of the user's prompts; built-in ones can't be deleted
 ```
 
+The user's prompts are `.md` files in `~/.marsad/prompts/`, and the merged launch files are in
+`~/.marsad/launch/`, named after their role, prompts and a hash, such as
+`session-coordination+output-hygiene-8873230f.md` (`MARSAD_HOME` moves `~/.marsad`).
+
 Writing a prompt runs `claude -p` once (about a minute); show the user the `assumptions` and `questions` it returns, since those are the choices the idea left open.
 
 Sessions started with that command coordinate on `AGENT-BOARD.md` at the root of the repo's main checkout: beside the absolute `git rev-parse --git-common-dir` when that is a `.git` dir, inside it otherwise (a bare clone or a submodule). Read it to see which sessions are active and which files they have claimed; the dashboard's `b` key shows it too.

@@ -35,7 +35,7 @@ Success is when the user stops tab-hunting for sessions that need them, understa
 The user stands behind these four claims publicly:
 
 - **Live, hook-accurate status.** Real-time APPROVE, QUESTION, ACTIVE and IDLE states come from Claude Code hooks and transcripts, not from polling or guesses.
-- **Local-only, no account.** Everything stays on the machine, in SQLite under `~/.claude/marsad`. Nothing is uploaded except what the user chooses to share. The share flow sends a redacted summary to `claude -p` and shows the post for review first.
+- **Local-only, no account.** Everything stays on the machine, in SQLite under `~/.marsad`. Nothing is uploaded except what the user chooses to share. The share flow sends a redacted summary to `claude -p` and shows the post for review first.
 - **Permanent history.** A per-day counter that retention never prunes, so all-time totals, streaks and badges survive.
 - **Coordination built in.** A bundled protocol and an agent board keep parallel sessions from editing the same files.
 

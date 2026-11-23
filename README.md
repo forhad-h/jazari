@@ -58,7 +58,7 @@ While the dashboard is open it plays a sound when a session starts waiting on yo
 APPROVE) and another when a session finishes its work, and shows a desktop notification naming the
 project and what it is waiting on. Pressing Esc or interrupting a turn doesn't count as finishing,
 and a session that leaves a background shell running finishes only when that work is done. `m`
-turns alerts off and on; the choice is kept in `~/.claude/marsad/settings.json`.
+turns alerts off and on; the choice is kept in `~/.marsad/settings.json`.
 
 macOS uses its Ping and Glass sounds and shows notifications on the lock screen if Script Editor
 (which `osascript` runs as) is allowed to in System Settings → Notifications. Linux uses `paplay`
@@ -141,7 +141,7 @@ so a subagent's used tokens (summed across all its turns) can be far above its c
 
 When several Claude Code sessions work in one repo, marsad's coordination rules keep them from editing the same files. Sessions that load the rules share one `AGENT-BOARD.md` at the root of the repo's main checkout (one board for all its worktrees, kept out of git through `.git/info/exclude`; a bare clone or a submodule keeps it inside its git directory). On it they register, claim files before editing them, record binding decisions, message each other, and log conflicts they can't settle as `needs-human`.
 
-`c` opens a picker of prompts: the ones marsad ships, **Coordination** (above) and **Output hygiene** (keeps the request, who asked and how the work was done out of code, commits, PRs and docs), and your own. Add your own as `.md` files in `~/.claude/marsad/prompts/`; the first `# ` heading is its title and the first line of text its summary. Tick prompts with `space` or their number and press `enter`, then choose what the command starts:
+`c` opens a picker of prompts: the ones marsad ships, **Coordination** (above) and **Output hygiene** (keeps the request, who asked and how the work was done out of code, commits, PRs and docs), and your own. Add your own as `.md` files in `~/.marsad/prompts/`; the first `# ` heading is its title and the first line of text its summary. Tick prompts with `space` or their number and press `enter`, then choose what the command starts:
 
 - **Normal session**: one Claude Code session follows the prompts.
 - **Agent team**: the lead of an [agent team](https://code.claude.com/docs/en/agent-teams) follows them and passes them on. A teammate never sees the lead's system prompt, only the project's CLAUDE.md, skills and MCP servers and the spawn prompt the lead writes, so marsad writes a second file for the teammates and tells the lead to start every spawn prompt with "read this file". Coordination stays with the lead: teammates coordinate through the team's task list and messages, and the lead claims files on the board for them.
@@ -150,7 +150,7 @@ Press `enter` to copy the command. Your choice is remembered, so next time `c`, 
 
 **Writing your own.** `n` on the session list, or in the picker, opens a text box for a rough idea in your own words ("make Claude stop over-explaining in PRs") and an optional name. `tab` moves between the idea, the name and the **Write prompt** and **Cancel** buttons; `enter` writes it (or presses the focused button), `alt+enter` starts a new line, `ctrl+e` opens the idea in `$EDITOR`, and `esc` cancels. Claude turns it into a prompt file: explicit, checkable rules with their reasons, short enough to follow. The review shows the draft, what Claude assumed, and the questions the idea left open. `enter` saves it to your prompts and ticks it, `e` opens it in `$EDITOR`, `r` revises it with a line of feedback, a question's number answers that question (which also revises it), `n` renames it, and `esc` discards it. On one of your prompts, `e` opens the same review to edit or revise it and `d` deletes it after asking. A built-in prompt can't be changed; `e` on one saves a copy under a new name. Coordination can't be copied, because an agent team recognises it by name to keep it with the lead.
 
-The draft is written by one `claude -p` run with no tools, in `--safe-mode` (no CLAUDE.md, hooks, plugins or MCP servers), from marsad's own folder and without a transcript, so nothing from your projects reaches it and it never shows up as a session. Your situation, names and reasons stay out of the prompt unless they are the rule itself. It uses the strongest model Claude Code accepts, `fable`, falling back to `opus` and then your default when an alias isn't available; set `"generator_model"` in `~/.claude/marsad/settings.json` to choose another. `MARSAD_CLAUDE` points marsad at a different `claude` program.
+The draft is written by one `claude -p` run with no tools, in `--safe-mode` (no CLAUDE.md, hooks, plugins or MCP servers), from marsad's own folder and without a transcript, so nothing from your projects reaches it and it never shows up as a session. Your situation, names and reasons stay out of the prompt unless they are the rule itself. It uses the strongest model Claude Code accepts, `fable`, falling back to `opus` and then your default when an alias isn't available; set `"generator_model"` in `~/.marsad/settings.json` to choose another. `MARSAD_CLAUDE` points marsad at a different `claude` program.
 
 From the command line:
 
@@ -162,7 +162,7 @@ marsad prompt copy output-hygiene --as my-hygiene             # a copy of a buil
 marsad prompt rm short-prs
 ```
 
-Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.claude/marsad/launch/`, written when the command is copied and named after a hash of its text. A session's or lead's file whose command hasn't been copied for a week is removed (a conversation keeps the prompt it started with); a teammates' file is kept, since a resumed lead still points at it. `marsad coordination` keeps printing the stable `~/.claude/marsad/coordination.md`.
+Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.marsad/launch/`, written when the command is copied and named after its role, its prompts and a hash of its text, such as `lead-coordination+output-hygiene-8873230f.md`. A session's or lead's file whose command hasn't been copied for a week is removed (a conversation keeps the prompt it started with); a teammates' file is kept, since a resumed lead still points at it. `marsad coordination` prints the stable `~/.marsad/coordination.md`.
 
 The prompts are added to the session's system prompt, so they survive `/clear` and compaction. They apply to new conversations only: a resumed conversation keeps the system prompt it started with. The coordination rules add about 2k tokens to each request of those sessions.
 
@@ -214,7 +214,7 @@ in `$VISUAL`/`$EDITOR`, `r` drafts a new line, and `q`/`esc` cancels without wri
 anything. Confirming:
 
 1. saves a 1200×627 card with your badge, rank, stats, achievements and `git config user.name` to
-   `Downloads/marsad-YYYY-MM-DD.png` (or `~/.claude/marsad/cards/`); sharing again the same day
+   `Downloads/marsad-YYYY-MM-DD.png` (or `~/.marsad/cards/`); sharing again the same day
    replaces it,
 2. copies the post to your clipboard,
 3. opens LinkedIn's post composer with the text filled in,
@@ -242,8 +242,16 @@ marsad share --print --no-ai --out card.png
 
 ## How it works
 
+- **Data** lives in `~/.marsad` (`%USERPROFILE%\.marsad` on Windows; `MARSAD_HOME` moves it). The
+  settings, usage history, prompts and launch files are at the top, and Claude Code's own files
+  (the event log, status line reports) are in `claude/`. Only the hooks, the `marsad-usage` skill
+  and the status line live in `~/.claude`. Versions before 0.11 kept the data in
+  `~/.claude/marsad`; marsad copies it over once and leaves that folder as it was, still keeping
+  its `coordination.md`, `output-hygiene.md` and `coordination+output-hygiene.md` current for
+  saved commands and aliases. Those three will stop being updated in a later release.
+
 - **Status** comes from [Claude Code hooks](https://code.claude.com/docs/en/hooks). Each event runs
-  `marsad hook` (async, a few ms), which appends a trimmed line to `~/.claude/marsad/events.jsonl`.
+  `marsad hook` (async, a few ms), which appends a trimmed line to `~/.marsad/claude/events.jsonl`.
 
   | Status | Events |
   |---|---|
@@ -267,7 +275,7 @@ skills ranked by tokens on the right. `p` / `P` switch the period (the last 7 da
 kept; with a longer retention also 30, 90 and 365 days). `tab` switches pane, and `enter` on a
 session shows its per-day totals and every skill run. "Total" aggregates the whole period.
 
-The history is a SQLite database at `~/.claude/marsad/usage.db`, indexed from Claude Code
+The history is a SQLite database at `~/.marsad/usage.db`, indexed from Claude Code
 transcripts (`~/.claude/projects`). It includes sessions from before marsad was installed.
 Tokens are bucketed by the local day each API call happened, so long sessions split across days.
 

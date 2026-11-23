@@ -92,7 +92,7 @@ fn numeric(column: &str) -> bool {
 }
 
 /// The whole export as JSON.
-fn export_value(conn: &Connection, settings: Map<String, Value>) -> anyhow::Result<Value> {
+pub(crate) fn export_value(conn: &Connection, settings: Map<String, Value>) -> anyhow::Result<Value> {
     let mut out = Map::new();
     out.insert("marsad_export".into(), json!(FORMAT));
     out.insert("exported_at".into(), json!(chrono::Utc::now().to_rfc3339()));
@@ -113,14 +113,14 @@ fn export_value(conn: &Connection, settings: Map<String, Value>) -> anyhow::Resu
 
 /// What one table's import did.
 #[derive(Debug, Default, PartialEq)]
-struct Merged {
+pub(crate) struct Merged {
     added: usize,
     known: usize,
     skipped: usize,
 }
 
 /// Merges an export into `conn`. A table that can't be read is reported and the others continue.
-fn import_value(conn: &mut Connection, export: &Value, restore: bool) -> anyhow::Result<Vec<(&'static str, Result<Merged, String>)>> {
+pub(crate) fn import_value(conn: &mut Connection, export: &Value, restore: bool) -> anyhow::Result<Vec<(&'static str, Result<Merged, String>)>> {
     match export["marsad_export"].as_u64() {
         Some(FORMAT) => {}
         Some(v) => bail!("this file is export format {v}; this marsad reads format {FORMAT}. Update marsad first"),

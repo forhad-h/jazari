@@ -2,8 +2,9 @@
 //! hygiene) and the user's own `.md` files in `<data dir>/prompts/`.
 //!
 //! `claude` reads only the last `--append-system-prompt-file` it is given, so a chosen set is merged
-//! into one file, written when its command is copied. The file is named after a hash of its text,
-//! so one set always maps to one file however many prompts there are. A session's or lead's file
+//! into one file, written when its command is copied. The file is named `<role>-<keys>-<hash>.md`:
+//! its role and prompt keys, so a person recognizes it, and a hash of its text, so one set always
+//! maps to one file and an edited prompt gets a new one. A session's or lead's file
 //! whose command hasn't been copied for `KEEP_FOR` is pruned: a conversation keeps the system
 //! prompt it started with, even on resume. A teammates' file is never pruned, since a lead reads
 //! its path from that kept prompt each time it spawns a teammate, however long after.
@@ -70,9 +71,12 @@ const KEEP_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// The name prefix of teammates' files, which are never pruned.
 const TEAMMATE_PREFIX: &str = "teammate-";
 
-/// Files in the data dir at paths earlier versions printed, with the built-in keys each holds.
-/// Kept current while they exist, so saved commands and aliases keep working; `marsad
-/// coordination` still prints the first.
+/// The longest run of prompt keys in a launch file's name.
+const MAX_NAME_KEYS: usize = 60;
+
+/// Files at paths earlier versions printed (in the legacy dir), with the built-in keys each holds.
+/// Kept current while they exist, so saved commands and aliases keep working. `marsad
+/// coordination` prints the first, in the data dir. To be dropped in a later release.
 const LEGACY_FILES: &[(&str, &[&str])] = &[
     ("coordination.md", &[COORDINATION]),
     ("output-hygiene.md", &["output-hygiene"]),
@@ -341,25 +345,36 @@ fn ensure_in(data: &Path, chosen: &[&Rule], mode: Mode) -> anyhow::Result<PathBu
 /// The files for `chosen` started as `mode`: the one the command loads, then for a team the
 /// teammates' file when any prompt reaches them.
 fn files_for(data: &Path, chosen: &[&Rule], mode: Mode) -> Vec<(PathBuf, String)> {
-    let named = |role: &str, text: &str| {
-        let prefix = if role == "teammate" { TEAMMATE_PREFIX } else { "" };
-        let path = launch_dir(data).join(format!("{prefix}{:016x}.md", fnv1a(format!("{role}\n{text}").as_bytes())));
+    let named = |role: &str, rules: &[&Rule], text: &str| {
+        let path = launch_dir(data).join(launch_name(role, rules, text));
         std::path::absolute(&path).unwrap_or(path)
     };
     let merged = merge(chosen);
     if mode == Mode::Session {
-        return vec![(named("session", &merged), merged)];
+        return vec![(named("session", chosen, &merged), merged)];
     }
     let shared: Vec<&Rule> = chosen.iter().copied().filter(|r| r.key != COORDINATION).collect();
     let coordination = shared.len() < chosen.len();
     let teammates = (!shared.is_empty()).then(|| {
         let text = merge(&shared);
-        (named("teammate", &text), text)
+        (named("teammate", &shared, &text), text)
     });
     let lead = format!("{merged}\n{}", team_section(teammates.as_ref().map(|(p, _)| p.as_path()), coordination));
-    let mut files = vec![(named("lead", &lead), lead)];
+    let mut files = vec![(named("lead", chosen, &lead), lead)];
     files.extend(teammates);
     files
+}
+
+/// `<role>-<keys>-<hash>.md`: the keys joined with `+` and cut to `MAX_NAME_KEYS` characters, and
+/// the first 8 hex digits of the hash of the role and text. `teammate` starts with
+/// `TEAMMATE_PREFIX`.
+fn launch_name(role: &str, rules: &[&Rule], text: &str) -> String {
+    // Own prompts are named after any file stem: keep what is safe in a file name on every platform.
+    let safe = |c: char| if c.is_alphanumeric() || "-_.".contains(c) { c } else { '-' };
+    let keys: String = rules.iter().map(|r| r.key.chars().map(safe).collect::<String>()).collect::<Vec<_>>().join("+");
+    let keys: String = keys.chars().take(MAX_NAME_KEYS).collect();
+    let hash = format!("{:016x}", fnv1a(format!("{role}\n{text}").as_bytes()));
+    format!("{role}-{}-{}.md", keys.trim_end_matches(['+', '-', '.']), &hash[..8])
 }
 
 fn merge(rules: &[&Rule]) -> String {
@@ -419,12 +434,13 @@ pub(crate) fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<()>
 /// Removes session and lead files unused for `KEEP_FOR`, and rewrites the files at paths earlier
 /// versions printed with this build's text. Returns how many files were removed. One file that
 /// can't be removed doesn't stop the rest.
+/// Nothing in the legacy dir is removed.
 pub fn prune() -> anyhow::Result<usize> {
-    prune_in(&crate::data_dir(), SystemTime::now())
+    prune_in(&crate::data_dir(), &crate::legacy_dir(), SystemTime::now())
 }
 
-fn prune_in(data: &Path, now: SystemTime) -> anyhow::Result<usize> {
-    let refreshed = refresh_legacy(data);
+fn prune_in(data: &Path, legacy: &Path, now: SystemTime) -> anyhow::Result<usize> {
+    let refreshed = refresh_legacy(data).and(refresh_legacy(legacy));
     let mut removed = 0;
     if let Ok(entries) = std::fs::read_dir(launch_dir(data)) {
         for entry in entries.filter_map(Result::ok) {
@@ -468,7 +484,8 @@ fn remove_legacy(data: &Path) -> anyhow::Result<usize> {
     Ok(removed)
 }
 
-/// Removes every generated file, keeping the user's own prompts. Returns how many were there.
+/// Removes every generated file in the data dir, keeping the user's own prompts. Returns how many
+/// were there. The legacy dir is left as it is.
 pub fn remove_all() -> anyhow::Result<usize> {
     remove_all_in(&crate::data_dir())
 }
@@ -544,12 +561,11 @@ pub fn run(args: RulesArgs) -> anyhow::Result<()> {
     print_command(&parse(&lib, &args.keys)?, mode, args.format)
 }
 
-/// `marsad coordination`: the command for the coordination rules alone, at the stable path
-/// earlier versions printed, so a saved command or alias keeps working across upgrades.
+/// `marsad coordination`: the command for the coordination rules alone, at a stable path, so a
+/// saved command or alias keeps working across upgrades.
 pub fn run_coordination(args: CoordinationArgs) -> anyhow::Result<()> {
     let _ = prune();
-    let data = crate::data_dir();
-    let path = data.join(LEGACY_FILES[0].0);
+    let path = crate::data_dir().join(LEGACY_FILES[0].0);
     let path = std::path::absolute(&path).unwrap_or(path);
     let lib = builtin_library();
     let chosen = known(&lib, &[COORDINATION]);
@@ -768,8 +784,8 @@ mod tests {
         std::fs::create_dir_all(launch_dir(&data).join("stray.md")).unwrap();
 
         let soon = SystemTime::now() + Duration::from_secs(60);
-        assert_eq!(prune_in(&data, soon).unwrap(), 0, "all recently copied");
-        assert_eq!(prune_in(&data, soon + KEEP_FOR).unwrap(), 2, "a week unused, the session's and lead's go");
+        assert_eq!(prune_in(&data, &data, soon).unwrap(), 0, "all recently copied");
+        assert_eq!(prune_in(&data, &data, soon + KEEP_FOR).unwrap(), 2, "a week unused, the session's and lead's go");
         assert!(!session.exists() && !lead.exists());
         let left = names(&launch_dir(&data));
         assert_eq!(left.len(), 2, "{left:?}");
@@ -784,7 +800,7 @@ mod tests {
     fn legacy_paths_are_kept_current_not_deleted() {
         let data = temp_dir("legacy");
         std::fs::write(data.join("coordination+output-hygiene.md"), "old").unwrap();
-        prune_in(&data, SystemTime::now()).unwrap();
+        prune_in(&data, &data, SystemTime::now()).unwrap();
         let lib = builtins();
         assert_eq!(std::fs::read_to_string(data.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["all"])));
         assert!(!data.join("coordination.md").exists(), "only files that exist are rewritten");
@@ -819,7 +835,7 @@ mod tests {
 
     #[test]
     fn quoting_follows_the_platform_shell() {
-        assert_eq!(quote_for("/Users/me/.claude/marsad/launch/0123abcd.md", false), "/Users/me/.claude/marsad/launch/0123abcd.md");
+        assert_eq!(quote_for("/Users/me/.marsad/launch/session-coordination+output-hygiene-0123abcd.md", false), "/Users/me/.marsad/launch/session-coordination+output-hygiene-0123abcd.md");
         assert_eq!(quote_for("/Users/Jane Doe/x.md", false), "'/Users/Jane Doe/x.md'");
         assert_eq!(quote_for("/Users/o'neil/x.md", false), "'/Users/o'\\''neil/x.md'");
         assert_eq!(quote_for("C:/Users/me/x.md", true), "C:/Users/me/x.md");
@@ -916,5 +932,68 @@ mod tests {
         }
         assert!(protocol.contains("--git-common-dir"));
         assert!(protocol.contains("sleep 60"));
+    }
+
+    fn own(key: &str, body: &str) -> Rule {
+        Rule { key: key.into(), title: key.into(), summary: String::new(), body: body.into(), own: true }
+    }
+
+    #[test]
+    fn launch_files_are_named_role_keys_hash() {
+        let data = temp_dir("names");
+        let lib = builtins();
+        let session = ensure_in(&data, &known(&lib, &["all"]), Mode::Session).unwrap();
+        let name = session.file_name().unwrap().to_string_lossy().into_owned();
+        let hash = name.strip_prefix("session-coordination+output-hygiene-").and_then(|r| r.strip_suffix(".md")).unwrap();
+        assert!(hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+
+        let lead = ensure_in(&data, &known(&lib, &["all"]), Mode::Team).unwrap();
+        assert!(lead.file_name().unwrap().to_string_lossy().starts_with("lead-coordination+output-hygiene-"));
+        let mut files = names(&launch_dir(&data));
+        files.retain(|n| n.starts_with(TEAMMATE_PREFIX));
+        assert_eq!(files.len(), 1);
+        assert!(files[0].starts_with("teammate-output-hygiene-"), "the teammates' file names only the prompts it holds: {}", files[0]);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn launch_names_follow_the_text() {
+        let (a, b) = (own("mine", "one\n"), own("mine", "two\n"));
+        assert_eq!(launch_name("session", &[&a], "one\n"), launch_name("session", &[&a], "one\n"), "the same text, the same name");
+        assert_ne!(launch_name("session", &[&a], "one\n"), launch_name("session", &[&b], "two\n"), "an edited prompt, a new name");
+        assert_ne!(launch_name("session", &[&a], "one\n"), launch_name("lead", &[&a], "one\n"));
+    }
+
+    #[test]
+    fn long_or_odd_keys_are_cut_on_a_character_boundary() {
+        let long: Vec<Rule> = (0..9).map(|i| own(&format!("prompt-number-{i}"), "x")).collect();
+        let refs: Vec<&Rule> = long.iter().collect();
+        let name = launch_name("session", &refs, "x");
+        let keys = name.strip_prefix("session-").unwrap().rsplit_once('-').unwrap().0;
+        assert!(keys.chars().count() <= MAX_NAME_KEYS && keys.starts_with("prompt-number-0+prompt-number-1+"), "{name}");
+        assert!(!keys.ends_with(['+', '-']), "{name}");
+
+        let wide = own(&"é".repeat(70), "x");
+        let name = launch_name("session", &[&wide], "x");
+        assert!(name.starts_with(&format!("session-{}-", "é".repeat(60))), "{name}");
+        let odd = own("my notes: v2?", "x");
+        assert!(launch_name("session", &[&odd], "x").starts_with("session-my-notes--v2-"));
+    }
+
+    #[test]
+    fn the_legacy_dir_is_kept_current_and_never_pruned() {
+        let data = temp_dir("legacy-data");
+        let legacy = temp_dir("legacy-old");
+        std::fs::write(legacy.join("coordination+output-hygiene.md"), "old").unwrap();
+        std::fs::create_dir_all(launch_dir(&legacy)).unwrap();
+        let stale = launch_dir(&legacy).join("0123456789abcdef.md");
+        std::fs::write(&stale, "a session file from 0.10").unwrap();
+        let later = SystemTime::now() + KEEP_FOR + KEEP_FOR;
+        prune_in(&data, &legacy, later).unwrap();
+        let lib = builtins();
+        assert_eq!(std::fs::read_to_string(legacy.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["all"])));
+        assert!(stale.exists(), "nothing in the legacy dir is removed");
+        let _ = std::fs::remove_dir_all(&data);
+        let _ = std::fs::remove_dir_all(&legacy);
     }
 }

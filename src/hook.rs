@@ -35,16 +35,9 @@ pub fn run() -> anyhow::Result<()> {
     let raw: Value = serde_json::from_str(&input)?;
     let event = trim(&raw);
 
-    let dir = crate::data_dir();
-    std::fs::create_dir_all(&dir)?;
-    let log = dir.join("events.jsonl");
-    if std::fs::metadata(&log).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
-        let _ = std::fs::rename(&log, dir.join("events.1.jsonl"));
-    }
     let mut line = serde_json::to_vec(&event)?;
     line.push(b'\n');
-    // Single write on an O_APPEND handle so concurrent hooks don't interleave.
-    OpenOptions::new().create(true).append(true).open(log)?.write_all(&line)?;
+    append(&crate::claude_data_dir(), &line)?;
 
     // Record a finished session in the usage history right away, so it is kept even if
     // the dashboard isn't opened before Claude Code deletes the transcript. Detached, so
@@ -52,6 +45,18 @@ pub fn run() -> anyhow::Result<()> {
     if raw.get("hook_event_name").and_then(Value::as_str) == Some("SessionEnd") {
         let _ = detached(std::process::Command::new(std::env::current_exe()?).arg("sync")).spawn();
     }
+    Ok(())
+}
+
+/// Appends one event line to the log in `dir`, rotating it once it is too big.
+pub(crate) fn append(dir: &std::path::Path, line: &[u8]) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let log = dir.join("events.jsonl");
+    if std::fs::metadata(&log).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
+        let _ = std::fs::rename(&log, dir.join("events.1.jsonl"));
+    }
+    // Single write on an O_APPEND handle so concurrent hooks don't interleave.
+    OpenOptions::new().create(true).append(true).open(log)?.write_all(line)?;
     Ok(())
 }
 

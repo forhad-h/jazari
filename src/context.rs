@@ -140,7 +140,7 @@ fn find_session<'a>(
 
 /// Markers for sessions already warned since they last crossed the threshold.
 fn warned_dir() -> PathBuf {
-    crate::data_dir().join("context-warned")
+    crate::claude_data_dir().join("context-warned")
 }
 
 /// Markers older than this belong to sessions long gone.
