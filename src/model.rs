@@ -25,6 +25,15 @@ impl Status {
         }
     }
 
+    /// 0 while the session is at work or waiting on the user, 1 when idle, 2 once ended.
+    pub fn group(self) -> u8 {
+        match self {
+            Status::Idle => 1,
+            Status::Ended => 2,
+            _ => 0,
+        }
+    }
+
     pub fn needs_user(self) -> bool {
         matches!(self, Status::Approve | Status::Question)
     }
@@ -592,7 +601,8 @@ impl Session {
 /// Column the live session list is sorted by; `s` cycles through them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SortKey {
-    /// Most urgent first, then most recent activity.
+    /// Sessions at work (active or waiting on the user) on top, the rest below; each group keeps
+    /// first-seen order, so rows don't move as sessions send events.
     #[default]
     Status,
     /// Alphabetical; stays put while sessions work, which keeps selection steady.
@@ -634,7 +644,7 @@ pub fn sort_sessions(list: &mut [&Session], key: SortKey, reversed: bool, compac
     let now = crate::now();
     list.sort_by(|a, b| {
         let ord = match key {
-            SortKey::Status => a.status.cmp(&b.status).then(b.last_event.total_cmp(&a.last_event)),
+            SortKey::Status => a.status.group().cmp(&b.status.group()),
             SortKey::Project => a.project().to_lowercase().cmp(&b.project().to_lowercase()),
             SortKey::Context => match (left(a), left(b)) {
                 (Some(x), Some(y)) => x.cmp(&y),
@@ -725,6 +735,13 @@ mod tests {
             list.iter().map(|s| s.id.as_str()).collect::<String>()
         };
         assert_eq!(order(SortKey::Status, false), "bca");
+        // Newer events don't reorder a group: first-seen order holds.
+        let (mut d, mut e) = (mk("d", "/x/d", Status::Idle, 4.0, None), mk("e", "/x/e", Status::Active, 5.0, None));
+        d.last_event = 100.0;
+        e.last_event = 1.0;
+        let mut list = vec![&d, &a, &e, &b, &c];
+        sort_sessions(&mut list, SortKey::Status, false, None);
+        assert_eq!(list.iter().map(|s| s.id.as_str()).collect::<String>(), "bcead");
         assert_eq!(order(SortKey::Project, false), "bac", "case-insensitive");
         assert_eq!(order(SortKey::Project, true), "cab");
         assert_eq!(order(SortKey::Context, false), "cab", "least left first, unknown last");

@@ -504,7 +504,7 @@ impl App {
         }
     }
 
-    /// Sessions to show, in the chosen sort order (most urgent first by default).
+    /// Sessions to show, in the chosen sort order (working sessions on top by default).
     pub fn visible(&self) -> Vec<&Session> {
         let now = crate::now();
         let mut list: Vec<&Session> = self

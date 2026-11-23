@@ -30,6 +30,8 @@ GitHub release. Keep each bullet to one short line.
 - Optional, off by default: OSV lookups for malicious packages, and ClamAV scans of fresh files before they run
 - A session goes idle once background agents that outlived its turn finish, instead of staying active
 - Session history lists the newest events first
+- Sessions keep their place in the list: working ones sit on top, the rest stay in first-seen order
+- Share: three post variants (`v` cycles), each naming the features worked on and avoiding your posts of the last 10 days
 - The session list shows each session's name, with its project where the activity was
 - The details pane is shorter and shows the full session id; `y` copies it
 - The agent board shows a relation map: who messages whom, conflicts, and overlapping claims
