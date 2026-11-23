@@ -133,7 +133,7 @@ fn play_system(_: Sound) -> bool {
 }
 
 /// A desktop notification. Text goes in as arguments, never through a shell.
-fn notify(title: &str, body: &str) {
+pub(crate) fn notify(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     spawn("osascript", &[
         "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run",

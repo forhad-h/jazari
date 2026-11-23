@@ -62,7 +62,7 @@ pub(crate) fn append(dir: &std::path::Path, line: &[u8]) -> anyhow::Result<()> {
 
 /// No stdio and its own process group, so Claude Code cleaning up its hooks on exit
 /// doesn't take the child with it (and on Windows, no console window).
-fn detached(cmd: &mut std::process::Command) -> &mut std::process::Command {
+pub(crate) fn detached(cmd: &mut std::process::Command) -> &mut std::process::Command {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(cmd, 0);

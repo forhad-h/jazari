@@ -4,6 +4,7 @@ mod badge_art;
 mod badges;
 mod board;
 mod card;
+mod clean;
 mod clipboard;
 mod context;
 mod disk;
@@ -99,6 +100,8 @@ enum Cmd {
     Coordination(rules::CoordinationArgs),
     /// Free disk space and the levels at which sessions are warned and stopped (--guard on/off).
     Disk(disk::DiskArgs),
+    /// Find caches, build output and Docker data that can be rebuilt, and remove them safely.
+    Clean(clean::CleanArgs),
     /// Disk, memory, swap and CPU in one reading, with what to be careful about before heavy work.
     System(system::SystemArgs),
     /// Synchronous hook that checks the disk before each tool call and prompt.
@@ -194,6 +197,7 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
         Some(Cmd::Disk(args)) => disk::run(args),
         Some(Cmd::System(args)) => system::run(args),
+        Some(Cmd::Clean(args)) => clean::run(args),
         Some(Cmd::Guard { hook }) => {
             // Never fail or print anything but the verdict: a hook must not disturb the session.
             if hook && let Some(out) = disk::hook() {
