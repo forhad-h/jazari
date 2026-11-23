@@ -39,6 +39,14 @@ marsad adds a note telling you to finish the current step and write a handoff: d
 `critical` marsad refuses tool calls and stops the session until space is freed. Don't try to get
 around it. Never change the guard (`marsad disk --guard off`) or the thresholds unless the user asks.
 
+marsad also checks each tool call for risky shapes. It asks the user first about piping downloads
+into a shell, decoding and running hidden data, persistence (LaunchAgents, crontab, shell startup
+files, `authorized_keys`), weakening security, remote shells and look-alike package names, and it
+refuses deleting the home folder or root, wiping disks and sending secrets out. When marsad refuses a
+call, don't retry it or look for another way to do the same thing: tell the user what you were
+trying to do. `marsad risk --check '<command>'` shows what the check decides without running the
+command. Never turn the check off (`marsad risk --guard off`) unless the user asks.
+
 ## This session's context and handoffs
 
 ```sh

@@ -12,6 +12,12 @@ GitHub release. Keep each bullet to one short line.
 - The dashboard has disk, memory and CPU meters under the header
 - All-time tokens read in B once past a billion
 - A session stopped for disk space shows why, with its resume command
+- Tool calls that delete the home folder or root, wipe a disk, or send secrets out are refused
+- `curl | sh`, decode-and-run, persistence, security changes and remote shells ask first
+- File writes are checked too, including package install scripts that download or `eval` code
+- Package names one letter away from a popular package ask "did you mean"
+- `marsad risk` lists findings; `--check` tests a command; `--guard off` turns the check off
+- Optional, off by default: OSV lookups for malicious packages, and ClamAV scans of fresh files before they run
 
 ## 0.12.0 - 2026-11-23
 

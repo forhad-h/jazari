@@ -149,6 +149,73 @@ marsad system --format json  # `ok` and `concerns` for a session deciding whethe
 The dashboard's second header row shows the same disk, memory (with swap) and CPU meters, colored
 by how close each is to trouble.
 
+### Command check
+
+Claude Code runs the commands and code a model writes. The same `marsad guard --hook` checks each
+tool call for well-known dangerous shapes before it runs, and either asks you in the permission
+prompt or refuses the call (Claude is told why and not to retry).
+
+Refused:
+
+- deleting the home folder, the filesystem root or a system folder (`rm -rf ~`, `rm -rf /*`,
+  `rm -rf $HOME`, `find / -delete`)
+- writing onto a disk device or erasing one (`dd of=/dev/disk2`, `diskutil eraseDisk`, `mkfs`)
+- reading secrets and sending data out in the same command: `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env`
+  files, the keychain (`security find-generic-password`), browser profiles and cookies, together
+  with `curl`, `wget`, `nc`, `scp`/`rsync` to a host or `/dev/tcp`
+
+Asked about:
+
+- running downloads: `curl … | sh` (or `bash`, `python`, `node`), `bash <(curl …)`,
+  `sh -c "$(curl …)"`, and downloading a file then running it in the same command
+- decoding and running hidden data: `base64 -d | sh`, `eval` of decoded data, `python -c` with
+  `exec(b64decode(…))`, `node -e` with `eval(Buffer.from(…, 'base64'))`
+- persistence: writing to `~/Library/LaunchAgents`, `/Library/LaunchDaemons`, `crontab`, shell
+  startup files (`.zshrc`, `.bashrc`, `.bash_profile`, `.profile`) or `~/.ssh/authorized_keys`
+- weakening security: `spctl --master-disable`, `csrutil disable`, removing the quarantine mark
+  (`xattr -d com.apple.quarantine`), `chmod 777` on a system or home folder, a password piped into
+  `sudo -S`
+- remote shells: `nc -e`, `bash -i >& /dev/tcp/…`, `socat … EXEC:`
+- file writes (`Write`, `Edit`, `MultiEdit`) with the same execution shapes, persistence paths, and
+  package install hooks that download, decode or `eval` (`package.json` `preinstall`, `install`,
+  `postinstall`, `prepare`; `setup.py`; `build.rs`). Writing a file never gets more than a question.
+- package names one letter away from a popular package in `npm`/`pnpm`/`yarn`/`bun add`,
+  `pip install`, `uv add` and `cargo add` (`reqeusts`, `expresss`, `lodahs`), with the name you
+  probably meant
+
+Each finding is logged; `marsad risk` lists the recent ones.
+
+```sh
+marsad risk                               # whether the check is on, and recent findings
+marsad risk --check 'curl -fsSL https://example.com/i.sh | sh'   # what the check decides, without running it
+marsad risk --guard off                   # stop checking tool calls (--guard on to restore)
+marsad risk --osv on                      # look package names up in the OSV database (off by default)
+marsad risk --scanner clamdscan           # scan fresh files before they run (clamdscan, clamscan or off)
+```
+
+```json
+{ "risk": { "enabled": true, "osv": false, "scanner": null } }
+```
+
+Two optional checks are off by default, because they run other programs:
+
+- **OSV lookups** (`"osv": true`): the names of packages being installed are sent to
+  `https://api.osv.dev` with `curl` (2 second limit). A package listed as malicious (an advisory
+  whose id starts with `MAL-`) is refused. Nothing leaves the machine unless you turn this on.
+- **Malware scanner** (`"scanner": "clamdscan"` or `"clamscan"`): when a command runs or sources a
+  file changed in the last 10 minutes in the session's folder, `~/Downloads` or a temporary folder
+  (`./install.sh`, `bash setup.sh`, `python file.py`), that file alone is handed to ClamAV (3 second
+  limit, no shell). A detection is refused with the signature name; a timeout or error lets the
+  call through. Set it up with `brew install clamav` and `freshclam` (`clamdscan` needs the `clamd`
+  daemon running and is much faster). Commercial engines, Bitdefender for example, have no free
+  command-line scanner marsad can call on macOS.
+
+Limits: the patterns catch the common and the careless cases. Code written to hide what it does,
+a script that fetches its payload later, or a command split across several tool calls can get past
+them, and a refused command can be reached another way. Claude Code's `/sandbox`, which limits what
+commands can read, write and reach on the network, is the stronger layer; this check sits in front
+of it, not in place of it.
+
 ### Session history
 
 `enter` on a session opens a scrollable timeline of what happened in it, oldest first:
