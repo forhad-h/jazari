@@ -164,9 +164,9 @@ pub fn install(with_statusline: bool) -> anyhow::Result<()> {
     std::fs::write(skill_dir().join("SKILL.md"), SKILL_MD.replace("{{MARSAD_EXE}}", &exe.display().to_string()))?;
     println!("Installed marsad hooks for {} events in {}", EVENTS.len(), path.display());
     println!("Installed the marsad-usage skill in {}", skill_dir().display());
-    match crate::rules::refresh() {
-        Ok(()) => println!("Wrote the rules files to {} (`marsad rules` lists them)", crate::data_dir().display()),
-        Err(e) => eprintln!("warning: couldn't write the rules files: {e:#}"),
+    match std::fs::create_dir_all(crate::rules::prompts_dir()) {
+        Ok(()) => println!("Add your own prompts as .md files in {} (`marsad rules` lists them)", crate::rules::prompts_dir().display()),
+        Err(e) => eprintln!("warning: couldn't create the prompts folder: {e:#}"),
     }
     println!("Sessions already running pick them up after a restart (or /hooks reload). Run `marsad` to open the dashboard.");
     Ok(())
@@ -183,7 +183,7 @@ pub fn uninstall() -> anyhow::Result<()> {
         println!("Removed the marsad-usage skill");
     }
     if crate::rules::remove_all()? > 0 {
-        println!("Removed the rules files");
+        println!("Removed the generated prompt files (your own prompts are kept)");
     }
     Ok(())
 }

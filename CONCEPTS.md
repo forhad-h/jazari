@@ -58,7 +58,10 @@ The rules marsad ships for Claude Code sessions that work in the same repo at on
 Claude Code records a conversation's system prompt on its first request and replays it on resume, so the protocol reaches new conversations only; refreshing the rules after an upgrade does not change conversations already started.
 
 ### Rules file
-A markdown file of instructions marsad ships for a session's system prompt, such as the coordination protocol or the output-hygiene rules. A session can start with any set of them; a set of several is merged into one file, because `claude` reads only one `--append-system-prompt-file`.
+A markdown file of instructions for a session's system prompt: one marsad ships, such as the coordination protocol or the output-hygiene rules, or the user's own in `<data dir>/prompts/`. A session can start with any set of them; the set is merged into one launch file, because `claude` reads only one `--append-system-prompt-file`.
+
+### Team launch
+Starting the lead of an agent team with a set of rules files. A teammate never sees the lead's system prompt, so the team gets a lead's file and a teammates' file, and the lead's file tells it to start every spawn prompt with "read the teammates' file". Coordination goes in the lead's file only.
 *Avoid:* protocol (for anything but the coordination rules)
 
 ### Agent board
