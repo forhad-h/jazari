@@ -26,6 +26,7 @@ mod risk;
 mod rules;
 mod settings;
 mod share;
+mod share_history;
 mod share_view;
 mod shot;
 mod statusline;

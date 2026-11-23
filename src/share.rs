@@ -1,5 +1,6 @@
-//! Sharing to LinkedIn: one frozen stats snapshot, a line drafted by an isolated `claude -p` over a
-//! redacted summary of today's work (or a template), the post text, the card, and the confirm steps
+//! Sharing to LinkedIn: one frozen stats snapshot, variants of a line drafted by an isolated `claude -p`
+//! over a redacted summary of today's work and features (or templates), steered away from the posts of
+//! the last days, the post text, the card, and the confirm steps
 //! that save, open and reveal. The TUI share view and `marsad share --print` both use it.
 
 use crate::badges::{self, Badges};
@@ -28,24 +29,34 @@ const MAX_URL: usize = 2000;
 
 const FEED_URL: &str = "https://www.linkedin.com/feed/";
 
-const SYSTEM_PROMPT: &str = "You write one short line for a LinkedIn post about the author's AI-assisted software work today. \
-The user message is a summary of the author's Claude Code work today: session count, skills, subagent types and token figures. \
-Write 1-3 sentences in the first person, professional and concrete, for recruiters and business owners judging the author's AI fluency. \
-Describe the kind of work and how AI agents were used, in general terms only: categories such as planning, building features, \
-debugging, testing, performance work, code review, security review and shipping. \
-The post is public and the work may be confidential: never name projects, clients, companies, products or people, \
-and never mention specific features, bugs, systems, languages, frameworks, servers, environments, branches or infrastructure, \
-even if the summary seems to contain one. \
+const SYSTEM_PROMPT: &str = "You write the opening line of a LinkedIn post about the author's AI-assisted software work today. \
+The user message is a summary of the author's Claude Code work today: the features worked on, session count, skills, \
+subagent types and token figures, and possibly the author's earlier posts. \
+Write exactly three variants, each 1-3 sentences in the first person, professional and concrete, for recruiters and business \
+owners judging the author's AI fluency. Make the three clearly different: one leads with what was built, one with how the AI \
+agents were used (planning, building, debugging, testing, code review, security review, shipping), and one with a lesson or \
+outcome. Name the listed features by the words given, so the post says what was actually worked on; never add any other \
+specific: no projects, clients, companies, products, people, systems, languages, frameworks, servers, environments, branches \
+or infrastructure, even if the summary seems to contain one. \
 Never mention security findings, vulnerabilities, exploits, incidents, outages, authentication or login problems, credentials, \
 secrets, customer data or production and staging systems; say only that changes were security reviewed. \
-No hashtags, no emoji, no quotes, no lists, no token figures. Reply with the line only.";
+When earlier posts are listed, do not reuse their openings, phrases or sentence structure. \
+No hashtags, no emoji, no quotes, no lists inside a variant, no token figures. \
+Reply with the three variants only, one per line, each starting with its number: 1. 2. 3.";
 
-/// One of today's sessions: where it ran, so its names can be kept out. Titles are never read:
-/// they say what was worked on, which a public post must not.
+/// How many variants of the line a share offers.
+pub const VARIANTS: usize = 3;
+
+/// One of today's sessions: where it ran, so its names can be kept out, and its title, which names
+/// the feature worked on once those names are stripped from it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorkSession {
     pub project: String,
     pub cwd: String,
+    /// Claude Code's title for the session, if it has one.
+    pub title: Option<String>,
+    /// Tokens it used today, which rank its feature against the others.
+    pub tokens: i64,
 }
 
 /// Today's work: never sent as is; `summary` redacts it first.
@@ -77,6 +88,8 @@ pub struct Snapshot {
     pub work: Work,
     /// The user's home directory: cwd components at or above it are never names.
     pub home: Option<PathBuf>,
+    /// The lines of posts shared in the last days, newest first, so a new draft doesn't repeat them.
+    pub recent: Vec<String>,
 }
 
 /// Freezes today's stats and work. `rank_total` is the all-time figure (`store::lifetime` in the
@@ -97,17 +110,18 @@ pub fn snapshot(conn: &Connection, today: &str, rank_total: i64, home: Option<Pa
         name,
         work: work(conn, today)?,
         home,
+        recent: Vec::new(),
     })
 }
 
 fn work(conn: &Connection, day: &str) -> anyhow::Result<Work> {
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(s.project, ''), COALESCE(s.cwd, '')
+        "SELECT COALESCE(s.project, ''), COALESCE(s.cwd, ''), s.title, SUM(u.total)
          FROM usage_daily u LEFT JOIN sessions s USING (session_id)
          WHERE u.day = ?1 GROUP BY u.session_id ORDER BY SUM(u.total) DESC",
     )?;
     let sessions = stmt
-        .query_map([day], |r| Ok(WorkSession { project: r.get(0)?, cwd: r.get(1)? }))?
+        .query_map([day], |r| Ok(WorkSession { project: r.get(0)?, cwd: r.get(1)?, title: r.get(2)?, tokens: r.get(3)? }))?
         .collect::<Result<_, _>>()?;
     let skills = store::skills_in(conn, store::Days::on(day))?.into_iter().map(|s| (s.skill, s.calls)).collect();
     let mut stmt = conn.prepare(
@@ -287,10 +301,66 @@ fn strip(text: &str, names: &[String]) -> String {
     out.trim_matches(|c: char| !c.is_alphanumeric() && !matches!(c, ')' | '"' | '\'')).to_string()
 }
 
-/// What goes to `claude -p` on stdin: the session count, skills and subagent types with every name
-/// stripped (emptied ones dropped), and the period figures. Never a title, project or cwd field.
+/// The most features a post names.
+const MAX_FEATURES: usize = 4;
+
+/// Small words a stripped name can leave stranded at either end of a title.
+const CONNECTORS: [&str; 12] = ["and", "or", "for", "with", "of", "the", "to", "in", "on", "a", "an", "&"];
+
+/// A stripped title as a feature name: stranded connectors and punctuation trimmed, and a capital
+/// first letter lowered unless the word is an acronym, so it reads mid-sentence.
+fn feature_name(title: &str) -> String {
+    let mut words: Vec<&str> = title.split_whitespace().collect();
+    let connector = |w: &&str| CONNECTORS.contains(&w.trim_matches(|c: char| !c.is_alphanumeric() && c != '&').to_lowercase().as_str());
+    while words.first().is_some_and(connector) {
+        words.remove(0);
+    }
+    while words.last().is_some_and(connector) {
+        words.pop();
+    }
+    let joined = words.join(" ");
+    let name = joined.trim_matches(|c: char| !c.is_alphanumeric() && c != ')');
+    let mut chars = name.chars();
+    match (chars.next(), chars.next()) {
+        (Some(first), Some(second)) if first.is_uppercase() && !second.is_uppercase() => first.to_lowercase().chain(name.chars().skip(1)).collect(),
+        _ => name.to_string(),
+    }
+}
+
+/// The features worked on today: the titles of the busiest sessions with every project and folder
+/// name stripped, none that carries a security or environment detail, and none from a session that
+/// used under a tenth of the busiest titled one's tokens. Busiest first, at most `MAX_FEATURES`.
+pub fn features(work: &Work, names: &[String]) -> Vec<String> {
+    let mut titled: Vec<(&str, i64)> = work.sessions.iter().filter_map(|s| Some((s.title.as_deref()?, s.tokens))).collect();
+    titled.sort_by_key(|t| std::cmp::Reverse(t.1));
+    let top = titled.first().map_or(0, |t| t.1);
+    let mut out: Vec<String> = Vec::new();
+    for (title, tokens) in titled {
+        if tokens.saturating_mul(10) < top {
+            break;
+        }
+        let name = feature_name(&strip(title, names));
+        let words = name.split_whitespace().count();
+        if words < 2 || sensitive(&name).is_some() || mentioned(&name, names).is_some() || out.iter().any(|o| o.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        out.push(name);
+        if out.len() == MAX_FEATURES {
+            break;
+        }
+    }
+    out
+}
+
+/// What goes to `claude -p` on stdin: the features worked on, the session count, skills and subagent
+/// types with every name stripped (emptied ones dropped), the period figures, and the earlier posts
+/// to steer away from. Never a project or cwd field, and titles only as stripped features.
 fn summary(s: &Snapshot, names: &[String]) -> String {
     let mut out = String::from("Summary of my Claude Code work today (project and folder names removed).\n");
+    let features = features(&s.work, names);
+    if !features.is_empty() {
+        out += &format!("Features worked on today: {}\n", features.join("; "));
+    }
     out += &format!("Sessions today: {}\n", s.work.sessions.len());
     let counted = |items: &[(String, i64)]| -> Vec<String> {
         items.iter().filter_map(|(n, c)| Some(strip(n, names)).filter(|n| !n.is_empty()).map(|n| format!("{n} (x{c})"))).collect()
@@ -312,6 +382,14 @@ fn summary(s: &Snapshot, names: &[String]) -> String {
         count(s.all_time),
         s.badges.rank.name
     );
+    // An edited earlier post may name a project; it is stripped like everything else.
+    let earlier: Vec<String> = s.recent.iter().map(|l| strip(l, names)).filter(|l| !l.is_empty()).collect();
+    if !earlier.is_empty() {
+        out += "Earlier posts, newest first (do not repeat their openings, phrases or structure):\n";
+        for line in earlier {
+            out += &format!("- {line}\n");
+        }
+    }
     out
 }
 
@@ -360,16 +438,27 @@ impl Note {
     }
 }
 
-/// The line for the post, and why it is the template when it is.
+/// The variants of the line for the post, never empty, and why they are the templates when they are.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Draft {
-    pub line: String,
+    pub variants: Vec<String>,
     pub note: Option<Note>,
 }
 
 impl Draft {
     pub fn template(s: &Snapshot, note: Note) -> Self {
-        Draft { line: template_line(s), note: Some(note) }
+        Draft { variants: template_variants(s), note: Some(note) }
+    }
+
+    /// One drafted line.
+    #[cfg(test)]
+    pub fn line(line: impl Into<String>) -> Self {
+        Draft { variants: vec![line.into()], note: None }
+    }
+
+    /// The first variant: the one a share shows first.
+    pub fn first(&self) -> &str {
+        self.variants.first().map_or("", String::as_str)
     }
 }
 
@@ -408,15 +497,39 @@ fn name_words(name: &str) -> Vec<String> {
     tokens(name).into_iter().map(|w| w.to_lowercase()).collect()
 }
 
-/// The line built from today's skills and subagents, when no drafted line can be used: what kind of
-/// work it was, not only how much. Names are stripped like the summary's.
+/// The first template variant, which a share without a drafted line shows first.
+#[cfg(test)]
 pub fn template_line(s: &Snapshot) -> String {
+    template_variants(s).swap_remove(0)
+}
+
+/// The first three words of a line, lower-cased: two lines that open alike read as the same post.
+fn opening(line: &str) -> String {
+    line.split_whitespace().take(3).map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).collect::<Vec<_>>().join(" ")
+}
+
+/// `variants` with any that open like a recent post moved to the end, so the first one shown is fresh.
+fn away_from(mut variants: Vec<String>, recent: &[String]) -> Vec<String> {
+    let used: Vec<String> = recent.iter().map(|l| opening(l)).collect();
+    variants.sort_by_key(|v| used.contains(&opening(v)));
+    variants
+}
+
+/// Lines built from today's features, skills and subagents, when no drafted line can be used: what
+/// was worked on and what kind of work it was, each opening and built differently. Names are stripped
+/// like the summary's, and the ones that open like a recent post go last.
+pub fn template_variants(s: &Snapshot) -> Vec<String> {
     let n = s.work.sessions.len();
     if n == 0 && s.today <= 0 {
-        return format!("No Claude Code sessions today; this is where my AI-assisted work stands at the {} rank.", s.badges.rank.name);
+        return vec![format!("No Claude Code sessions today; this is where my AI-assisted work stands at the {} rank.", s.badges.rank.name)];
     }
     let names = names(&s.work, s.home.as_deref());
     let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+    let sessions = plural(n.max(1), "session");
+    // Three at most: a sentence naming more reads as a list.
+    let mut named = features(&s.work, &names);
+    named.truncate(3);
+    let (features, them) = (and_list(&named), if named.len() > 1 { "them" } else { "it" });
     let used: Vec<Vec<String>> =
         s.work.skills.iter().chain(&s.work.agents).map(|(name, _)| name_words(&strip(name, &names))).collect();
     let activities: Vec<String> = ACTIVITIES
@@ -425,9 +538,9 @@ pub fn template_line(s: &Snapshot) -> String {
         .map(|(verb, _)| verb.to_string())
         .collect();
     let mut line = if activities.is_empty() {
-        format!("Today I built software with Claude Code across {}", plural(n.max(1), "session"))
+        format!("Today I built software with Claude Code across {sessions}")
     } else {
-        format!("Today I used Claude Code to {} software across {}", and_list(&activities), plural(n.max(1), "session"))
+        format!("Today I used Claude Code to {} software across {sessions}", and_list(&activities))
     };
     let agents: i64 = s.work.agents.iter().map(|(_, c)| c).sum();
     let with: Vec<String> = [(s.work.skills.len(), "skill"), (agents.max(0) as usize, "subagent")]
@@ -456,10 +569,41 @@ pub fn template_line(s: &Snapshot) -> String {
             seen
         });
     let reviewers = &reviewers[..reviewers.len().min(4)];
-    if !reviewers.is_empty() {
-        line += &format!(", including {} reviewer{}", and_list(reviewers), if reviewers.len() == 1 { "" } else { "s" });
+    let including = if reviewers.is_empty() {
+        String::new()
+    } else {
+        format!(", including {} reviewer{}", and_list(reviewers), if reviewers.len() == 1 { "" } else { "s" })
+    };
+    line += &including;
+    line += ".";
+    if !features.is_empty() {
+        line += &format!(" The work covered {features}.");
     }
-    line + "."
+
+    // Leads with what was built.
+    let built = match (features.is_empty(), activities.is_empty()) {
+        (false, false) => format!("Progress today on {features}: Claude Code agents helped me {} {them} across {sessions}{including}.", and_list(&activities)),
+        (false, true) => format!("Progress today on {features}, built with Claude Code across {sessions}{including}."),
+        (true, false) => format!("Another day of agent-assisted engineering: Claude Code helped me {} software across {sessions}{including}.", and_list(&activities)),
+        (true, true) => format!("Another day of agent-assisted engineering, building software with Claude Code across {sessions}{including}."),
+    };
+
+    // Leads with how the agents were used.
+    let target = if features.is_empty() { "software".to_string() } else { features.clone() };
+    let verbs = if activities.is_empty() { "build".to_string() } else { and_list(&activities) };
+    let workflow = if with.is_empty() {
+        format!("My workflow today: Claude Code across {sessions}, used to {verbs} {target}.")
+    } else {
+        format!("My workflow today: {} in Claude Code, used to {verbs} {target} across {sessions}.", and_list(&with))
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    for v in [line, built, workflow] {
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    away_from(out, &s.recent)
 }
 
 /// Drafts the line with the real `claude`.
@@ -467,18 +611,59 @@ pub fn draft(s: &Snapshot, cancel: &AtomicBool) -> Draft {
     draft_with(s, "claude", DRAFT_WAIT, cancel)
 }
 
-/// Drafts the line with `program`, falling back to the template with a note. Never retries
-/// without the isolation flags.
+/// Drafts the variants with `program`, falling back to the templates with a note. A variant that
+/// names a project or folder or carries a security detail is dropped; when none is left, the note
+/// says why the first was. Never retries without the isolation flags.
 fn draft_with(s: &Snapshot, program: &str, wait: Duration, cancel: &AtomicBool) -> Draft {
     let names = names(&s.work, s.home.as_deref());
-    match ask(program, &summary(s, &names), wait, cancel) {
-        Ok(line) => match (mentioned(&line, &names), sensitive(&line)) {
-            (Some(name), _) => Draft::template(s, Note::Rejected(name.to_string())),
-            (None, Some(word)) => Draft::template(s, Note::Sensitive(word)),
-            (None, None) => Draft { line, note: None },
-        },
-        Err(note) => Draft::template(s, note),
+    let text = match ask(program, &summary(s, &names), wait, cancel) {
+        Ok(text) => text,
+        Err(note) => return Draft::template(s, note),
+    };
+    let (mut kept, mut dropped) = (Vec::new(), None);
+    for line in variants_of(&text) {
+        match (mentioned(&line, &names), sensitive(&line)) {
+            (Some(name), _) => _ = dropped.get_or_insert(Note::Rejected(name.to_string())),
+            (None, Some(word)) => _ = dropped.get_or_insert(Note::Sensitive(word)),
+            (None, None) if !kept.contains(&line) => kept.push(line),
+            (None, None) => {}
+        }
     }
+    match dropped {
+        _ if !kept.is_empty() => Draft { variants: kept, note: None },
+        Some(note) => Draft::template(s, note),
+        None => Draft::template(s, Note::Empty),
+    }
+}
+
+/// The variants in a reply: numbered lines (`1.` or `1)`) each start one, and the lines under a number
+/// continue it; a reply with no numbers is one variant. Each becomes one paragraph.
+fn variants_of(text: &str) -> Vec<String> {
+    let numbered = |l: &str| -> Option<String> {
+        let l = l.trim_start();
+        let digits = l.chars().take_while(char::is_ascii_digit).count();
+        let rest = l[digits..].strip_prefix(['.', ')'])?;
+        (digits > 0).then(|| rest.to_string())
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let any = text.lines().any(|l| numbered(l).is_some());
+    for l in text.lines() {
+        match numbered(l).filter(|_| any) {
+            Some(rest) => parts.push(rest),
+            None if parts.is_empty() => parts.push(l.to_string()),
+            None => {
+                let last = parts.last_mut().unwrap();
+                last.push(' ');
+                last.push_str(l);
+            }
+        }
+    }
+    parts
+        .into_iter()
+        .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" ").trim_matches('"').trim().to_string())
+        .filter(|p| !p.is_empty())
+        .take(VARIANTS)
+        .collect()
 }
 
 /// The isolated, single-turn, tool-less `claude -p` call: no hooks, CLAUDE.md, plugins or MCP,
@@ -507,7 +692,7 @@ fn ask(program: &str, summary: &str, wait: Duration, cancel: &AtomicBool) -> Res
     reply(&out)
 }
 
-/// The line from `claude -p --output-format json`, or the note for what went wrong.
+/// The reply's text from `claude -p --output-format json`, or the note for what went wrong.
 fn reply(out: &Captured) -> Result<String, Note> {
     let json: Option<serde_json::Value> = serde_json::from_slice(&out.stdout).ok();
     let result = json.as_ref().and_then(|v| v["result"].as_str()).unwrap_or("");
@@ -524,10 +709,9 @@ fn reply(out: &Captured) -> Result<String, Note> {
     if json.is_none() {
         return Err(Note::Failed("unreadable output".into()));
     }
-    // One paragraph: line breaks and runs of spaces become single spaces.
-    let line = result.split_whitespace().collect::<Vec<_>>().join(" ");
-    let line = line.trim_matches('"').trim().to_string();
-    if line.is_empty() { Err(Note::Empty) } else { Ok(line) }
+    // Line breaks stay: they separate the variants.
+    let text = result.trim();
+    if text.trim_matches('"').trim().is_empty() { Err(Note::Empty) } else { Ok(text.to_string()) }
 }
 
 fn first_line(s: &str) -> Option<&str> {
@@ -850,13 +1034,17 @@ pub fn run(a: ShareArgs) -> anyhow::Result<()> {
     store::open_and_sync()?;
     let conn = store::open_readonly()?;
     let total = store::lifetime(&conn)?.total;
-    let s = snapshot(&conn, &store::day_n_ago(0), total, dirs::home_dir(), git_user_name())?;
+    let mut s = snapshot(&conn, &store::day_n_ago(0), total, dirs::home_dir(), git_user_name())?;
+    s.recent = crate::share_history::recent(&crate::data_dir(), &s.date);
     let d = if a.no_ai { Draft::template(&s, Note::Off) } else { draft(&s, &AtomicBool::new(false)) };
     let path = a.out.unwrap_or_else(|| default_card_path(&s.date));
     let text = print(&s, &d, &path)?;
     println!("{text}");
     if let Some(note) = &d.note {
         eprintln!("{}", note.message());
+    }
+    for (i, other) in d.variants.iter().enumerate().skip(1) {
+        eprintln!("variant {}: {other}", i + 1);
     }
     eprintln!("card: {}", path.display());
     Ok(())
@@ -865,7 +1053,7 @@ pub fn run(a: ShareArgs) -> anyhow::Result<()> {
 /// Writes the card and returns the post. Opens nothing.
 fn print(s: &Snapshot, d: &Draft, path: &Path) -> anyhow::Result<String> {
     save_card(s, path).with_context(|| format!("couldn't write the card to {}", path.display()))?;
-    Ok(post(s, &d.line))
+    Ok(post(s, d.first()))
 }
 
 #[cfg(test)]
@@ -889,11 +1077,11 @@ mod tests {
 
     const DAY: &str = "2026-10-24";
 
-    /// Today: one session in `acme-portal` titled "Acme Corp invoice parser" (never read), the skill `acme-deploy`
+    /// Today: one session in `acme-portal` titled "Acme invoice parser", which goes out as "invoice parser", the skill `acme-deploy`
     /// and `ce-plan`, and two Explore subagents.
     fn acme() -> Snapshot {
         let conn = db(&format!(
-            "INSERT INTO sessions VALUES ('s1', 'acme-portal', '/Users/x/Projects/acme-portal', 'Acme Corp invoice parser', 'opus', NULL, NULL, NULL);
+            "INSERT INTO sessions VALUES ('s1', 'acme-portal', '/Users/x/Projects/acme-portal', 'Acme invoice parser', 'opus', NULL, NULL, NULL);
              INSERT INTO usage_daily VALUES ('s1', 'main', 'main', '{DAY}', 0, 0, 0, 0, 12000000, 3);
              INSERT INTO usage_daily VALUES ('s1', 'a1', 'Explore', '{DAY}', 0, 0, 0, 0, 1000, 1);
              INSERT INTO usage_daily VALUES ('s1', 'a2', 'Explore', '{DAY}', 0, 0, 0, 0, 1000, 1);
@@ -943,17 +1131,17 @@ mod tests {
     fn covers_ae3_a_missing_claude_gives_the_template_and_says_so() {
         let s = acme();
         let d = draft_with(&s, "marsad-no-such-claude", Duration::from_secs(5), &never());
-        assert_eq!(d.line, template_line(&s));
+        assert_eq!(d.first(), template_line(&s));
         assert_eq!(d.note, Some(Note::NotInstalled));
         assert!(d.note.unwrap().message().contains("not generated"));
     }
 
     #[test]
-    fn skills_and_agents_go_out_without_titles_or_project_names() {
+    fn features_skills_and_agents_go_out_without_project_names() {
         let s = acme();
         let names = names(&s.work, s.home.as_deref());
         let payload = summary(&s, &names);
-        assert!(!payload.contains("invoice") && payload.contains("Sessions today: 1\n"), "no session title: {payload}");
+        assert!(payload.contains("Features worked on today: invoice parser\nSessions today: 1\n"), "the title without its project name: {payload}");
         assert!(!payload.to_lowercase().contains("acme"), "{payload}");
         assert!(!payload.contains("portal") && !payload.contains("/Users"), "no project or cwd field: {payload}");
         assert!(payload.contains("Skills used: deploy (x1), ce-plan (x1)"), "acme-deploy loses acme: {payload}");
@@ -974,7 +1162,7 @@ mod tests {
     #[test]
     fn names_are_project_and_folders_below_home_with_their_words() {
         let work = |project: &str, cwd: &str| Work {
-            sessions: vec![WorkSession { project: project.into(), cwd: cwd.into() }],
+            sessions: vec![WorkSession { project: project.into(), cwd: cwd.into(), ..WorkSession::default() }],
             ..Work::default()
         };
         let n = names(&work("acme-portal", "/Users/x/Projects/acme-portal"), Some(Path::new("/Users/x")));
@@ -1026,8 +1214,8 @@ mod tests {
         let s = acme();
         let d = draft_with(&s, &fake(&dir, &answer("I built an Acme invoice parser with AI agents.")), Duration::from_secs(10), &never());
         assert_eq!(d.note, Some(Note::Rejected("acme".into())));
-        assert_eq!(d.line, template_line(&s));
-        assert!(!d.line.to_lowercase().contains("acme"));
+        assert_eq!(d.first(), template_line(&s));
+        assert!(!d.first().to_lowercase().contains("acme"));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1045,7 +1233,7 @@ mod tests {
         ] {
             let d = draft_with(&s, &fake(&dir, &answer(reply)), Duration::from_secs(10), &never());
             assert_eq!(d.note, Some(Note::Sensitive(word.into())), "{reply}");
-            assert_eq!(d.line, template_line(&s));
+            assert_eq!(d.first(), template_line(&s));
         }
         let ok = "I planned, built and security reviewed product changes with parallel review agents.";
         assert_eq!(draft_with(&s, &fake(&dir, &answer(ok)), Duration::from_secs(10), &never()).note, None);
@@ -1059,13 +1247,13 @@ mod tests {
         let s = acme();
         let program = fake(&dir, &answer("  I planned and shipped an invoice parser,\nusing users and projects data. "));
         let d = draft_with(&s, &program, Duration::from_secs(10), &never());
-        assert_eq!(d, Draft { line: "I planned and shipped an invoice parser, using users and projects data.".into(), note: None });
+        assert_eq!(d, Draft::line("I planned and shipped an invoice parser, using users and projects data."));
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
         let args: Vec<&str> = args.lines().collect();
         assert_eq!(&args[..10], ["-p", "--safe-mode", "--no-session-persistence", "--tools", "", "--model", "haiku", "--output-format", "json", "--system-prompt"]);
         assert!(!args.contains(&"--max-turns") && !args.contains(&"--resume") && !args.contains(&"--continue"));
         let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
-        assert!(!stdin.contains("invoice") && !stdin.to_lowercase().contains("acme"), "{stdin}");
+        assert!(!stdin.to_lowercase().contains("acme"), "{stdin}");
         let cwd = std::fs::read_to_string(dir.join("cwd")).unwrap();
         assert!(cwd.contains("marsad-draft-"), "a fresh temp cwd: {cwd}");
         assert!(!Path::new(cwd.trim()).exists(), "the temp cwd is removed afterwards");
@@ -1117,7 +1305,7 @@ mod tests {
         for (body, want) in cases {
             let d = draft_with(&s, &fake(&dir, body), Duration::from_secs(10), &never());
             assert_eq!(d.note, Some(want.clone()), "{body}");
-            assert_eq!(d.line, template_line(&s));
+            assert_eq!(d.first(), template_line(&s));
         }
         let messages: Vec<String> = [Note::Off, Note::NotInstalled, Note::TooOld, Note::Timeout, Note::Cancelled, Note::Empty]
             .iter()
@@ -1136,18 +1324,27 @@ mod tests {
         s.work.sessions.push(WorkSession {
             project: "load-test".into(),
             cwd: "/Users/x/Projects/acme-portal/.claude/worktrees/load-test".into(),
+            ..WorkSession::default()
         });
         let line = "I used Claude Code to plan and load test a web app with parallel review agents.";
         let d = draft_with(&s, &fake(&dir, &answer(line)), Duration::from_secs(10), &never());
-        assert_eq!(d, Draft { line: line.into(), note: None });
+        assert_eq!(d, Draft::line(line));
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
     fn the_template_says_what_kind_of_work_it_was() {
         let s = acme();
-        assert_eq!(template_line(&s), "Today I used Claude Code to plan and ship software across 1 session, with 2 skills and 2 subagents.");
+        assert_eq!(
+            template_variants(&s),
+            [
+                "Today I used Claude Code to plan and ship software across 1 session, with 2 skills and 2 subagents. The work covered invoice parser.",
+                "Progress today on invoice parser: Claude Code agents helped me plan and ship it across 1 session.",
+                "My workflow today: 2 skills and 2 subagents in Claude Code, used to plan and ship invoice parser across 1 session.",
+            ]
+        );
         let mut busy = acme();
+        busy.work.sessions[0].title = None;
         busy.work.skills = ["compound-engineering:ce-work", "assunnah-engineering:ae-review", "ce-commit-push-pr", "ae-test", "acme-deploy"]
             .iter()
             .map(|n| (n.to_string(), 1))
@@ -1168,9 +1365,87 @@ mod tests {
             "duplicates, client-named and finding-named reviewers stay out"
         );
         let plain = Snapshot { work: Work { sessions: s.work.sessions.clone(), ..Work::default() }, ..s.clone() };
-        assert_eq!(template_line(&plain), "Today I built software with Claude Code across 1 session.");
-        let quiet = Snapshot { today: 0, work: Work::default(), ..s };
+        assert_eq!(
+            template_variants(&plain),
+            [
+                "Today I built software with Claude Code across 1 session. The work covered invoice parser.",
+                "Progress today on invoice parser, built with Claude Code across 1 session.",
+                "My workflow today: Claude Code across 1 session, used to build invoice parser.",
+            ]
+        );
+        let quiet = Snapshot { today: 0, work: Work::default(), ..s.clone() };
+        assert_eq!(template_variants(&quiet).len(), 1);
         assert!(template_line(&quiet).starts_with("No Claude Code sessions today"));
+        // A variant that opens like a post of the last days goes last.
+        let recent = Snapshot { recent: vec!["Today I used Claude Code to debug.".into()], ..s.clone() };
+        assert!(template_line(&recent).starts_with("Progress today"), "{}", template_line(&recent));
+        assert!(template_variants(&recent)[2].starts_with("Today I used"));
+    }
+
+    fn session(project: &str, title: Option<&str>, tokens: i64) -> WorkSession {
+        WorkSession { project: project.into(), cwd: format!("/Users/x/Projects/{project}"), title: title.map(str::to_string), tokens }
+    }
+
+    #[test]
+    fn features_are_the_busiest_titles_without_names_or_security_details() {
+        let work = Work {
+            sessions: vec![
+                session("acme", Some("Acme disk guard and cleanup"), 30_000_000),
+                session("acme", Some("Auth migration PR slicing"), 80_000_000),
+                session("globex", Some("Marsad and Globex reporting"), 20_000_000),
+                session("globex", Some("Globex"), 20_000_000),
+                session("web", Some("Session history, UI, and sharing fixes"), 10_000_000),
+                session("web", Some("Disk guard and cleanup"), 9_000_000),
+                session("web", Some("Prompt versions"), 8_500_000),
+                session("web", Some("Tiny probe"), 100_000),
+                session("web", None, 90_000_000),
+            ],
+            ..Work::default()
+        };
+        let names = names(&work, Some(Path::new("/Users/x")));
+        assert_eq!(
+            features(&work, &names),
+            ["disk guard and cleanup", "marsad and reporting", "session history, UI, and sharing fixes", "prompt versions"],
+            "auth is a security detail, a bare client name is nothing, duplicates and small sessions are dropped"
+        );
+        assert_eq!(feature_name("and the Data folder migration with"), "data folder migration");
+        assert_eq!(feature_name("CLI output"), "CLI output", "an acronym keeps its capitals");
+    }
+
+    #[test]
+    fn earlier_posts_go_out_stripped_so_the_draft_avoids_them() {
+        let mut s = acme();
+        s.recent = vec!["I shipped the Acme portal parser.".into(), "Another day of agent work.".into()];
+        let payload = summary(&s, &names(&s.work, s.home.as_deref()));
+        assert!(
+            payload.ends_with("Earlier posts, newest first (do not repeat their openings, phrases or structure):\n- I shipped the parser\n- Another day of agent work\n"),
+            "{payload}"
+        );
+        assert!(!payload.to_lowercase().contains("acme"));
+    }
+
+    #[test]
+    fn a_reply_splits_into_numbered_variants() {
+        assert_eq!(variants_of("1. First one.\n2) Second\n   continues.\n\n3. \"Third.\"\n4. Fourth."), ["First one.", "Second continues.", "Third."]);
+        assert_eq!(variants_of("Just one line,\nwrapped."), ["Just one line, wrapped."]);
+        assert_eq!(variants_of("Intro\n1. One."), ["Intro", "One."]);
+        assert!(variants_of("  \n ").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn variants_that_name_a_project_are_dropped_and_the_rest_kept() {
+        let dir = scratch("variants");
+        let s = acme();
+        let reply = "1. I built an invoice parser with planning agents.\n2. I shipped the Acme portal.\n3. Review agents checked every change.";
+        let d = draft_with(&s, &fake(&dir, &answer(reply)), Duration::from_secs(10), &never());
+        assert_eq!(d.note, None);
+        assert_eq!(d.variants, ["I built an invoice parser with planning agents.", "Review agents checked every change."]);
+        // When every variant is dropped, the templates come back with the first reason.
+        let reply = "1. I shipped it for Acme.\n2. I fixed an IDOR.";
+        let d = draft_with(&s, &fake(&dir, &answer(reply)), Duration::from_secs(10), &never());
+        assert_eq!((d.note, d.variants), (Some(Note::Rejected("acme".into())), template_variants(&s)));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
