@@ -244,8 +244,13 @@ pub enum PromptCmd {
     Edit(EditArgs),
     /// Save a copy of a prompt, such as a built-in one, to your library under a new name.
     Copy(CopyArgs),
-    /// Delete one of your prompts.
+    /// Delete one of your prompts; its text is kept as a version you can restore.
     Rm(RmArgs),
+    /// List the earlier versions of one of your prompts, or print one; without a key, list deleted
+    /// prompts that can be restored.
+    Versions(VersionsArgs),
+    /// Make an earlier version the prompt again (the newest by default), or bring back a deleted one.
+    Restore(RestoreArgs),
 }
 
 #[derive(clap::Args)]
@@ -292,6 +297,20 @@ pub struct RmArgs {
     key: String,
 }
 
+#[derive(clap::Args)]
+pub struct VersionsArgs {
+    key: Option<String>,
+    /// Print this version's text.
+    number: Option<u32>,
+}
+
+#[derive(clap::Args)]
+pub struct RestoreArgs {
+    key: String,
+    /// The version to restore (default: the newest).
+    number: Option<u32>,
+}
+
 pub fn run(cmd: PromptCmd) -> anyhow::Result<()> {
     match cmd {
         PromptCmd::New(args) => run_new(args),
@@ -300,9 +319,50 @@ pub fn run(cmd: PromptCmd) -> anyhow::Result<()> {
         PromptCmd::Rm(args) => {
             let path = crate::rules::remove_own(&args.key)?;
             println!("Deleted {}", path.display());
+            println!("`marsad prompt restore {}` brings it back.", args.key);
+            Ok(())
+        }
+        PromptCmd::Versions(args) => run_versions(args),
+        PromptCmd::Restore(args) => {
+            let v = crate::rules::restore_own(&args.key, args.number)?;
+            println!("Restored {} to version {} ({}, replaced {}).", args.key, v.number, v.title, v.when());
             Ok(())
         }
     }
+}
+
+fn run_versions(args: VersionsArgs) -> anyhow::Result<()> {
+    let Some(key) = args.key else {
+        let deleted = crate::rules::deleted();
+        if deleted.is_empty() {
+            println!("No deleted prompts to restore.");
+        }
+        for key in deleted {
+            let n = crate::rules::versions(&key).len();
+            println!("{key}  ({n} version{})", if n == 1 { "" } else { "s" });
+        }
+        return Ok(());
+    };
+    let lib = crate::rules::library();
+    if lib.iter().any(|r| r.key == key && !r.own) {
+        anyhow::bail!("{key} is built in and has no versions");
+    }
+    let list = crate::rules::versions(&key);
+    if let Some(n) = args.number {
+        let v = list.iter().find(|v| v.number == n).ok_or_else(|| anyhow::anyhow!("{key} has no version {n}"))?;
+        print!("{}", v.body);
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("{key} has no earlier versions yet; one is kept each time it is edited, renamed or deleted.");
+        return Ok(());
+    }
+    for v in &list {
+        println!("{:>4}  {}  {}  {}", format!("v{}", v.number), v.when(), v.title, v.summary);
+    }
+    println!();
+    println!("`marsad prompt versions {key} <n>` prints one; `marsad prompt restore {key} <n>` brings it back.");
+    Ok(())
 }
 
 /// The rough idea from the arguments, `--from`, or stdin, and whether it used stdin.

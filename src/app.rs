@@ -188,6 +188,18 @@ pub struct RulesPicker {
     pub mode: Option<crate::rules::Mode>,
     /// The prompt waiting for `y` to be deleted.
     pub deleting: Option<usize>,
+    /// The earlier versions of a prompt being browsed, opened with `v`.
+    pub versions: Option<VersionList>,
+    /// The prompt deleted last, which `u` brings back.
+    pub restorable: Option<String>,
+}
+
+/// The earlier versions of one of the user's prompts, newest first.
+pub struct VersionList {
+    pub key: String,
+    pub title: String,
+    pub list: Vec<crate::rules::Version>,
+    pub cursor: usize,
 }
 
 impl RulesPicker {
@@ -555,7 +567,7 @@ impl App {
         let library = crate::rules::library();
         let saved = crate::settings::rules();
         let ticked = library.iter().map(|r| saved.contains(&r.key)).collect();
-        self.rules_picker = Some(RulesPicker { library, ticked, cursor: 0, mode: None, deleting: None });
+        self.rules_picker = Some(RulesPicker { library, ticked, cursor: 0, mode: None, deleting: None, versions: None, restorable: None });
     }
 
     /// Routes a key to the prompt writer; a saved prompt joins the picker's library, ticked.
@@ -594,9 +606,43 @@ impl App {
         match crate::rules::remove_own(&key) {
             Ok(_) => {
                 picker.reload(crate::rules::library(), None, false);
-                self.info = Some(format!("deleted {key} "));
+                picker.restorable = Some(key.clone());
+                self.info = Some(format!("deleted {key} · u brings it back "));
             }
             Err(e) => self.error = Some(format!("{e:#} ")),
+        }
+    }
+
+    /// Makes version `number` of `key` (the newest when None) the prompt again and highlights it.
+    fn restore_prompt(&mut self, key: &str, number: Option<u32>) {
+        let Some(picker) = self.rules_picker.as_mut() else { return };
+        match crate::rules::restore_own(key, number) {
+            Ok(v) => {
+                picker.reload(crate::rules::library(), Some(key), false);
+                (picker.versions, picker.restorable) = (None, None);
+                self.info = Some(format!("restored {key} to v{} from {} · the text it replaced is kept as a version ", v.number, v.when()));
+            }
+            Err(e) => self.error = Some(format!("{e:#} ")),
+        }
+    }
+
+    /// Keys while browsing a prompt's earlier versions: `enter` restores the highlighted one.
+    fn on_versions_key(&mut self, code: KeyCode) {
+        let Some(list) = self.rules_picker.as_mut().and_then(|p| p.versions.as_mut()) else { return };
+        let last = list.list.len().saturating_sub(1);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q' | 'v') => {
+                if let Some(p) = self.rules_picker.as_mut() {
+                    p.versions = None;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => list.cursor = (list.cursor + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => list.cursor = list.cursor.saturating_sub(1),
+            KeyCode::Enter => {
+                let (key, number) = (list.key.clone(), list.list.get(list.cursor).map(|v| v.number));
+                self.restore_prompt(&key, number);
+            }
+            _ => {}
         }
     }
 
@@ -631,6 +677,10 @@ impl App {
             self.on_delete_key(code);
             return;
         }
+        if picker.versions.is_some() {
+            self.on_versions_key(code);
+            return;
+        }
         let last = picker.library.len().saturating_sub(1);
         let highlighted = picker.library.get(picker.cursor);
         match code {
@@ -647,6 +697,22 @@ impl App {
                 Some(rule) if rule.own => picker.deleting = Some(picker.cursor),
                 Some(rule) => self.error = Some(format!("{} is built in and can't be deleted; e saves a copy you can change ", rule.title)),
                 None => {}
+            },
+            KeyCode::Char('v') => match highlighted {
+                Some(rule) if rule.own => {
+                    let list = crate::rules::versions(&rule.key);
+                    if list.is_empty() {
+                        self.info = Some(format!("{} has no earlier versions yet; one is kept each time it changes ", rule.title));
+                    } else {
+                        picker.versions = Some(VersionList { key: rule.key.clone(), title: rule.title.clone(), list, cursor: 0 });
+                    }
+                }
+                Some(rule) => self.error = Some(format!("{} is built in, so it has no versions ", rule.title)),
+                None => {}
+            },
+            KeyCode::Char('u') => match picker.restorable.clone() {
+                Some(key) => self.restore_prompt(&key, None),
+                None => self.error = Some("nothing deleted to bring back ".into()),
             },
             KeyCode::Down | KeyCode::Char('j') => picker.cursor = (picker.cursor + 1).min(last),
             KeyCode::Up | KeyCode::Char('k') => picker.cursor = picker.cursor.saturating_sub(1),

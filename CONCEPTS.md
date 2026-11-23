@@ -70,6 +70,9 @@ A markdown file of instructions for a session's system prompt: one marsad ships,
 The `claude -p` run that turns a user's rough idea into a rules file for their library, returning the draft with what it assumed and the questions the idea left open. It runs isolated from the user's projects and settings, and keeps the user's situation out of the rules it writes.
 *Avoid:* template, wizard
 
+### Prompt version
+An earlier text of one of the user's prompts, kept when the prompt is edited, renamed, restored over or deleted. Versions are numbered per prompt and follow it through a rename; restoring one keeps the text it replaces as a new version.
+
 ### Team launch
 Starting the lead of an agent team with a set of rules files. A teammate never sees the lead's system prompt, so the team gets a lead's file and a teammates' file, and the lead's file tells it to start every spawn prompt with "read the teammates' file". Coordination goes in the lead's file only.
 *Avoid:* protocol (for anything but the coordination rules)

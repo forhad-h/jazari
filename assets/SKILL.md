@@ -48,7 +48,9 @@ marsad rules output-hygiene --team                   # starts an agent team lead
 marsad prompt new "<rough idea>" --yes --format json # Claude writes a prompt from the idea and saves it: {key, title, summary, body, assumptions, questions, saved}
 marsad prompt edit <name> --with "<feedback>" --yes  # revises one of the user's prompts with Claude
 marsad prompt copy <name> --as <new-name>            # copies a prompt (a built-in one, say) into the user's library
-marsad prompt rm <name>                              # deletes one of the user's prompts; built-in ones can't be deleted
+marsad prompt rm <name>                              # deletes one of the user's prompts, keeping its text as a version; built-in ones can't be deleted
+marsad prompt versions [<name> [<n>]]                # a prompt's earlier versions (v<n>, when replaced, title, summary), or version n's text; no name lists deleted prompts
+marsad prompt restore <name> [<n>]                   # makes version n (default: newest) the prompt again, or brings back a deleted one
 ```
 
 The user's prompts are `.md` files in `~/.marsad/prompts/`, and the merged launch files are in

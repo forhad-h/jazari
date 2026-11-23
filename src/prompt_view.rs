@@ -158,6 +158,10 @@ pub struct PromptView {
     copy_of: Option<String>,
     /// Where the editor's text goes when it comes back.
     editing_draft: bool,
+    /// The draft has changes that aren't saved: a new or revised draft, an edit or a rename.
+    dirty: bool,
+    /// `esc` was pressed once on an unsaved draft; a second one discards it.
+    discarding: bool,
     pub warning: Option<String>,
     pub notice: Option<String>,
     pub scroll: u16,
@@ -179,6 +183,8 @@ impl PromptView {
             replacing: None,
             copy_of: None,
             editing_draft: false,
+            dirty: false,
+            discarding: false,
             warning: None,
             notice: None,
             scroll: 0,
@@ -232,7 +238,7 @@ impl PromptView {
                 if self.draft.as_ref().is_some_and(|d| !d.questions.is_empty()) {
                     keys.insert(3, ("1-9", "answer"));
                 }
-                keys.push(("esc", "discard"));
+                keys.push(("esc", if self.discarding { "discard now" } else { "discard" }));
                 keys
             }
             Phase::Line(LineFor::Key, _) => vec![("enter", "rename"), ("esc", "back")],
@@ -256,7 +262,7 @@ impl PromptView {
                     let preferred = if name.trim().is_empty() { draft.key.clone() } else { name };
                     self.key = crate::rules::suggest_key(&(self.env.library)(), &preferred, &draft.title);
                 }
-                (self.draft, self.scroll, self.notice) = (Some(draft), 0, None);
+                (self.draft, self.scroll, self.notice, self.dirty) = (Some(draft), 0, None, true);
                 self.phase = Phase::Review;
             }
             Err(why) => {
@@ -316,6 +322,7 @@ impl PromptView {
             Ok(text) if self.editing_draft => {
                 if let Some(d) = self.draft.take() {
                     self.draft = Some(Draft { body: text, ..d }.normalized_keeping_key());
+                    self.dirty = true;
                 }
                 self.warning = None;
             }
@@ -386,8 +393,13 @@ impl PromptView {
             Phase::Review => {
                 let questions = self.draft.as_ref().map_or(0, |d| d.questions.len());
                 (self.warning, self.notice) = (None, None);
+                let confirmed = std::mem::take(&mut self.discarding);
                 match code {
-                    KeyCode::Esc => return Outcome::Close,
+                    KeyCode::Esc if confirmed || !self.dirty => return Outcome::Close,
+                    KeyCode::Esc => {
+                        self.discarding = true;
+                        self.warning = Some("This draft isn't saved. Esc again discards it; enter saves it; any other key keeps it open.".into());
+                    }
                     KeyCode::Enter => return self.save(),
                     KeyCode::Char('e') => {
                         self.editing_draft = true;
@@ -428,6 +440,7 @@ impl PromptView {
             LineFor::Key => match crate::rules::key_problem(&(self.env.library)(), &input, self.replacing.as_deref()) {
                 Some(why) => self.warning = Some(format!("Can't use {input:?}: {why}.")),
                 None => {
+                    self.dirty |= input != self.key;
                     (self.key, self.warning) = (input, None);
                     self.phase = Phase::Review;
                 }
@@ -545,6 +558,36 @@ mod tests {
 
         assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "short-pull-requests".into(), replaced: None });
         assert_eq!(saved.lock().unwrap()[0], ("short-pull-requests".into(), second.body, None));
+    }
+
+    #[test]
+    fn esc_asks_before_throwing_away_an_unsaved_draft() {
+        let (env, _, saved) = fake(vec![Ok(draft("Short pull requests", &[]))], Vec::new());
+        let mut v = PromptView::new(env.clone());
+        typed(&mut v, "idea");
+        v.on_key(key(KeyCode::Enter));
+        wait(&mut v);
+        assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Stay, "the first esc only warns");
+        assert!(v.warning.as_deref().unwrap().contains("isn't saved"));
+        v.on_key(key(KeyCode::Down));
+        assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Stay, "another key in between keeps it");
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "short-pull-requests".into(), replaced: None }, "enter still saves");
+        assert_eq!(saved.lock().unwrap().len(), 1);
+
+        let (env, ..) = fake(vec![Ok(draft("Short pull requests", &[]))], Vec::new());
+        let mut v = PromptView::new(env);
+        typed(&mut v, "idea");
+        v.on_key(key(KeyCode::Enter));
+        wait(&mut v);
+        v.on_key(key(KeyCode::Esc));
+        assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Close, "a second esc discards");
+
+        let mut v = PromptView::revise(env_with_lib(vec![own("tone")]), &own("tone"));
+        assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Close, "an unchanged prompt closes at once");
+    }
+
+    fn env_with_lib(lib: Vec<Rule>) -> Env {
+        fake(Vec::new(), lib).0
     }
 
     #[test]
