@@ -39,7 +39,7 @@ source with `cargo install --git https://github.com/forhad-h/marsad`.
 ## Usage
 
 ```sh
-marsad install     # registers hooks + status line in ~/.claude/settings.json (backup saved alongside), creates the folder for your own prompts
+marsad install     # registers hooks + status line in ~/.claude/settings.json (backup saved alongside), creates the folder for your own prompts, offers to install tmux
 marsad install --no-statusline   # hooks only; context size is then estimated from transcripts
 marsad             # open the dashboard
 marsad uninstall   # removes only marsad's hooks, skill and generated prompt files (your own prompts stay)
@@ -105,13 +105,15 @@ model id (marked `≈`) and usage limits are not shown.
 Auto-compact point: 967K on native 1M-context models, otherwise the full window, or your
 `autoCompactWindow` / `CLAUDE_CODE_AUTO_COMPACT_WINDOW` if set.
 
-### Handoff warning
+### Handoff warning and `marsad handoff`
 
-When a session's context passes **80%** of the auto-compact point, marsad tells Claude once, on
-your next prompt, that the context is nearly full and that it should consider writing a handoff
-prompt for a fresh session. `install` registers this as a synchronous `UserPromptSubmit` hook
-(`marsad context --hook`, a few ms) so the note reaches the prompt you just sent. The warning comes
-back after a compact or `/clear` brings the context below the threshold.
+When a session's context passes **80%** of the auto-compact point, marsad tells Claude once that
+the context is nearly full and asks it to hand off: write a handoff prompt a fresh session can start
+from (the goal, what is done, what is left, decisions, files changed, dead ends, how to check the
+work) and pass it to `marsad handoff`. `install` registers this as a synchronous hook
+(`marsad context --hook`, a few ms) on `UserPromptSubmit` and `PostToolUse`, so the note also
+reaches a long turn between tool calls. The warning comes back after a compact or `/clear` brings
+the context below the threshold.
 
 ```sh
 marsad context              # this session: context used, left, and the warning threshold
@@ -122,6 +124,33 @@ marsad context --warn off
 
 Inside Claude Code (a Bash tool call or a hook), `marsad context` finds its own session; elsewhere
 pass `--session`.
+
+`marsad handoff` saves the prompt and opens a new terminal that starts `claude` with it, in the
+session's folder. It tries, in order:
+
+1. the terminal the session runs in: a new tmux window when inside tmux, otherwise a new Warp tab
+   (through a launch configuration), iTerm2 tab, Terminal.app window, Ghostty, WezTerm, kitty or
+   Windows Terminal tab;
+2. the system default: Terminal.app on macOS, `x-terminal-emulator` (or GNOME Terminal, Konsole,
+   Xfce Terminal, xterm) on Linux, a new console window on Windows;
+3. a detached tmux session, and prints the `tmux attach` command.
+
+```sh
+marsad handoff <<'EOF'          # the prompt on stdin (or --file handoff.md)
+Goal: ...
+EOF
+marsad handoff --terminal tmux  # only this terminal (warp, iterm, terminal, ghostty, wezterm, kitty, windows-terminal, default)
+marsad handoff --close          # also end this session 5 s after the new one opens
+marsad handoff --auto-close on  # end the old session by default (`--keep` keeps it once)
+marsad handoff --no-launch      # only save it
+marsad handoff list             # saved handoffs, newest first
+marsad handoff resume <id>      # start a saved handoff in this terminal
+```
+
+Closing ends the old Claude Code process; inside tmux it closes the pane. In other terminals the tab
+stays open at its shell prompt. A session handed to a detached tmux session is never closed, since
+the new one isn't on screen yet. `install` offers to install tmux when it is missing (Homebrew on
+macOS, the system package manager on Linux), since it is the last fallback.
 
 ### Disk guard and system meters
 

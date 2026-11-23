@@ -40,7 +40,8 @@ fn is_ours(entry: &Value) -> bool {
     })
 }
 
-/// Arguments of the prompt hook that adds the handoff warning to a session's context.
+/// Arguments of the hook that adds the handoff warning to a session's context, on each prompt and
+/// after each tool call, so a long turn is warned before it reaches auto-compact.
 const CONTEXT_HOOK: &str = " context --hook";
 
 /// Arguments of the hook that checks the disk before each tool call and prompt.
@@ -58,7 +59,7 @@ fn add_hooks(settings: &mut Map<String, Value>, exe: &str) -> anyhow::Result<()>
         list.push(json!({
             "hooks": [{ "type": "command", "command": command, "async": true, "timeout": 10 }]
         }));
-        if *event == "UserPromptSubmit" {
+        if matches!(*event, "UserPromptSubmit" | "PostToolUse") {
             list.push(json!({
                 "hooks": [{ "type": "command", "command": format!("\"{exe}\"{CONTEXT_HOOK}"), "timeout": 5 }]
             }));
@@ -176,6 +177,7 @@ pub fn install(with_statusline: bool) -> anyhow::Result<()> {
         Ok(()) => println!("Add your own prompts as .md files in {} (`marsad rules` lists them)", crate::rules::prompts_dir().display()),
         Err(e) => eprintln!("warning: couldn't create the prompts folder: {e:#}"),
     }
+    crate::terminal::offer_tmux();
     println!("Sessions already running pick them up after a restart (or /hooks reload). Run `marsad` to open the dashboard.");
     Ok(())
 }
@@ -315,9 +317,12 @@ mod tests {
         ]);
         let tool: Vec<&str> = s["hooks"]["PreToolUse"].as_array().unwrap().iter().map(|e| e["hooks"][0]["command"].as_str().unwrap()).collect();
         assert_eq!(tool, ["\"/x/marsad\" hook", "\"/x/marsad\" guard --hook"], "the disk guard checks every tool call");
+        let after: Vec<&str> = s["hooks"]["PostToolUse"].as_array().unwrap().iter().map(|e| e["hooks"][0]["command"].as_str().unwrap()).collect();
+        assert_eq!(after, ["\"/x/marsad\" hook", "\"/x/marsad\" context --hook"], "a long turn is warned between tool calls");
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1, "other events get only the async hook");
         strip(&mut s);
         assert_eq!(s["hooks"]["UserPromptSubmit"], json!([foreign]), "uninstall removes all three");
         assert!(s["hooks"].get("PreToolUse").is_none());
+        assert!(s["hooks"].get("PostToolUse").is_none());
     }
 }
