@@ -3,6 +3,13 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.11.0 - 2026-11-23
+
+- marsad keeps its data in `~/.marsad`; the data in `~/.claude/marsad` is copied over once and left there
+- Claude Code's own files (event log, status line reports) are in `~/.marsad/claude/`
+- Launch files have names you can read, such as `lead-coordination+output-hygiene-8873230f.md`
+- The old `~/.claude/marsad/coordination*.md` paths keep working; a later release stops updating them
+
 ## 0.10.0 - 2026-11-23
 
 - `n` writes a new prompt from a rough idea with Claude, from the session list or the `c` picker

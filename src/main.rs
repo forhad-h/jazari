@@ -11,6 +11,7 @@ mod hook;
 mod install;
 mod jsonl;
 mod live;
+mod migrate;
 mod model;
 mod portable;
 mod prompt_gen;
@@ -98,12 +99,27 @@ enum Cmd {
     Update(update::UpdateArgs),
 }
 
-/// Where marsad keeps its event log. Override with MARSAD_HOME.
+/// The folder `MARSAD_HOME` names, which replaces both `data_dir` and `legacy_dir`.
+pub fn home_override() -> Option<PathBuf> {
+    std::env::var_os("MARSAD_HOME").filter(|d| !d.is_empty()).map(PathBuf::from)
+}
+
+/// Where marsad keeps its data: `~/.marsad`, or `MARSAD_HOME`. What every coding tool shares (the
+/// settings, usage history, prompts and launch files) is at the top; each tool's own files are in
+/// a subfolder named after it.
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("MARSAD_HOME") {
-        return PathBuf::from(dir);
-    }
-    claude_dir().join("marsad")
+    home_override().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".marsad"))
+}
+
+/// Claude Code's own files: the hook event log, status line reports and context-warning markers.
+pub fn claude_data_dir() -> PathBuf {
+    data_dir().join("claude")
+}
+
+/// Where versions before 0.11 kept the data (`~/.claude/marsad`, or `MARSAD_HOME`). It still holds
+/// the files at the paths they printed, which are kept current.
+pub fn legacy_dir() -> PathBuf {
+    home_override().unwrap_or_else(|| claude_dir().join("marsad"))
 }
 
 pub fn claude_dir() -> PathBuf {
@@ -118,7 +134,22 @@ pub fn now() -> f64 {
 }
 
 fn main() -> anyhow::Result<()> {
-    match Cli::parse().cmd {
+    let cmd = Cli::parse().cmd;
+    // Before anything reads or writes data. The hooks and the status line must stay quiet.
+    let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_)));
+    match migrate::from_legacy(if quiet { migrate::HOOK_WAIT } else { migrate::WAIT }, !quiet) {
+        migrate::Outcome::Busy if !quiet => {
+            anyhow::bail!("marsad's data is being copied to {} by another marsad; try again in a moment", data_dir().display())
+        }
+        _ => {}
+    }
+    // The dashboard shows it in its footer.
+    if !quiet && cmd.is_some()
+        && let Some(note) = migrate::take_notice()
+    {
+        eprintln!("{note}");
+    }
+    match cmd {
         Some(Cmd::Hook) => {
             // Never fail or print: a hook must not disturb the session.
             let _ = hook::run();

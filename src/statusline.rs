@@ -10,12 +10,12 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub fn status_dir() -> PathBuf {
-    crate::data_dir().join("status")
+    crate::claude_data_dir().join("status")
 }
 
 /// Where `marsad install` keeps a pre-existing statusLine setting it replaced.
 pub fn original_path() -> PathBuf {
-    crate::data_dir().join("statusline-original.json")
+    crate::claude_data_dir().join("statusline-original.json")
 }
 
 pub fn run() -> anyhow::Result<()> {

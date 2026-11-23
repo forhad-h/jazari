@@ -52,6 +52,12 @@ The highest value a rank or achievement ever reached, stored and never lowered. 
 
 ## Coordination
 
+### Data folder
+Where marsad keeps its data: `~/.marsad`, or the folder `MARSAD_HOME` names. What every coding tool shares (settings, usage history, prompts, launch files, share cards) is at the top; each tool's own files are in a subfolder named after it, such as `claude/` for Claude Code's event log and status line reports. Only Claude Code's integration (hooks, the usage skill, the status line) stays in `~/.claude`. The legacy folder, `~/.claude/marsad`, is where versions before 0.11 kept the data: it is copied once and left in place.
+
+### Launch file
+The one file a session's command loads, merged from the chosen rules files, in `<data dir>/launch/` and named `<role>-<keys>-<hash>.md` (role `session`, `lead` or `teammate`). The name follows the text, so one set reuses its file and an edited rules file gets a new one.
+
 ### Coordination protocol
 The rules marsad ships for Claude Code sessions that work in the same repo at once: register on the agent board, claim files before editing them, and record decisions, messages, conflicts and handoff notes there. A session follows them only when it was started with them in its system prompt.
 
