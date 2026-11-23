@@ -166,6 +166,9 @@ pub struct App {
     sys: System,
     last_slow_refresh: Instant,
     pub counter: Counter,
+    /// Disk, memory and CPU for the header meters, sampled once a second.
+    pub system: Option<crate::system::Snapshot>,
+    sampler: crate::system::Sampler,
 }
 
 /// Shown above the footer when `c` couldn't put the launch command on a clipboard it can confirm.
@@ -488,6 +491,8 @@ impl App {
             sys: System::new(),
             last_slow_refresh: Instant::now() - Duration::from_secs(60),
             counter: Counter::default(),
+            system: None,
+            sampler: crate::system::Sampler::default(),
         }
     }
 
@@ -886,6 +891,7 @@ impl App {
             self.refresh_transcripts();
             self.refresh_snapshots();
             self.counter.reload_if_due();
+            self.sample_system();
             if self.view == View::Board {
                 self.refresh_board();
             }
@@ -902,6 +908,14 @@ impl App {
     }
 
     /// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.
+    /// Statfs, memory counters and CPU ticks: a fraction of a millisecond, so it stays on this thread.
+    fn sample_system(&mut self) {
+        let cwds = self.sessions.values().filter(|s| s.status != Status::Ended).map(|s| s.cwd.clone());
+        let paths = crate::system::watched_paths(cwds);
+        let t = crate::disk::Config::load().thresholds;
+        self.system = Some(self.sampler.sample(paths.iter().map(PathBuf::as_path), &t));
+    }
+
     fn check_processes(&mut self) {
         mark_exited(&mut self.sessions, &mut self.sys);
     }

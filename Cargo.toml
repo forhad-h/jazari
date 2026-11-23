@@ -22,6 +22,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sysinfo = "0.39.6"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

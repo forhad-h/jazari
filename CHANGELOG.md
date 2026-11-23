@@ -3,6 +3,16 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- Sessions stop before their next tool call when the disk is nearly full (95% or 8 GB free), so it can't hang the machine
+- At 90% or 15 GB free, sessions are told once to finish the step and write a handoff
+- `marsad disk` shows free space and the levels; `--guard off` only warns
+- `marsad system` shows disk, memory, swap and CPU, and what to be careful about before heavy work
+- The dashboard has disk, memory and CPU meters under the header
+- All-time tokens read in B once past a billion
+- A session stopped for disk space shows why, with its resume command
+
 ## 0.12.0 - 2026-11-23
 
 - Every edit, rename and delete of your prompts keeps a version; `v` in the `c` picker lists and restores them

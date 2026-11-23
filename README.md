@@ -114,6 +114,41 @@ marsad context --warn off
 Inside Claude Code (a Bash tool call or a hook), `marsad context` finds its own session; elsewhere
 pass `--session`.
 
+### Disk guard and system meters
+
+A full disk can hang the machine: swap can't grow and Claude Code can't write its transcript.
+`install` registers `marsad guard --hook` as a synchronous `PreToolUse` and `UserPromptSubmit` hook
+(about 7 ms), so every tool call of every running session checks free space first, whether or not
+the dashboard is open. It measures the volume that holds your home folder and the session's folder,
+and counts only space a process can write (not APFS purgeable space).
+
+| Level | Default | What happens |
+|---|---|---|
+| notice | 80% full or under 30 GB free | shown in the meters |
+| warning | 90% or 15 GB | Claude is told once to finish the step, start no large builds, pulls or installs, and write a handoff |
+| critical | 95% or 8 GB | the next tool call is refused and the session stops, with its state saved; `claude --resume <id>` continues it once space is freed |
+| emergency | 98% or 3 GB | shown in the meters |
+
+Each level fires at the percent or the free space, whichever comes first, so large disks aren't
+left with 100 GB "full". A warning comes back only after usage drops 2 points below the level. A
+stopped session shows `halted: disk almost full` in the dashboard, with its resume command. Change
+a level in `~/.marsad/settings.json`, field by field:
+
+```json
+{ "disk": { "critical": { "pct": 93, "free_gb": 12 }, "guard": true } }
+```
+
+```sh
+marsad disk                  # free space on each volume in use, the levels and the guard
+marsad disk --format json
+marsad disk --guard off      # only warn, never stop a session (--guard on to restore)
+marsad system                # disk, memory, swap, CPU and load, with what to be careful about
+marsad system --format json  # `ok` and `concerns` for a session deciding whether to start heavy work
+```
+
+The dashboard's second header row shows the same disk, memory (with swap) and CPU meters, colored
+by how close each is to trouble.
+
 ### Session history
 
 `enter` on a session opens a scrollable timeline of what happened in it, oldest first:
@@ -335,12 +370,14 @@ marsad sql "SELECT skill, SUM(total) FROM skill_runs GROUP BY skill" --format js
 marsad schema
 marsad status                              # live: status, activity, context left, usage limits
 marsad status --format json --all          # include ended sessions
+marsad system --format json                # disk, memory, CPU: room for heavy work?
 ```
 
 **For Claude:** `marsad install` adds a personal `marsad-usage` skill
 (`~/.claude/skills/marsad-usage/SKILL.md`). Ask any Claude Code session things like "which
 skills used the most tokens this week?" or "how much context is left in my other sessions?" and
-it will use `marsad report` / `marsad sql` / `marsad status`. `marsad sql` accepts only read-only
+it will use `marsad report` / `marsad sql` / `marsad status`. Before a large build, image pull or
+install, it checks `marsad system`. `marsad sql` accepts only read-only
 statements.
 
 ### Known limitations

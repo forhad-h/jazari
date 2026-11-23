@@ -6,6 +6,7 @@ mod board;
 mod card;
 mod clipboard;
 mod context;
+mod disk;
 mod events;
 mod hook;
 mod install;
@@ -24,6 +25,7 @@ mod share_view;
 mod shot;
 mod statusline;
 mod store;
+mod system;
 mod term;
 mod transcript;
 mod ui;
@@ -95,6 +97,17 @@ enum Cmd {
     Prompt(prompt_gen::PromptCmd),
     /// Print the `claude` command that starts a session with the coordination rules (`marsad rules coordination`).
     Coordination(rules::CoordinationArgs),
+    /// Free disk space and the levels at which sessions are warned and stopped (--guard on/off).
+    Disk(disk::DiskArgs),
+    /// Disk, memory, swap and CPU in one reading, with what to be careful about before heavy work.
+    System(system::SystemArgs),
+    /// Synchronous hook that checks the disk before each tool call and prompt.
+    #[command(hide = true)]
+    Guard {
+        /// Hook entrypoint called by Claude Code on PreToolUse and UserPromptSubmit.
+        #[arg(long)]
+        hook: bool,
+    },
     /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
     Update(update::UpdateArgs),
 }
@@ -136,7 +149,7 @@ pub fn now() -> f64 {
 fn main() -> anyhow::Result<()> {
     let cmd = Cli::parse().cmd;
     // Before anything reads or writes data. The hooks and the status line must stay quiet.
-    let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_)));
+    let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_) | Cmd::Guard { .. }));
     match migrate::from_legacy(if quiet { migrate::HOOK_WAIT } else { migrate::WAIT }, !quiet) {
         migrate::Outcome::Busy if !quiet => {
             anyhow::bail!("marsad's data is being copied to {} by another marsad; try again in a moment", data_dir().display())
@@ -179,6 +192,15 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Coordination(args)) => rules::run_coordination(args),
         Some(Cmd::Export { file }) => portable::export(file),
         Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
+        Some(Cmd::Disk(args)) => disk::run(args),
+        Some(Cmd::System(args)) => system::run(args),
+        Some(Cmd::Guard { hook }) => {
+            // Never fail or print anything but the verdict: a hook must not disturb the session.
+            if hook && let Some(out) = disk::hook() {
+                println!("{out}");
+            }
+            Ok(())
+        }
         Some(Cmd::Update(args)) => update::run(args),
         None => app::run(),
     }

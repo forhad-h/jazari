@@ -166,7 +166,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let visible = app.visible();
     let note_height = if app.copy_note.is_some() { 4 } else { 0 };
     let [header, body, copy_note, footer] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(2),
         Constraint::Min(4),
         Constraint::Length(note_height),
         Constraint::Length(1),
@@ -308,6 +308,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
+    let [area, meters] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    if let Some(snap) = &app.system {
+        f.render_widget(Paragraph::new(Line::from(system_spans(snap, meters.width))), meters);
+    }
     let waiting = visible.iter().filter(|s| s.status.needs_user()).count();
     let active = visible.iter().filter(|s| s.status == Status::Active).count();
     let mut left = vec![
@@ -336,10 +340,65 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
         tokens(today),
         Span::styled(" · ", Style::new().dark_gray()),
         Span::raw("all-time "),
-        tokens(all_time),
+        Span::styled(crate::model::fmt_count(all_time.max(0) as u64), Style::new().bold()),
         Span::raw(" "),
     ]);
     f.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), area);
+}
+
+/// Disk, memory and CPU meters, each colored by how close it is to trouble. Narrow terminals
+/// drop the bars and the details first.
+fn system_spans(s: &crate::system::Snapshot, width: u16) -> Vec<Span<'static>> {
+    use crate::disk::Level as Disk;
+    let wide = width >= 140;
+    let bar_w = if wide { 8 } else { 4 };
+    let dim = |t: String| Span::styled(t, Style::new().dark_gray());
+    let gap = || dim(if wide { "   " } else { "  " }.into());
+    let meter = |label: &str, ratio: f64, color: Color| {
+        let style = Style::new().fg(color);
+        vec![
+            Span::raw(format!(" {label} ")),
+            Span::styled(bar(ratio, bar_w), style),
+            Span::styled(format!(" {:.0}%", ratio * 100.0), style.bold()),
+        ]
+    };
+    let gib = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
+    let mut spans = Vec::new();
+    if let Some((level, r)) = &s.disk {
+        let color = match level {
+            Disk::Ok => Color::Green,
+            Disk::Notice | Disk::Warning => Color::Yellow,
+            Disk::Critical | Disk::Emergency => Color::Red,
+        };
+        spans.extend(meter("disk", r.used_pct() / 100.0, color));
+        spans.push(Span::raw(format!(" {:.1} GB free", r.free_gb())));
+        if *level >= Disk::Warning {
+            spans.push(Span::styled(format!(" · {}", level.key()), Style::new().fg(color).bold()));
+        }
+        spans.push(gap());
+    }
+    let mem = s.mem_used_ratio();
+    spans.extend(meter("mem", mem, ratio_color(mem)));
+    spans.push(Span::raw(format!(" {:.1} GiB free", gib(s.mem_available))));
+    if wide || s.swap_used > s.mem_total / 4 {
+        let heavy = s.swap_used as f64 > s.mem_total as f64 * 0.5;
+        let style = if heavy { Style::new().fg(Color::Red) } else { Style::new().dark_gray() };
+        spans.push(Span::styled(format!(" · swap {:.1} GiB", gib(s.swap_used)), style));
+    }
+    spans.push(gap());
+    match s.cpu_pct {
+        Some(cpu) => {
+            let r = cpu as f64 / 100.0;
+            spans.extend(meter("cpu", r, ratio_color(r)));
+        }
+        None => spans.push(Span::raw(" cpu …")),
+    }
+    if s.load[0] > 0.0 {
+        let busy = s.cores > 0 && s.load[0] > s.cores as f64 * 2.0;
+        let style = if busy { Style::new().fg(Color::Red) } else { Style::new().dark_gray() };
+        spans.push(Span::styled(format!(" · load {:.1}", s.load[0]), style));
+    }
+    spans
 }
 
 fn draw_list(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
@@ -1716,7 +1775,7 @@ fn draw_summary(f: &mut Frame, area: Rect, u: &Usage) {
         Some(since) => block.title(
             Line::from(vec![
                 dim(" all time "),
-                Span::styled(fmt_tokens(u.lifetime.total as u64), Style::new().bold()),
+                Span::styled(crate::model::fmt_count(u.lifetime.total as u64), Style::new().bold()),
                 dim(format!(" since {} ", fmt_since(since))),
             ])
             .alignment(Alignment::Right),
@@ -1921,3 +1980,4 @@ mod tests {
         assert!(rows.iter().all(|r| r.width() <= 8));
     }
 }
+
