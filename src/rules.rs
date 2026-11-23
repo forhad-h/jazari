@@ -3,8 +3,10 @@
 //!
 //! `claude` reads only the last `--append-system-prompt-file` it is given, so a chosen set is merged
 //! into one file, written when its command is copied. The file is named after a hash of its text,
-//! so one set always maps to one file however many prompts there are. A file whose command hasn't
-//! been copied for `KEEP_FOR` is pruned; a running session keeps the prompt it started with.
+//! so one set always maps to one file however many prompts there are. A session's or lead's file
+//! whose command hasn't been copied for `KEEP_FOR` is pruned: a conversation keeps the system
+//! prompt it started with, even on resume. A teammates' file is never pruned, since a lead reads
+//! its path from that kept prompt each time it spawns a teammate, however long after.
 //!
 //! A set can start a plain session or the lead of an agent team. A teammate starts with the
 //! project's CLAUDE.md, skills and MCP servers and the lead's spawn prompt, never the lead's
@@ -55,11 +57,20 @@ const BUILTIN: &[Builtin] = &[
 /// The coordination prompt's key, the default choice before the user picks one.
 pub const COORDINATION: &str = "coordination";
 
-/// How long a generated file stays after its command was last copied.
+/// How long a session's or lead's file stays after its command was last copied.
 const KEEP_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Files earlier versions kept in the data dir, one per built-in set; pruned on sight.
-const LEGACY_FILES: &[&str] = &["coordination.md", "output-hygiene.md", "coordination+output-hygiene.md"];
+/// The name prefix of teammates' files, which are never pruned.
+const TEAMMATE_PREFIX: &str = "teammate-";
+
+/// Files in the data dir at paths earlier versions printed, with the built-in keys each holds.
+/// Kept current while they exist, so saved commands and aliases keep working; `marsad
+/// coordination` still prints the first.
+const LEGACY_FILES: &[(&str, &[&str])] = &[
+    ("coordination.md", &[COORDINATION]),
+    ("output-hygiene.md", &["output-hygiene"]),
+    ("coordination+output-hygiene.md", &[COORDINATION, "output-hygiene"]),
+];
 
 /// Whether the command starts a plain session or the lead of an agent team.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,11 +121,15 @@ pub fn library() -> Vec<Rule> {
     library_in(&prompts_dir())
 }
 
-fn library_in(dir: &Path) -> Vec<Rule> {
-    let mut rules: Vec<Rule> = BUILTIN
+fn builtin_library() -> Vec<Rule> {
+    BUILTIN
         .iter()
         .map(|b| Rule { key: b.key.into(), title: b.title.into(), summary: b.summary.into(), body: b.body.into(), own: false })
-        .collect();
+        .collect()
+}
+
+fn library_in(dir: &Path) -> Vec<Rule> {
+    let mut rules = builtin_library();
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md")).collect())
         .unwrap_or_default();
@@ -123,7 +138,8 @@ fn library_in(dir: &Path) -> Vec<Rule> {
         let Some(key) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
             continue;
         };
-        if key == "all" || rules.iter().any(|r| r.key == key) {
+        // `-x` would read as a flag in `marsad rules -x`.
+        if key == "all" || key.starts_with('-') || rules.iter().any(|r| r.key == key) {
             continue;
         }
         if let Some(rule) = std::fs::read_to_string(&path).ok().and_then(|text| own_rule(key, text)) {
@@ -197,7 +213,8 @@ fn ensure_in(data: &Path, chosen: &[&Rule], mode: Mode) -> anyhow::Result<PathBu
 /// teammates' file when any prompt reaches them.
 fn files_for(data: &Path, chosen: &[&Rule], mode: Mode) -> Vec<(PathBuf, String)> {
     let named = |role: &str, text: &str| {
-        let path = launch_dir(data).join(format!("{:016x}.md", fnv1a(format!("{role}\n{text}").as_bytes())));
+        let prefix = if role == "teammate" { TEAMMATE_PREFIX } else { "" };
+        let path = launch_dir(data).join(format!("{prefix}{:016x}.md", fnv1a(format!("{role}\n{text}").as_bytes())));
         std::path::absolute(&path).unwrap_or(path)
     };
     let merged = merge(chosen);
@@ -270,29 +287,48 @@ fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Removes generated files unused for `KEEP_FOR`, and the files earlier versions kept. Returns how many.
+/// Removes session and lead files unused for `KEEP_FOR`, and rewrites the files at paths earlier
+/// versions printed with this build's text. Returns how many files were removed. One file that
+/// can't be removed doesn't stop the rest.
 pub fn prune() -> anyhow::Result<usize> {
     prune_in(&crate::data_dir(), SystemTime::now())
 }
 
 fn prune_in(data: &Path, now: SystemTime) -> anyhow::Result<usize> {
-    let mut removed = remove_legacy(data)?;
-    let Ok(entries) = std::fs::read_dir(launch_dir(data)) else {
-        return Ok(removed);
-    };
-    for path in entries.filter_map(Result::ok).map(|e| e.path()) {
-        let modified = std::fs::metadata(&path).and_then(|m| m.modified());
-        if modified.is_ok_and(|t| now.duration_since(t).unwrap_or_default() > KEEP_FOR) {
-            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-            removed += 1;
+    let refreshed = refresh_legacy(data);
+    let mut removed = 0;
+    if let Ok(entries) = std::fs::read_dir(launch_dir(data)) {
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() || !name.ends_with(".md") || name.starts_with(TEAMMATE_PREFIX) {
+                continue;
+            }
+            if meta.modified().is_ok_and(|t| now.duration_since(t).unwrap_or_default() > KEEP_FOR)
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
         }
     }
-    Ok(removed)
+    refreshed.map(|()| removed)
+}
+
+/// Rewrites each legacy file that exists with this build's text.
+fn refresh_legacy(data: &Path) -> anyhow::Result<()> {
+    let lib = builtin_library();
+    for (name, keys) in LEGACY_FILES {
+        let path = data.join(name);
+        if path.exists() {
+            write_if_changed(&path, &merge(&known(&lib, keys)))?;
+        }
+    }
+    Ok(())
 }
 
 fn remove_legacy(data: &Path) -> anyhow::Result<usize> {
     let mut removed = 0;
-    for name in LEGACY_FILES {
+    for (name, _) in LEGACY_FILES {
         let path = data.join(name);
         match std::fs::remove_file(&path) {
             Ok(()) => removed += 1,
@@ -341,6 +377,7 @@ pub fn launch_command(path: &Path) -> String {
 
 /// The `marsad rules …` command that prints the same launch command.
 pub fn cli_command(chosen: &[&Rule], mode: Mode) -> String {
+    // Keys never start with `-` (see `library_in`), so they can't read as flags.
     let mut parts = vec!["marsad rules".to_string()];
     parts.extend(chosen.iter().map(|r| quote_arg(&r.key)));
     if mode == Mode::Team {
@@ -378,11 +415,18 @@ pub fn run(args: RulesArgs) -> anyhow::Result<()> {
     print_command(&parse(&lib, &args.keys)?, mode, args.format)
 }
 
-/// `marsad coordination`: the same as `marsad rules coordination`.
+/// `marsad coordination`: the command for the coordination rules alone, at the stable path
+/// earlier versions printed, so a saved command or alias keeps working across upgrades.
 pub fn run_coordination(args: CoordinationArgs) -> anyhow::Result<()> {
     let _ = prune();
-    let lib = library();
-    print_command(&known(&lib, &[COORDINATION]), Mode::Session, args.format)
+    let data = crate::data_dir();
+    let path = data.join(LEGACY_FILES[0].0);
+    let path = std::path::absolute(&path).unwrap_or(path);
+    let lib = builtin_library();
+    let chosen = known(&lib, &[COORDINATION]);
+    write_if_changed(&path, &merge(&chosen))?;
+    println!("{}", render(args.format, &chosen, Mode::Session, &launch_command(&path), &path));
+    Ok(())
 }
 
 fn print_command(chosen: &[&Rule], mode: Mode, format: crate::report::Format) -> anyhow::Result<()> {
@@ -465,7 +509,7 @@ mod tests {
     }
 
     fn builtins() -> Vec<Rule> {
-        library_in(Path::new("/nonexistent/marsad-prompts"))
+        builtin_library()
     }
 
     #[test]
@@ -583,23 +627,47 @@ mod tests {
     }
 
     #[test]
-    fn pruning_keeps_recently_copied_files_and_the_users_prompts() {
+    fn pruning_drops_unused_session_and_lead_files_only() {
         let data = temp_dir("prune");
         let lib = builtins();
-        let path = ensure_in(&data, &known(&lib, &["output-hygiene"]), Mode::Session).unwrap();
-        std::fs::write(data.join("coordination.md"), "old").unwrap();
+        let session = ensure_in(&data, &known(&lib, &["output-hygiene"]), Mode::Session).unwrap();
+        let lead = ensure_in(&data, &known(&lib, &["output-hygiene"]), Mode::Team).unwrap();
         std::fs::create_dir_all(data.join("prompts")).unwrap();
         std::fs::write(data.join("prompts").join("mine.md"), "# Mine\n").unwrap();
         std::fs::write(data.join("events.jsonl"), "{}").unwrap();
+        std::fs::create_dir_all(launch_dir(&data).join("stray.md")).unwrap();
 
         let soon = SystemTime::now() + Duration::from_secs(60);
-        assert_eq!(prune_in(&data, soon).unwrap(), 1, "only the legacy file goes");
-        assert!(path.exists());
-        assert_eq!(prune_in(&data, soon + KEEP_FOR).unwrap(), 1, "a week unused, it goes");
-        assert!(!path.exists());
+        assert_eq!(prune_in(&data, soon).unwrap(), 0, "all recently copied");
+        assert_eq!(prune_in(&data, soon + KEEP_FOR).unwrap(), 2, "a week unused, the session's and lead's go");
+        assert!(!session.exists() && !lead.exists());
+        let left = names(&launch_dir(&data));
+        assert_eq!(left.len(), 2, "{left:?}");
+        assert!(left.iter().any(|n| n.starts_with(TEAMMATE_PREFIX)), "a resumed lead still points at the teammates' file");
+        assert!(left.contains(&"stray.md".to_string()), "a directory is skipped, not fatal");
         assert_eq!(names(&data), ["events.jsonl", "launch", "prompts"]);
         assert_eq!(names(&data.join("prompts")), ["mine.md"]);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn legacy_paths_are_kept_current_not_deleted() {
+        let data = temp_dir("legacy");
+        std::fs::write(data.join("coordination+output-hygiene.md"), "old").unwrap();
+        prune_in(&data, SystemTime::now()).unwrap();
+        let lib = builtins();
+        assert_eq!(std::fs::read_to_string(data.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["all"])));
+        assert!(!data.join("coordination.md").exists(), "only files that exist are rewritten");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn prompt_names_that_read_as_flags_are_skipped() {
+        let dir = temp_dir("flags");
+        std::fs::write(dir.join("-wip.md"), "# Wip\n").unwrap();
+        std::fs::write(dir.join("--team.md"), "# Team\n").unwrap();
+        assert_eq!(library_in(&dir).len(), BUILTIN.len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

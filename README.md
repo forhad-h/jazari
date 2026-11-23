@@ -148,7 +148,7 @@ When several Claude Code sessions work in one repo, marsad's coordination rules 
 
 Press `enter` to copy the command. Your choice is remembered, so next time `c`, `enter`, `enter` is enough.
 
-Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.claude/marsad/launch/`, written when the command is copied and named after a hash of its text. A file whose command hasn't been copied for a week is removed.
+Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.claude/marsad/launch/`, written when the command is copied and named after a hash of its text. A session's or lead's file whose command hasn't been copied for a week is removed (a conversation keeps the prompt it started with); a teammates' file is kept, since a resumed lead still points at it. `marsad coordination` keeps printing the stable `~/.claude/marsad/coordination.md`.
 
 The prompts are added to the session's system prompt, so they survive `/clear` and compaction. They apply to new conversations only: a resumed conversation keeps the system prompt it started with. The coordination rules add about 2k tokens to each request of those sessions.
 
