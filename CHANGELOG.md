@@ -38,6 +38,14 @@ GitHub release. Keep each bullet to one short line.
 - Usage limit reset times use a 12-hour clock (`7:20pm`, `Fri 10:00am`)
 - `P` opens a small window that stays on top of other apps with every session's status (macOS)
 - The `c` picker's last step can copy only the prompts' file path, to paste into a running session (`marsad rules --path`)
+- Heavy commands wait while memory or CPU is under pressure; `marsad system --wait` returns once there is room
+- `t` sends a session a message it reads at its next step; `x` stops it before its next tool call; `X` interrupts it now
+- `marsad say` lets a session post what it is doing to the dashboard (`--attention` when it needs you)
+- New built-in prompt, Working with marsad, for sessions that report to and take direction from marsad
+- Disk warnings name the largest things to free; the dashboard says once a day what can be cleaned
+- The cleanup also finds old Claude Code versions, stale session scratch folders and idle virtualenvs
+- A report-only group lists space owned by apps and tools, with the command that frees it
+- The details pane shows the command check's latest finding for the session
 
 ## 0.12.0 - 2026-11-23
 

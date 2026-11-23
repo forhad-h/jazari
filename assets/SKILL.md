@@ -25,10 +25,24 @@ auto-compact; `context_estimated: true` means the window size was inferred from 
 (Unix seconds), from the most recent status line report (claude.ai Pro/Max only; null otherwise).
 Live data is not in the usage database; use `marsad status` for it.
 
+## Talking to marsad and to other sessions
+
+```sh
+marsad say "what this session is doing"            # shown on this session in marsad's dashboard
+marsad say --attention "what you need from the user" # also notifies the user
+marsad tell <session-id> "message"                  # queue a message another session reads at its next step
+marsad tell <session-id> --stop                     # stop that session before its next tool call
+```
+
+Notes from marsad reach a session as context starting with `[marsad]`: a message from the user,
+a disk or memory warning, a refused command, or a stop. Act on them before going on. Only stop or
+interrupt another session when the user asks.
+
 ## The machine: disk, memory, CPU
 
 ```sh
 marsad system --format json        # ok, concerns, disk (used_pct, free_gb, level), memory (used_pct, available_gib, swap_used_gib), cpu (used_pct, load, cores)
+marsad system --wait               # returns once memory and CPU have room (or fails after 110 s; run it again)
 marsad disk --format json          # every volume in use, the levels, the guard, the watcher, ballast and phone notifications
 ```
 

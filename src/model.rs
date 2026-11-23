@@ -405,6 +405,12 @@ pub struct Session {
     pub halted: Option<String>,
     /// The command check's latest finding in this turn, e.g. "asked (download-exec): …".
     pub flag: Option<String>,
+    /// The latest status line the session posted with `marsad say`.
+    pub said: Option<String>,
+    /// Messages queued with `marsad tell` that the session hasn't picked up yet.
+    pub waiting: usize,
+    /// A stop request from marsad waits for the session's next tool call.
+    pub stop_requested: bool,
     pub subagents: BTreeMap<String, Subagent>,
     pub stats: TranscriptStats,
     pub snapshot: Option<StatusSnapshot>,
@@ -431,6 +437,9 @@ impl Session {
             pid: None,
             halted: None,
             flag: None,
+            said: None,
+            waiting: 0,
+            stop_requested: false,
             subagents: BTreeMap::new(),
             stats: TranscriptStats::default(),
             snapshot: None,

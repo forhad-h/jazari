@@ -321,6 +321,14 @@ pub fn hook() -> Option<String> {
     let mut verdict = disk_verdict(&raw, event, id);
     let mut refuse = None;
     if !matches!(verdict, Some(Verdict::Halt { .. })) {
+        // Messages and stop requests sent from marsad; a subagent's call leaves them for the main agent.
+        let mail = if raw.get("agent_id").is_some_and(|a| !a.is_null()) { Default::default() } else { crate::channel::take(id, event) };
+        if mail.stop {
+            let (user, claude) = crate::channel::stop_texts(id);
+            crate::channel::log_stopped(id);
+            return Some(Verdict::Halt { user, claude }.to_json(event).to_string());
+        }
+        verdict = with_note(verdict, crate::channel::note(&mail.notes));
         let (note, no) = crate::pressure::hook(&raw, event, id);
         verdict = with_note(verdict, note);
         refuse = no;
@@ -405,7 +413,8 @@ pub(crate) fn log_halt(session: &str, reading: &Reading) {
     }
 }
 
-/// A Bash call that runs only marsad's disk, system or clean command, with nothing chained to it.
+/// A Bash call that runs only one of marsad's own status, cleanup or reporting commands, with
+/// nothing chained to it.
 fn is_marsad_command(raw: &Value) -> bool {
     if raw["tool_name"] != "Bash" {
         return false;
@@ -417,7 +426,7 @@ fn is_marsad_command(raw: &Value) -> bool {
     let mut words = cmd.split_whitespace();
     let exe = words.next().unwrap_or("").trim_matches(['"', '\'']);
     let is_marsad = Path::new(exe).file_stem().is_some_and(|n| n == "marsad");
-    is_marsad && matches!(words.next(), Some("disk" | "system" | "clean"))
+    is_marsad && matches!(words.next(), Some("disk" | "system" | "clean" | "say" | "status" | "context"))
 }
 
 /// The event marsad logs when its guard stops a session.

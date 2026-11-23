@@ -373,6 +373,11 @@ fn looks_like_claude(name: &str, exe: Option<&Path>) -> bool {
     name.contains("claude") || name == "node" || exe.is_some_and(|e| e.to_string_lossy().to_lowercase().contains("claude"))
 }
 
+/// Sends SIGINT to the session's Claude Code process if it is still that process; true when sent.
+pub(crate) fn interrupt_session(pid: u32, since: f64) -> bool {
+    pid > 1 && pid != std::process::id() && process(pid).is_some_and(|(name, exe, started)| still_the_session(&name, exe.as_deref(), started, since)) && sigint(pid)
+}
+
 /// The process is Claude Code and was already running when the session's run started; a pid
 /// reused by a newer process fails this.
 fn still_the_session(name: &str, exe: Option<&Path>, started: u64, since: f64) -> bool {

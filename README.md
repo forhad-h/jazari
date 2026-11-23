@@ -48,7 +48,7 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `y` copy the session id · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `y` copy the session id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 History lists the newest events first. By default sessions that are working or waiting on you sit on top and the rest keep their place, so rows don't jump around as sessions run.
@@ -185,6 +185,45 @@ and it exits once no session has run for 10 minutes. It needs no launchd or syst
 ```
 
 `marsad disk` shows whether the watcher is running, the ballast and which phone notifications are set.
+
+### Memory and CPU guard
+
+The same hook reads memory, swap and the load average before each tool call and prompt, so a
+machine running out of memory or buried in work is caught before it stops responding.
+
+| Level | Default | What happens |
+|---|---|---|
+| strained | 90% of memory used, or a load over twice the cores | each session is told once to hold off builds, test runs, installs and containers |
+| critical | 95% of memory used while swapping, or a load over four times the cores | heavy commands (`cargo build`, `npm install`, `docker build`, `make`, `pytest` and the like) are refused with "run `marsad system --wait`, then try again"; light work and the session go on |
+
+`marsad system --wait` returns once memory and CPU have room again, or after 110 seconds (under the
+Bash tool's two-minute limit) so the session can wait again or carry on with light work. The
+background watcher notifies you once each time the level rises. Change the limits under
+`resources` in `~/.marsad/settings.json`, or set `"guard": false` there to only warn:
+
+```json
+{ "resources": { "memory_strained_pct": 85, "memory_critical_pct": 95, "load_strained_per_core": 2, "load_critical_per_core": 4 } }
+```
+
+### Talking to sessions
+
+marsad can reach a running session even when you aren't at its terminal, and a session can reach
+you through marsad.
+
+- **`t`** (or `marsad tell <id> "…"`) sends the selected session a message. The guard hook hands it
+  to Claude at the session's next tool call or prompt, as a note to act on before going on. The
+  details pane shows messages still waiting.
+- **`x`** (`marsad tell <id> --stop`) stops the session before its next tool call. The turn ends
+  cleanly and `claude --resume <id>` continues it.
+- **`X`** (`marsad tell <id> --interrupt`) interrupts it now, as Esc does, after checking the process is
+  still that session's Claude Code. Both ask for `y` first.
+- **`marsad say "…"`**, run by the session, shows what it is doing on its row in the dashboard;
+  `--attention` also marks it as needing you, with the question sound and a notification.
+
+An idle session picks its messages up with your next prompt to it: hooks run only while a session
+works. Start sessions with the **Working with marsad** prompt (`c`, or `marsad rules marsad`) so
+Claude knows to read marsad's notes, post its progress with `marsad say`, wait for resources with
+`marsad system --wait`, and stop when asked.
 
 ### Disk cleanup
 

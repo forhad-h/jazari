@@ -60,6 +60,12 @@ const BUILTIN: &[Builtin] = &[
         summary: "keeps the request, the requester and the process out of code, commits and docs",
         body: include_str!("../assets/OUTPUT-HYGIENE.md"),
     },
+    Builtin {
+        key: "marsad",
+        title: "Working with marsad",
+        summary: "the session reads marsad's messages, reports with `marsad say`, and checks the machine before heavy work",
+        body: include_str!("../assets/MARSAD.md"),
+    },
 ];
 
 /// The coordination prompt's key, the default choice before the user picks one.
@@ -905,11 +911,11 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "not a prompt").unwrap();
         let lib = library_in(&dir);
         let keys: Vec<_> = lib.iter().map(|r| r.key.as_str()).collect();
-        assert_eq!(keys, ["coordination", "output-hygiene", "a-plain", "review-style"]);
-        assert!(!lib[0].own && lib[2].own);
+        assert_eq!(keys, ["coordination", "output-hygiene", "marsad", "a-plain", "review-style"]);
+        assert!(!lib[0].own && !lib[2].own && lib[3].own);
         assert_eq!(lib[0].title, "Coordination", "the built-in wins a name clash");
-        assert_eq!((lib[3].title.as_str(), lib[3].summary.as_str()), ("Review style", "Keep reviews short and kind."));
-        assert_eq!((lib[2].title.as_str(), lib[2].summary.as_str()), ("a-plain", "No heading here, just rules."));
+        assert_eq!((lib[4].title.as_str(), lib[4].summary.as_str()), ("Review style", "Keep reviews short and kind."));
+        assert_eq!((lib[3].title.as_str(), lib[3].summary.as_str()), ("a-plain", "No heading here, just rules."));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -918,11 +924,11 @@ mod tests {
         let lib = builtins();
         let keys = |v: Vec<&Rule>| v.iter().map(|r| r.key.clone()).collect::<Vec<_>>();
         assert_eq!(keys(parse(&lib, &["output-hygiene", "coordination"]).unwrap()), ["coordination", "output-hygiene"]);
-        assert_eq!(keys(parse(&lib, &["all"]).unwrap()).len(), 2);
+        assert_eq!(keys(parse(&lib, &["all"]).unwrap()).len(), 3);
         let err = parse(&lib, &["nope"]).unwrap_err().to_string();
-        assert!(err.contains("coordination, output-hygiene"), "{err}");
+        assert!(err.contains("coordination, output-hygiene, marsad"), "{err}");
         assert_eq!(keys(known(&lib, &["retired", "output-hygiene"])), ["output-hygiene"]);
-        assert_eq!(titles(&known(&lib, &["all"])), "coordination + output hygiene");
+        assert_eq!(titles(&known(&lib, &["coordination", "output-hygiene"])), "coordination + output hygiene");
     }
 
     #[test]
@@ -937,7 +943,7 @@ mod tests {
     fn a_session_set_has_one_stable_file() {
         let data = temp_dir("session");
         let lib = builtins();
-        let both = known(&lib, &["all"]);
+        let both = known(&lib, &["coordination", "output-hygiene"]);
         let a = ensure_in(&data, &both, Mode::Session).unwrap();
         assert_eq!(ensure_in(&data, &both, Mode::Session).unwrap(), a, "the same set reuses its file");
         assert!(a.is_absolute() && a.starts_with(launch_dir(&data)));
@@ -968,7 +974,7 @@ mod tests {
     fn coordination_stays_with_the_lead() {
         let data = temp_dir("team-coord");
         let lib = builtins();
-        let lead = ensure_in(&data, &known(&lib, &["all"]), Mode::Team).unwrap();
+        let lead = ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Team).unwrap();
         let text = std::fs::read_to_string(&lead).unwrap();
         assert!(text.contains("# Multi-session coordination") && text.contains("You represent the whole team on the board"));
         let files = names(&launch_dir(&data));
@@ -1015,7 +1021,7 @@ mod tests {
         std::fs::write(data.join("coordination+output-hygiene.md"), "old").unwrap();
         prune_in(&data, &data, SystemTime::now()).unwrap();
         let lib = builtins();
-        assert_eq!(std::fs::read_to_string(data.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["all"])));
+        assert_eq!(std::fs::read_to_string(data.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["coordination", "output-hygiene"])));
         assert!(!data.join("coordination.md").exists(), "only files that exist are rewritten");
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -1037,7 +1043,7 @@ mod tests {
         std::fs::write(data.join("output-hygiene.md"), "old").unwrap();
         std::fs::create_dir_all(data.join("prompts")).unwrap();
         std::fs::write(data.join("prompts").join("mine.md"), "# Mine\n").unwrap();
-        ensure_in(&data, &known(&lib, &["all"]), Mode::Session).unwrap();
+        ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Session).unwrap();
         ensure_in(&data, &known(&lib, &["output-hygiene"]), Mode::Team).unwrap();
 
         assert_eq!(remove_all_in(&data).unwrap(), 4, "a legacy file, a session file, a lead's and a teammates' file");
@@ -1207,12 +1213,12 @@ mod tests {
     fn launch_files_are_named_role_keys_hash() {
         let data = temp_dir("names");
         let lib = builtins();
-        let session = ensure_in(&data, &known(&lib, &["all"]), Mode::Session).unwrap();
+        let session = ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Session).unwrap();
         let name = session.file_name().unwrap().to_string_lossy().into_owned();
         let hash = name.strip_prefix("session-coordination+output-hygiene-").and_then(|r| r.strip_suffix(".md")).unwrap();
         assert!(hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
 
-        let lead = ensure_in(&data, &known(&lib, &["all"]), Mode::Team).unwrap();
+        let lead = ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Team).unwrap();
         assert!(lead.file_name().unwrap().to_string_lossy().starts_with("lead-coordination+output-hygiene-"));
         let mut files = names(&launch_dir(&data));
         files.retain(|n| n.starts_with(TEAMMATE_PREFIX));
@@ -1256,7 +1262,7 @@ mod tests {
         let later = SystemTime::now() + KEEP_FOR + KEEP_FOR;
         prune_in(&data, &legacy, later).unwrap();
         let lib = builtins();
-        assert_eq!(std::fs::read_to_string(legacy.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["all"])));
+        assert_eq!(std::fs::read_to_string(legacy.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["coordination", "output-hygiene"])));
         assert!(stale.exists(), "nothing in the legacy dir is removed");
         let _ = std::fs::remove_dir_all(&data);
         let _ = std::fs::remove_dir_all(&legacy);

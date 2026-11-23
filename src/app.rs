@@ -172,11 +172,30 @@ pub struct App {
     pub counter: Counter,
     /// Disk, memory and CPU for the header meters, sampled once a second.
     pub system: Option<crate::system::Snapshot>,
+    /// A message being typed to a session (`t`), drawn over the list while open.
+    pub compose: Option<Compose>,
+    /// A stop (`x`) or interrupt (`X`) of a session waiting for `y`.
+    pub control: Option<Control>,
     /// The cleanup view's state while it is open.
     pub clean: Option<crate::clean_view::CleanView>,
     sampler: crate::system::Sampler,
     /// The always-on-top window while it is open (`P`).
     pub pin: Option<crate::pin::Pin>,
+}
+
+/// A message being typed to one session.
+pub struct Compose {
+    pub session: String,
+    pub name: String,
+    pub text: String,
+}
+
+/// Stopping or interrupting one session, once confirmed.
+pub struct Control {
+    pub session: String,
+    pub name: String,
+    /// SIGINT now, rather than a stop before the next tool call.
+    pub interrupt: bool,
 }
 
 /// Shown above the footer when `c` couldn't put the launch command on a clipboard it can confirm.
@@ -502,6 +521,8 @@ impl App {
             counter: Counter::default(),
             system: None,
             clean: None,
+            compose: None,
+            control: None,
             sampler: crate::system::Sampler::default(),
             pin: None,
         }
@@ -978,6 +999,49 @@ impl App {
     }
 
     /// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.
+    fn on_compose_key(&mut self, code: KeyCode) {
+        let Some(c) = self.compose.as_mut() else { return };
+        match code {
+            KeyCode::Esc => self.compose = None,
+            KeyCode::Backspace => {
+                c.text.pop();
+            }
+            KeyCode::Char(ch) => c.text.push(ch),
+            KeyCode::Enter if c.text.trim().is_empty() => {}
+            KeyCode::Enter => {
+                let c = self.compose.take().unwrap();
+                match crate::channel::tell(&c.session, &c.text) {
+                    Ok(()) => self.info = Some(format!("queued for {}: Claude reads it at the next tool call or prompt ", c.name)),
+                    Err(e) => self.error = Some(format!("couldn't queue the message: {e:#} ")),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Text pasted while composing goes into the message, on one line.
+    pub fn on_compose_paste(&mut self, text: &str) -> bool {
+        let Some(c) = self.compose.as_mut() else { return false };
+        c.text.push_str(&text.replace(['\r', '\n'], " "));
+        true
+    }
+
+    fn apply_control(&mut self, c: &Control) {
+        if c.interrupt {
+            let sent = self.sessions.get(&c.session).is_some_and(crate::channel::interrupt);
+            if sent {
+                self.info = Some(format!("interrupted {} ", c.name));
+            } else {
+                self.error = Some(format!("couldn't interrupt {}: its Claude Code process isn't known or has changed ", c.name));
+            }
+        } else {
+            match crate::channel::request_stop(&c.session) {
+                Ok(()) => self.info = Some(format!("{} stops before its next tool call ", c.name)),
+                Err(e) => self.error = Some(format!("couldn't request the stop: {e:#} ")),
+            }
+        }
+    }
+
     /// Statfs, memory counters and CPU ticks: a fraction of a millisecond, so it stays on this thread.
     fn sample_system(&mut self) {
         let cwds = self.sessions.values().filter(|s| s.status != Status::Ended).map(|s| s.cwd.clone());
@@ -1056,6 +1120,16 @@ impl App {
             self.on_picker_key(key.code);
             return Action::None;
         }
+        if self.compose.is_some() {
+            self.on_compose_key(key.code);
+            return Action::None;
+        }
+        if let Some(c) = self.control.take() {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                self.apply_control(&c);
+            }
+            return Action::None;
+        }
         // Esc dismisses a badge note before it does anything else.
         if key.code == KeyCode::Esc && self.announcing() {
             self.announcement = None;
@@ -1072,6 +1146,16 @@ impl App {
             (View::List, KeyCode::Char('u')) => {
                 self.view = View::Usage;
                 self.usage.reload();
+            }
+            (View::List, KeyCode::Char('t')) => {
+                if let Some(s) = self.selected_session().filter(|s| s.status != Status::Ended) {
+                    self.compose = Some(Compose { session: s.id.clone(), name: s.project(), text: String::new() });
+                }
+            }
+            (View::List, KeyCode::Char(k @ ('x' | 'X'))) => {
+                if let Some(s) = self.selected_session().filter(|s| s.status != Status::Ended) {
+                    self.control = Some(Control { session: s.id.clone(), name: s.project(), interrupt: k == 'X' });
+                }
             }
             (View::List, KeyCode::Char('D')) => {
                 self.clean = Some(crate::clean_view::CleanView::open());
@@ -1166,7 +1250,8 @@ pub fn run() -> anyhow::Result<()> {
             if event::poll(Duration::from_millis(250))? {
                 match event::read()? {
                     Event::Paste(text) => {
-                        if let Some(share) = app.share.as_mut() {
+                        if app.on_compose_paste(&text) {
+                        } else if let Some(share) = app.share.as_mut() {
                             share.on_paste(&text);
                         } else if let Some(view) = app.prompt_view.as_mut() {
                             view.on_paste(&text);
