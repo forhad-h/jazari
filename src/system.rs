@@ -128,9 +128,37 @@ pub fn watched_paths(cwds: impl IntoIterator<Item = String>) -> Vec<PathBuf> {
 pub struct SystemArgs {
     #[arg(long, value_enum, default_value = "table")]
     format: Format,
+    /// Wait until memory and CPU have room again (checks every 5 s), then report.
+    #[arg(long)]
+    wait: bool,
+    /// Give up waiting after this many seconds (default 110, under the Bash tool's 2-minute limit).
+    #[arg(long, default_value_t = 110, requires = "wait")]
+    timeout: u64,
+}
+
+/// `marsad system --wait`: returns once memory and CPU are back under strain, or fails after the
+/// timeout so the caller can decide (wait again, or go on with light work).
+fn wait(timeout: u64) -> anyhow::Result<()> {
+    let limits = crate::pressure::Limits::load();
+    let start = std::time::Instant::now();
+    loop {
+        let load = crate::pressure::Load::read().ok_or_else(|| anyhow::anyhow!("couldn't read memory and load"))?;
+        let level = limits.level(&load);
+        if level == crate::pressure::Level::Ok {
+            println!("Room again after {} s: {}.", start.elapsed().as_secs(), load.describe());
+            return Ok(());
+        }
+        if start.elapsed().as_secs() >= timeout {
+            anyhow::bail!("still {} after {} s: {}; wait again, or go on with light work only", level.key(), timeout, load.describe());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
 }
 
 pub fn run(a: SystemArgs) -> anyhow::Result<()> {
+    if a.wait {
+        return wait(a.timeout);
+    }
     let cfg = crate::disk::Config::load();
     let sessions = crate::live::load_sessions(false);
     let paths = watched_paths(sessions.into_values().map(|s| s.cwd));

@@ -25,10 +25,24 @@ auto-compact; `context_estimated: true` means the window size was inferred from 
 (Unix seconds), from the most recent status line report (claude.ai Pro/Max only; null otherwise).
 Live data is not in the usage database; use `marsad status` for it.
 
+## Talking to marsad and to other sessions
+
+```sh
+marsad say "what this session is doing"            # shown on this session in marsad's dashboard
+marsad say --attention "what you need from the user" # also notifies the user
+marsad tell <session-id> "message"                  # queue a message another session reads at its next step
+marsad tell <session-id> --stop                     # stop that session before its next tool call
+```
+
+Notes from marsad reach a session as context starting with `[marsad]`: a message from the user,
+a disk or memory warning, a refused command, or a stop. Act on them before going on. Only stop or
+interrupt another session when the user asks.
+
 ## The machine: disk, memory, CPU
 
 ```sh
 marsad system --format json        # ok, concerns, disk (used_pct, free_gb, level), memory (used_pct, available_gib, swap_used_gib), cpu (used_pct, load, cores)
+marsad system --wait               # returns once memory and CPU have room (or fails after 110 s; run it again)
 marsad disk --format json          # every volume in use, the levels, the guard, the watcher, ballast and phone notifications
 ```
 
@@ -74,6 +88,7 @@ marsad rules                                         # lists the prompts session
 marsad rules coordination --format json              # {command, protocol_path, rules, mode}: starts a session with the coordination rules
 marsad rules coordination output-hygiene             # both, merged into one file (claude reads only one prompt file)
 marsad rules output-hygiene --team                   # starts an agent team lead that passes the prompts on to its teammates
+marsad rules coordination output-hygiene --path      # only the file path, for a session that is already running to read
 marsad prompt new "<rough idea>" --yes --format json # Claude writes a prompt from the idea and saves it: {key, title, summary, body, assumptions, questions, saved}
 marsad prompt edit <name> --with "<feedback>" --yes  # revises one of the user's prompts with Claude
 marsad prompt copy <name> --as <new-name>            # copies a prompt (a built-in one, say) into the user's library

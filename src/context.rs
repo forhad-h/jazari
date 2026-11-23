@@ -94,7 +94,7 @@ fn warning_label(pct: Option<u32>) -> String {
 }
 
 /// This process and its ancestors, nearest first.
-fn ancestors() -> Vec<u32> {
+pub(crate) fn ancestors() -> Vec<u32> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let mut sys = System::new();
     let mut out = vec![std::process::id()];
@@ -113,7 +113,7 @@ fn ancestors() -> Vec<u32> {
 
 /// The session to report: an explicit id, then Claude Code's session id variable, then the
 /// session whose Claude Code process is an ancestor of this one.
-fn find_session<'a>(
+pub(crate) fn find_session<'a>(
     sessions: &'a HashMap<String, Session>,
     explicit: Option<&str>,
     env_id: Option<&str>,

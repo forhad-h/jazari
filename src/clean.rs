@@ -31,6 +31,9 @@ pub enum Tier {
     A,
     B,
     C,
+    /// Space marsad leaves to its owner (an app, the system, a version manager): reported with
+    /// the command that frees it.
+    Info,
 }
 
 impl Tier {
@@ -39,6 +42,7 @@ impl Tier {
             Tier::A => "A",
             Tier::B => "B",
             Tier::C => "C",
+            Tier::Info => "info",
         }
     }
 }
@@ -55,6 +59,8 @@ pub enum Action {
     DockerVolumeRm(String),
     /// `docker rm` of one stopped container, by id.
     DockerContainerRm(String),
+    /// Delete an old Claude Code CLI version file (never the current one or the newest other).
+    RemoveClaudeVersion(PathBuf),
     /// Report only.
     None,
 }
@@ -67,6 +73,8 @@ pub enum DirKind {
     Project { root: PathBuf },
     /// A backup copy that sits next to the folder it copies.
     Backup { original: PathBuf },
+    /// A Claude Code session's scratch folder under `/tmp/claude-<uid>/<project>/`.
+    Scratch,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,17 +104,20 @@ pub struct Env {
     pub running: HashSet<String>,
     /// Working folders of running processes, so a subagent busy in a worktree keeps it.
     pub cwds: Vec<PathBuf>,
+    /// Claude Code's scratch folder root (`/tmp/claude-<uid>`), when there is one.
+    pub scratch: Option<PathBuf>,
+    /// Ids of sessions that haven't ended; each one's scratch folder is named after it.
+    pub live_ids: HashSet<String>,
     pub run: Runner,
 }
 
 impl Env {
     pub fn real() -> Self {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-        let live: Vec<PathBuf> = crate::live::load_sessions(false)
-            .into_values()
-            .filter(|s| s.status != crate::model::Status::Ended && !s.cwd.is_empty())
-            .map(|s| PathBuf::from(s.cwd))
-            .collect();
+        let running: Vec<crate::model::Session> =
+            crate::live::load_sessions(false).into_values().filter(|s| s.status != crate::model::Status::Ended).collect();
+        let live_ids = running.iter().map(|s| s.id.clone()).collect();
+        let live: Vec<PathBuf> = running.into_iter().filter(|s| !s.cwd.is_empty()).map(|s| PathBuf::from(s.cwd)).collect();
         let projects = crate::store::open_readonly()
             .and_then(|c| crate::store::project_activity(&c))
             .unwrap_or_default()
@@ -132,6 +143,8 @@ impl Env {
             projects,
             running,
             cwds,
+            scratch: scratch_root(),
+            live_ids,
             run: Box::new(run_with_timeout),
         }
     }
@@ -269,7 +282,7 @@ const CACHES: &[Cache] = &[
 /// Folder names `RemoveDir` may delete; anything else is refused however it got into a plan.
 const REMOVABLE_NAMES: &[&str] = &[
     "_cacache", "_npx", "Yarn", "yarn", "pip", "uv", "Homebrew", "go-build", "DerivedData", "cache", "src", "caches", "store",
-    "repository", ".next", ".turbo", ".parcel-cache", "target", "node_modules",
+    "repository", ".next", ".turbo", ".parcel-cache", "target", "node_modules", ".venv", "venv",
 ];
 
 /// Build output and dependency folders inside a project.
@@ -284,6 +297,7 @@ fn project_dir_kind(path: &Path) -> Option<(&'static str, Tier)> {
         // Cargo marks its own target folder; a folder that happens to be called target isn't one.
         "target" if path.join("CACHEDIR.TAG").exists() => Some(("Rust build output", Tier::A)),
         "node_modules" if has("package.json") => Some(("node_modules", Tier::B)),
+        ".venv" | "venv" if path.join("pyvenv.cfg").exists() => Some(("Python virtual environment", Tier::B)),
         _ => None,
     }
 }
@@ -619,6 +633,9 @@ pub fn plan(env: &Env) -> Vec<Item> {
     }
 
     items.extend(worktree_items(&roots, env));
+    items.extend(claude_version_items(env));
+    items.extend(scratch_items(env));
+    items.extend(report_items(env));
     items.extend(backup_items(&roots, env));
     items.extend(docker_items(env));
     items.sort_by(|a, b| a.tier.cmp(&b.tier).then(b.bytes.cmp(&a.bytes)));
@@ -639,6 +656,7 @@ pub fn check_remove(path: &Path, kind: &DirKind, env: &Env) -> Result<(), String
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let named_right = match kind {
         DirKind::Backup { original } => backup_base(name).is_some_and(|b| path.parent().map(|p| p.join(b)).as_ref() == Some(original)),
+        DirKind::Scratch => is_session_id(name),
         _ => REMOVABLE_NAMES.contains(&name),
     };
     if !named_right {
@@ -654,7 +672,9 @@ pub fn check_remove(path: &Path, kind: &DirKind, env: &Env) -> Result<(), String
         return Err("its path goes through a link".into());
     }
     let roots = [&env.home, &env.temp].map(|r| r.canonicalize().unwrap_or_else(|_| r.to_path_buf()));
-    if !roots.iter().any(|r| real.starts_with(r) && real.components().count() >= r.components().count() + 2) {
+    let in_roots = roots.iter().any(|r| real.starts_with(r) && real.components().count() >= r.components().count() + 2);
+    let in_scratch = *kind == DirKind::Scratch && env.scratch.as_ref().is_some_and(|r| real.parent().and_then(Path::parent) == Some(r.as_path()));
+    if !in_roots && !in_scratch {
         return Err("it is outside the home and temp folders".into());
     }
     match kind {
@@ -672,6 +692,17 @@ pub fn check_remove(path: &Path, kind: &DirKind, env: &Env) -> Result<(), String
             }
             if project_dir_kind(path).is_none() {
                 return Err("it no longer looks like build output".into());
+            }
+        }
+        DirKind::Scratch => {
+            if env.live_ids.contains(name) {
+                return Err("its session is still running".into());
+            }
+            if age_days(path) < SCRATCH_DAYS {
+                return Err("it changed this week".into());
+            }
+            if env.cwds.iter().chain(&env.live).any(|c| c.starts_with(path)) {
+                return Err("a process is working in it".into());
             }
         }
         DirKind::Backup { original } => {
@@ -710,6 +741,10 @@ pub fn run_item(item: &Item, env: &Env, measure: &dyn Fn() -> Option<u64>) -> Ou
             // Without -f, Docker refuses a volume a container still uses.
             (env.run)("docker", &["volume", "rm", name], Duration::from_secs(60)).map(|_| ()).ok_or_else(|| "docker refused (a container may use it)".to_string())
         }
+        Action::RemoveClaudeVersion(path) => match check_claude_version(path, &env.home) {
+            Err(why) => return Outcome::Kept(why),
+            Ok(()) => std::fs::remove_file(path).map_err(|e| e.to_string()),
+        },
         Action::DockerContainerRm(id) => {
             if !valid_container_id(id) {
                 return Outcome::Kept("not a container id".into());
@@ -743,7 +778,7 @@ pub fn run_and_record(item: &Item, env: &Env, auto: bool) -> Outcome {
         && let Ok(conn) = crate::store::open()
     {
         let path = match &item.action {
-            Action::RemoveDir { path, .. } | Action::GitWorktreeRemove { path, .. } => path.display().to_string(),
+            Action::RemoveDir { path, .. } | Action::GitWorktreeRemove { path, .. } | Action::RemoveClaudeVersion(path) => path.display().to_string(),
             Action::DockerVolumeRm(name) | Action::DockerContainerRm(name) => name.clone(),
             _ => String::new(),
         };
@@ -833,10 +868,228 @@ fn auto() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------- Claude Code versions, scratch folders, and what marsad only reports ----------
+
+/// Where Claude Code's native installer keeps one file per CLI version.
+fn claude_versions_dir(home: &Path) -> PathBuf {
+    home.join(".local/share/claude/versions")
+}
+
+/// The version `~/.local/bin/claude` runs, and the newest other one, which are always kept.
+fn kept_claude_versions(home: &Path) -> Vec<PathBuf> {
+    let dir = claude_versions_dir(home);
+    let current = std::fs::read_link(home.join(".local/bin/claude")).ok().map(|p| if p.is_absolute() { p } else { home.join(".local/bin").join(p) });
+    let mut versions: Vec<(Vec<u64>, PathBuf)> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let parts: Option<Vec<u64>> = name.split('.').map(|p| p.parse().ok()).collect();
+            Some((parts?, e.path()))
+        })
+        .collect();
+    versions.sort();
+    let mut keep: Vec<PathBuf> = current.into_iter().collect();
+    if let Some((_, newest)) = versions.iter().rev().find(|(_, p)| !keep.contains(p)) {
+        keep.push(newest.clone());
+    }
+    keep
+}
+
+fn check_claude_version(path: &Path, home: &Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|_| "it no longer exists".to_string())?;
+    if !meta.is_file() || path.parent() != Some(claude_versions_dir(home).as_path()) {
+        return Err("it is not a Claude Code version file".into());
+    }
+    if !path.file_name().and_then(|n| n.to_str()).is_some_and(|n| !n.is_empty() && n.split('.').all(|p| p.parse::<u64>().is_ok())) {
+        return Err("it is not named like a version".into());
+    }
+    if kept_claude_versions(home).iter().any(|k| k == path) {
+        return Err("it is the current version or the one kept to go back to".into());
+    }
+    Ok(())
+}
+
+/// Old Claude Code CLI versions: everything but the current and the newest other one (tier B).
+fn claude_version_items(env: &Env) -> Vec<Item> {
+    let keep = kept_claude_versions(&env.home);
+    let Ok(entries) = std::fs::read_dir(claude_versions_dir(&env.home)) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && !keep.contains(&e.path()))
+        .filter(|e| check_claude_version(&e.path(), &env.home).is_ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            Item {
+                id: format!("claude-version:{name}"),
+                tier: Tier::B,
+                what: format!("Claude Code CLI {name}"),
+                bytes: e.metadata().map_or(0, |m| on_disk(&m, &mut HashSet::new())),
+                action: Action::RemoveClaudeVersion(e.path()),
+                note: "an older version; the current one and the newest other are kept".into(),
+            }
+        })
+        .collect()
+}
+
+/// Scratch folders untouched this long belong to finished sessions.
+const SCRATCH_DAYS: u64 = 7;
+
+/// Where Claude Code makes its per-session scratch folders: `/tmp/claude-<uid>`.
+fn scratch_root() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        Path::new("/tmp").canonicalize().ok().map(|t| t.join(format!("claude-{uid}")))
+    }
+    #[cfg(not(unix))]
+    None
+}
+
+/// A session id: 36 characters of hex digits and dashes.
+fn is_session_id(name: &str) -> bool {
+    name.len() == 36 && name.chars().all(|c| c.is_ascii_hexdigit() || c == '-') && name.matches('-').count() == 4
+}
+
+/// Session scratch folders untouched for a week (tier B).
+fn scratch_items(env: &Env) -> Vec<Item> {
+    let Some(root) = &env.scratch else { return Vec::new() };
+    let mut out = Vec::new();
+    for project in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        for session in std::fs::read_dir(project.path()).into_iter().flatten().flatten() {
+            let path = session.path();
+            let name = session.file_name().to_string_lossy().into_owned();
+            // A session's folder is named after it, and a long run may leave its top folder unchanged.
+            let running = env.live_ids.contains(&name) || env.cwds.iter().chain(&env.live).any(|c| c.starts_with(&path));
+            if !is_session_id(&name) || age_days(&path) < SCRATCH_DAYS || running {
+                continue;
+            }
+            let bytes = dir_size(&path);
+            if bytes < MIN_BYTES {
+                continue;
+            }
+            out.push(Item {
+                id: path.display().to_string(),
+                tier: Tier::B,
+                what: "Claude Code session scratch folder".into(),
+                bytes,
+                action: Action::RemoveDir { path: path.clone(), kind: DirKind::Scratch },
+                note: format!("unchanged for {} days", age_days(&path)),
+            });
+        }
+    }
+    out
+}
+
+/// Space marsad leaves to its owner, with the way to free it.
+fn report_items(env: &Env) -> Vec<Item> {
+    let home = &env.home;
+    let mut out = Vec::new();
+    let mut report = |id: &str, what: String, bytes: u64, note: &str| {
+        if bytes >= MIN_BYTES || (bytes == 0 && !note.is_empty() && id == "time-machine-snapshots") {
+            out.push(Item { id: id.into(), tier: Tier::Info, what, bytes, action: Action::None, note: note.into() });
+        }
+    };
+    let size = |p: PathBuf| if p.is_dir() { dir_size(&p) } else { 0 };
+    report("claude-vm-bundles", "Claude desktop's VM image".into(), size(home.join("Library/Application Support/Claude/vm_bundles")), "managed by the Claude app; never delete it by hand");
+    report(
+        "claude-transcripts",
+        "Claude Code transcripts".into(),
+        size(home.join(".claude/projects")),
+        "Claude Code removes old ones itself; `cleanupPeriodDays` in ~/.claude/settings.json keeps fewer days",
+    );
+    report(
+        "ios-simulators",
+        "iOS simulators".into(),
+        size(home.join("Library/Developer/CoreSimulator/Devices")),
+        "`xcrun simctl delete unavailable` removes simulators for runtimes no longer installed",
+    );
+    report("trash", "the Trash".into(), size(home.join(".Trash")), "empty the Trash in Finder");
+    // Node versions other than nvm's default.
+    let default = std::fs::read_to_string(home.join(".nvm/alias/default")).unwrap_or_default();
+    for v in std::fs::read_dir(home.join(".nvm/versions/node")).into_iter().flatten().flatten() {
+        let name = v.file_name().to_string_lossy().into_owned();
+        if !default.trim().is_empty() && name.trim_start_matches('v').starts_with(default.trim().trim_start_matches('v')) {
+            continue;
+        }
+        report(&format!("nvm:{name}"), format!("Node {name} (nvm)"), size(v.path()), &format!("`nvm uninstall {name}` if no project needs it"));
+    }
+    // Rust toolchains other than the default.
+    let rust_default = (env.run)("rustup", &["default"], Duration::from_secs(5)).unwrap_or_default();
+    for t in std::fs::read_dir(home.join(".rustup/toolchains")).into_iter().flatten().flatten() {
+        let name = t.file_name().to_string_lossy().into_owned();
+        if rust_default.is_empty() || rust_default.starts_with(&name) {
+            continue;
+        }
+        report(&format!("rustup:{name}"), format!("Rust toolchain {name}"), size(t.path()), &format!("`rustup toolchain uninstall {name}` if no project pins it"));
+    }
+    // Time Machine's local snapshots are often the hidden part of "System Data".
+    if let Some(list) = (env.run)("tmutil", &["listlocalsnapshots", "/"], Duration::from_secs(10)) {
+        let n = list.lines().filter(|l| l.contains("com.apple.TimeMachine")).count();
+        if n > 0 {
+            report("time-machine-snapshots", format!("{n} Time Machine local snapshots"), 0, "size unknown; `tmutil thinlocalsnapshots / 999999999999 4` asks macOS to thin them");
+        }
+    }
+    // The largest app caches marsad doesn't already list.
+    let known = ["Homebrew", "pip", "Yarn", "go-build", "uv", "pnpm"];
+    let mut caches: Vec<(String, u64)> = std::fs::read_dir(home.join("Library/Caches"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !known.contains(&n.as_str()))
+        .map(|n| {
+            let b = size(home.join("Library/Caches").join(&n));
+            (n, b)
+        })
+        .collect();
+    caches.sort_by_key(|c| std::cmp::Reverse(c.1));
+    for (name, bytes) in caches.into_iter().take(3).filter(|(_, b)| *b >= 500_000_000) {
+        report(&format!("app-cache:{name}"), format!("{name} cache"), bytes, "the app rebuilds it; clear it from the app, or quit the app and delete it");
+    }
+    out
+}
+
+// ---------- daily scan ----------
+
+/// The plan is measured on its own at most this often when the dashboard opens.
+const DAILY: Duration = Duration::from_secs(86_400);
+/// Smaller totals aren't worth a note.
+const HINT_BYTES: u64 = 1_000_000_000;
+
+/// Once a day, measures the plan on a thread and reports what tiers A and B could free, when it
+/// is worth a note. None when the last scan was under a day ago.
+pub fn daily_scan() -> Option<std::sync::mpsc::Receiver<u64>> {
+    let stamp = crate::claude_data_dir().join("clean-scan.stamp");
+    let due = std::fs::metadata(&stamp).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_none_or(|age| age >= DAILY);
+    if !due || std::fs::create_dir_all(crate::claude_data_dir()).is_err() || std::fs::write(&stamp, b"").is_err() {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let total = removable(&plan(&Env::real()));
+        if total >= HINT_BYTES {
+            let _ = tx.send(total);
+        }
+    });
+    Some(rx)
+}
+
+/// What tiers A and B hold together: what can go without looking inside.
+fn removable(items: &[Item]) -> u64 {
+    items.iter().filter(|i| matches!(i.tier, Tier::A | Tier::B)).map(|i| i.bytes).sum()
+}
+
 // ---------- marsad clean ----------
 
 #[derive(Args)]
 pub struct CleanArgs {
+    /// Show the plan without running anything (what `marsad clean` does on its own).
+    #[arg(long, conflicts_with_all = ["run", "tier_a", "judge", "auto_clean"])]
+    plan: bool,
     /// Run these items (ids from the plan); tier C is never run.
     #[arg(long, num_args = 1..)]
     run: Vec<String>,
@@ -873,10 +1126,11 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
             match items.iter().find(|i| &i.id == id) {
                 None => eprintln!("{id}: not in the plan (run `marsad clean` to list items)"),
                 Some(i) if i.tier == Tier::C => eprintln!("{id}: holds data; remove it from the dashboard (`D`), one item at a time"),
+                Some(i) if i.tier == Tier::Info => eprintln!("{id}: marsad only reports this; {}", i.note),
                 Some(_) => {}
             }
         }
-        chosen.retain(|i| i.tier != Tier::C);
+        chosen.retain(|i| matches!(i.tier, Tier::A | Tier::B));
         for (what, bytes, outcome) in run_all(&chosen, &env, false) {
             match outcome {
                 Outcome::Done { freed } => println!("removed  {what} ({}, disk gained {})", fmt_bytes(bytes), fmt_bytes(freed)),
@@ -925,6 +1179,7 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
                 (Tier::A, "A  rebuilt automatically, holds no data (`marsad clean --tier-a`)"),
                 (Tier::B, "B  rebuilt, but slow to get back (`marsad clean --run <id>`)"),
                 (Tier::C, "C  holds data: removed only one at a time from the dashboard (`D`); `--judge` asks Claude"),
+                (Tier::Info, "Report only: freed by the app or tool that owns it"),
             ];
             for (tier, head) in heads {
                 let list: Vec<&Item> = items.iter().filter(|i| i.tier == tier).collect();
@@ -994,11 +1249,80 @@ mod tests {
             projects: Vec::new(),
             running: HashSet::new(),
             cwds: Vec::new(),
+            scratch: None,
+            live_ids: HashSet::new(),
             run: Box::new(move |prog, args, _| match prog {
                 "git" if !tracked.iter().any(|t| args.contains(t)) => Some(String::new()),
                 _ => None,
             }),
         }
+    }
+
+    #[test]
+    fn the_daily_note_counts_only_what_can_go_without_looking_inside() {
+        let item = |tier, bytes| Item { id: String::new(), tier, what: String::new(), bytes, action: Action::None, note: String::new() };
+        assert_eq!(removable(&[item(Tier::A, 3), item(Tier::B, 4), item(Tier::C, 100)]), 7);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn old_claude_versions_go_but_the_current_and_one_more_stay() {
+        let t = tree("versions");
+        let home = &t.0;
+        let dir = claude_versions_dir(home);
+        for v in ["2.1.9", "2.1.10", "2.1.12", "2.1.11"] {
+            file(&dir.join(v), 60_000_000);
+        }
+        file(&dir.join("notes.txt"), 60_000_000);
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::os::unix::fs::symlink(dir.join("2.1.11"), home.join(".local/bin/claude")).unwrap();
+        let e = env(home, 0.0, &[]);
+        let mut ids: Vec<String> = claude_version_items(&e).into_iter().map(|i| i.id).collect();
+        ids.sort();
+        // 2.1.11 runs, 2.1.12 is the newest other: both stay.
+        assert_eq!(ids, ["claude-version:2.1.10", "claude-version:2.1.9"]);
+        assert!(check_claude_version(&dir.join("2.1.11"), home).is_err());
+        assert!(check_claude_version(&dir.join("notes.txt"), home).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scratch_folders_of_finished_sessions_only() {
+        let t = tree("scratch");
+        let root = t.0.join("claude-501");
+        let old = root.join("-Users-me-web/0123abcd-0000-4000-8000-0123456789ab");
+        let fresh = root.join("-Users-me-web/fedcba98-0000-4000-8000-0123456789ab");
+        let odd = root.join("-Users-me-web/keep-me");
+        for d in [&old, &fresh, &odd] {
+            file(&d.join("x"), 60_000_000);
+        }
+        let week_ago = std::time::SystemTime::now() - Duration::from_secs(8 * 86_400);
+        for d in [&old, &odd] {
+            std::fs::File::open(d).unwrap().set_modified(week_ago).unwrap();
+        }
+        let mut e = env(&t.0.join("home"), 0.0, &[]);
+        e.scratch = Some(root.clone());
+        let items = scratch_items(&e);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(check_remove(&old, &DirKind::Scratch, &e), Ok(()));
+        assert!(check_remove(&fresh, &DirKind::Scratch, &e).is_err(), "changed this week");
+        e.cwds = vec![old.join("x")];
+        assert!(check_remove(&old, &DirKind::Scratch, &e).is_err(), "a process works in it");
+        // A session running for over a week still owns its folder, whatever the folder's own time.
+        e.cwds.clear();
+        e.live_ids.insert("0123abcd-0000-4000-8000-0123456789ab".into());
+        assert!(scratch_items(&e).is_empty());
+        assert!(check_remove(&old, &DirKind::Scratch, &e).unwrap_err().contains("still running"));
+        assert!(!is_session_id("keep-me") && is_session_id("0123abcd-0000-4000-8000-0123456789ab"));
+    }
+
+    #[test]
+    fn python_virtualenvs_are_recognised_by_their_config() {
+        let t = tree("venv");
+        file(&t.0.join("app/.venv/pyvenv.cfg"), 10);
+        file(&t.0.join("app/venv/readme"), 10);
+        assert_eq!(project_dir_kind(&t.0.join("app/.venv")), Some(("Python virtual environment", Tier::B)));
+        assert_eq!(project_dir_kind(&t.0.join("app/venv")), None, "a folder that only happens to be called venv");
     }
 
     #[test]

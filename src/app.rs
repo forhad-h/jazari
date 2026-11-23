@@ -163,6 +163,8 @@ pub struct App {
     pub announcement: Option<Announcement>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
+    /// Bytes the daily cleanup scan found removable, reported once by its thread.
+    clean_hint_rx: Option<std::sync::mpsc::Receiver<u64>>,
     log: JsonlTail,
     readers: HashMap<PathBuf, TranscriptReader>,
     sys: System,
@@ -170,11 +172,30 @@ pub struct App {
     pub counter: Counter,
     /// Disk, memory and CPU for the header meters, sampled once a second.
     pub system: Option<crate::system::Snapshot>,
+    /// A message being typed to a session (`t`), drawn over the list while open.
+    pub compose: Option<Compose>,
+    /// A stop (`x`) or interrupt (`X`) of a session waiting for `y`.
+    pub control: Option<Control>,
     /// The cleanup view's state while it is open.
     pub clean: Option<crate::clean_view::CleanView>,
     sampler: crate::system::Sampler,
     /// The always-on-top window while it is open (`P`).
     pub pin: Option<crate::pin::Pin>,
+}
+
+/// A message being typed to one session.
+pub struct Compose {
+    pub session: String,
+    pub name: String,
+    pub text: String,
+}
+
+/// Stopping or interrupting one session, once confirmed.
+pub struct Control {
+    pub session: String,
+    pub name: String,
+    /// SIGINT now, rather than a stop before the next tool call.
+    pub interrupt: bool,
 }
 
 /// Shown above the footer when `c` couldn't put the launch command on a clipboard it can confirm.
@@ -193,8 +214,8 @@ pub struct RulesPicker {
     pub ticked: Vec<bool>,
     /// The highlighted prompt.
     pub cursor: usize,
-    /// The highlighted mode once the prompts are chosen; None while ticking them.
-    pub mode: Option<crate::rules::Mode>,
+    /// The highlighted choice once the prompts are chosen; None while ticking them.
+    pub mode: Option<crate::rules::Choice>,
     /// The prompt waiting for `y` to be deleted.
     pub deleting: Option<usize>,
     /// The earlier versions of a prompt being browsed, opened with `v`.
@@ -492,6 +513,7 @@ impl App {
             announcement: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
+            clean_hint_rx: crate::clean::daily_scan(),
             log: JsonlTail::new(dir.join("events.jsonl")),
             readers: HashMap::new(),
             sys: System::new(),
@@ -499,6 +521,8 @@ impl App {
             counter: Counter::default(),
             system: None,
             clean: None,
+            compose: None,
+            control: None,
             sampler: crate::system::Sampler::default(),
             pin: None,
         }
@@ -660,16 +684,15 @@ impl App {
     }
 
     fn on_picker_key(&mut self, code: KeyCode) {
-        use crate::rules::Mode;
+        use crate::rules::Choice;
         let Some(picker) = self.rules_picker.as_mut() else { return };
         if let Some(mode) = picker.mode {
-            let other = if mode == Mode::Session { Mode::Team } else { Mode::Session };
             match code {
                 KeyCode::Esc => picker.mode = None,
                 KeyCode::Char('q' | 'c') => self.rules_picker = None,
-                KeyCode::Down | KeyCode::Up | KeyCode::Char('j' | 'k') | KeyCode::Tab => picker.mode = Some(other),
-                KeyCode::Char('1') => picker.mode = Some(Mode::Session),
-                KeyCode::Char('2') => picker.mode = Some(Mode::Team),
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => picker.mode = Some(mode.step(1)),
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => picker.mode = Some(mode.step(-1)),
+                KeyCode::Char(d) if Choice::numbered(d).is_some() => picker.mode = Choice::numbered(d),
                 KeyCode::Enter => {
                     let keys: Vec<String> = picker.chosen().iter().map(|r| r.key.clone()).collect();
                     let library = std::mem::take(&mut picker.library);
@@ -737,9 +760,10 @@ impl App {
         }
     }
 
-    /// Copies the command that starts `mode` with the prompts in `chosen`, writing their files first.
-    /// False when a file couldn't be written, so nothing was copied.
-    fn copy_launch_command(&mut self, chosen: &[&crate::rules::Rule], mode: crate::rules::Mode) -> bool {
+    /// Copies the command that starts `choice` with the prompts in `chosen`, or only their file's
+    /// path, writing the files first. False when a file couldn't be written, so nothing was copied.
+    fn copy_launch_command(&mut self, chosen: &[&crate::rules::Rule], choice: crate::rules::Choice) -> bool {
+        let mode = choice.mode();
         let path = match crate::rules::ensure(chosen, mode) {
             Ok(path) => path,
             Err(e) => {
@@ -747,8 +771,13 @@ impl App {
                 return false;
             }
         };
-        let command = crate::rules::launch_command(&path);
+        let path_only = choice == crate::rules::Choice::Path;
+        let command = if path_only { path.to_string_lossy().into_owned() } else { crate::rules::launch_command(&path) };
         let headline = match crate::clipboard::copy(&command) {
+            crate::clipboard::Copied::Native(_) if path_only => {
+                self.info = Some(format!("copied: the path of {} · paste it into a running session ", crate::rules::titles(chosen)));
+                return true;
+            }
             crate::clipboard::Copied::Native(_) => {
                 let lead = if mode == crate::rules::Mode::Team { " as a team lead" } else { "" };
                 self.info = Some(format!("copied: claude{lead} with {} · it applies to new conversations ", crate::rules::titles(chosen)));
@@ -758,7 +787,7 @@ impl App {
             crate::clipboard::Copied::Failed => "Couldn't reach a clipboard. Copy this command by hand:",
         };
         let path = crate::rules::quote_arg(&path.to_string_lossy());
-        let cli = crate::rules::cli_command(chosen, mode);
+        let cli = crate::rules::cli_command(chosen, mode) + if path_only { " --path" } else { "" };
         self.copy_note = Some(CopyNote { headline, command, path, cli });
         true
     }
@@ -934,6 +963,12 @@ impl App {
         if let Some(clean) = self.clean.as_mut() {
             clean.tick();
         }
+        if let Some(Ok(bytes)) = self.clean_hint_rx.as_ref().map(|rx| rx.try_recv()) {
+            self.clean_hint_rx = None;
+            if self.info.is_none() && self.error.is_none() {
+                self.info = Some(format!("{} can be freed · press D ", crate::clean::fmt_bytes(bytes)));
+            }
+        }
         if let Ok(notice) = self.update_rx.try_recv() {
             self.update = Some(notice);
         }
@@ -963,7 +998,49 @@ impl App {
         }
     }
 
-    /// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.
+    fn on_compose_key(&mut self, code: KeyCode) {
+        let Some(c) = self.compose.as_mut() else { return };
+        match code {
+            KeyCode::Esc => self.compose = None,
+            KeyCode::Backspace => {
+                c.text.pop();
+            }
+            KeyCode::Char(ch) => c.text.push(ch),
+            KeyCode::Enter if c.text.trim().is_empty() => {}
+            KeyCode::Enter => {
+                let c = self.compose.take().unwrap();
+                match crate::channel::tell(&c.session, &c.text) {
+                    Ok(()) => self.info = Some(format!("queued for {}: Claude reads it at the next tool call or prompt ", c.name)),
+                    Err(e) => self.error = Some(format!("couldn't queue the message: {e:#} ")),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Text pasted while composing goes into the message, on one line.
+    pub fn on_compose_paste(&mut self, text: &str) -> bool {
+        let Some(c) = self.compose.as_mut() else { return false };
+        c.text.push_str(&text.replace(['\r', '\n'], " "));
+        true
+    }
+
+    fn apply_control(&mut self, c: &Control) {
+        if c.interrupt {
+            let sent = self.sessions.get(&c.session).is_some_and(crate::channel::interrupt);
+            if sent {
+                self.info = Some(format!("interrupted {} ", c.name));
+            } else {
+                self.error = Some(format!("couldn't interrupt {}: its Claude Code process isn't known or has changed ", c.name));
+            }
+        } else {
+            match crate::channel::request_stop(&c.session) {
+                Ok(()) => self.info = Some(format!("{} stops before its next tool call ", c.name)),
+                Err(e) => self.error = Some(format!("couldn't request the stop: {e:#} ")),
+            }
+        }
+    }
+
     /// Statfs, memory counters and CPU ticks: a fraction of a millisecond, so it stays on this thread.
     fn sample_system(&mut self) {
         let cwds = self.sessions.values().filter(|s| s.status != Status::Ended).map(|s| s.cwd.clone());
@@ -972,6 +1049,7 @@ impl App {
         self.system = Some(self.sampler.sample(paths.iter().map(PathBuf::as_path), &t));
     }
 
+    /// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.
     fn check_processes(&mut self) {
         mark_exited(&mut self.sessions, &mut self.sys);
     }
@@ -1042,6 +1120,16 @@ impl App {
             self.on_picker_key(key.code);
             return Action::None;
         }
+        if self.compose.is_some() {
+            self.on_compose_key(key.code);
+            return Action::None;
+        }
+        if let Some(c) = self.control.take() {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                self.apply_control(&c);
+            }
+            return Action::None;
+        }
         // Esc dismisses a badge note before it does anything else.
         if key.code == KeyCode::Esc && self.announcing() {
             self.announcement = None;
@@ -1058,6 +1146,16 @@ impl App {
             (View::List, KeyCode::Char('u')) => {
                 self.view = View::Usage;
                 self.usage.reload();
+            }
+            (View::List, KeyCode::Char('t')) => {
+                if let Some(s) = self.selected_session().filter(|s| s.status != Status::Ended) {
+                    self.compose = Some(Compose { session: s.id.clone(), name: s.project(), text: String::new() });
+                }
+            }
+            (View::List, KeyCode::Char(k @ ('x' | 'X'))) => {
+                if let Some(s) = self.selected_session().filter(|s| s.status != Status::Ended) {
+                    self.control = Some(Control { session: s.id.clone(), name: s.project(), interrupt: k == 'X' });
+                }
             }
             (View::List, KeyCode::Char('D')) => {
                 self.clean = Some(crate::clean_view::CleanView::open());
@@ -1152,7 +1250,8 @@ pub fn run() -> anyhow::Result<()> {
             if event::poll(Duration::from_millis(250))? {
                 match event::read()? {
                     Event::Paste(text) => {
-                        if let Some(share) = app.share.as_mut() {
+                        if app.on_compose_paste(&text) {
+                        } else if let Some(share) = app.share.as_mut() {
                             share.on_paste(&text);
                         } else if let Some(view) = app.prompt_view.as_mut() {
                             view.on_paste(&text);

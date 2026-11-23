@@ -240,6 +240,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("tab", "subagents".into()),
                 ("y", "copy id".into()),
                 ("u", "usage".into()),
+                ("t/x", "message/stop".into()),
                 ("D", "disk cleanup".into()),
                 ("p", "share".into()),
                 ("P", if app.pin.is_some() { "unpin" } else { "pin on top" }.into()),
@@ -270,7 +271,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             } else if picker.versions.is_some() && picker.mode.is_none() {
                 vec![("↑↓", "move".into()), ("enter", "restore".into()), ("esc", "back".into())]
             } else if picker.mode.is_some() {
-                vec![("↑↓", "move".into()), ("1/2", "pick".into()), ("enter", "copy".into()), ("esc", "back".into())]
+                vec![("↑↓", "move".into()), ("1-3", "pick".into()), ("enter", "copy".into()), ("esc", "back".into())]
             } else {
                 let mut keys = vec![
                     ("↑↓", "move".into()),
@@ -290,6 +291,18 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         (None, None, None) => keys,
     };
+    let keys = if app.compose.is_some() {
+        vec![("enter", "send".into()), ("esc", "cancel".into())]
+    } else if let Some(c) = &app.control {
+        vec![("y", if c.interrupt { "interrupt now" } else { "stop" }.into()), ("any key", "keep it running".into())]
+    } else {
+        keys
+    };
+    if let Some(c) = &app.compose {
+        draw_compose(f, body, c, app.tick);
+    } else if let Some(c) = &app.control {
+        draw_control(f, body, c);
+    }
     let mut spans = vec![Span::raw(" ")];
     for (k, label) in keys {
         spans.push(k.to_string().bold());
@@ -456,6 +469,7 @@ fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: 
         (Tier::A, "A · rebuilt automatically, holds no data", Color::Green),
         (Tier::B, "B · rebuilt, but slow to get back", Color::Yellow),
         (Tier::C, "C · holds data: one at a time, after you check it", Color::Red),
+        (Tier::Info, "Report only · freed by the app or tool that owns it", Color::DarkGray),
     ];
     let mut lines = Vec::new();
     let mut selected_line = 0;
@@ -520,7 +534,10 @@ fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: 
 
 fn draw_list(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let selected = app.selected_session();
-    let details_height = if selected.is_some() { 6 } else { 0 };
+    let details_height = match selected {
+        Some(s) => 6 + u16::from(s.flag.is_some()) + u16::from(s.said.is_some() || s.waiting > 0 || s.stop_requested),
+        None => 0,
+    };
     let [table, details] =
         Layout::vertical([Constraint::Min(4), Constraint::Length(details_height)]).areas(area);
     if visible.is_empty() {
@@ -563,6 +580,41 @@ fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
 
 /// The launch command to copy by hand, drawn without borders so a mouse selection copies only the
 /// command. When it is wider than the terminal, the flag and the path go on separate lines.
+/// A small box over the list for typing a message to one session.
+fn draw_compose(f: &mut Frame, area: Rect, c: &crate::app::Compose, tick: u64) {
+    let w = area.width.saturating_sub(8).min(100);
+    let [_, rect, _] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(w), Constraint::Fill(1)]).areas(area);
+    let [_, rect, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(6), Constraint::Fill(1)]).areas(rect);
+    f.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT))
+        .title(Line::from(format!(" Message to {} ", c.name)).bold());
+    let cursor = if tick % 4 < 2 { "▏" } else { " " };
+    let lines = vec![
+        Line::from(vec![Span::raw(c.text.clone()), Span::styled(cursor, Style::new().fg(ACCENT))]),
+        Line::from(""),
+        Line::from(Span::styled("Claude reads it at the session's next tool call or prompt.", Style::new().dark_gray())),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
+}
+
+/// The question before stopping or interrupting a session.
+fn draw_control(f: &mut Frame, area: Rect, c: &crate::app::Control) {
+    let (title, what) = if c.interrupt {
+        (" Interrupt now ", format!("Interrupt {} now, as Esc does? Its current step stops.", c.name))
+    } else {
+        (" Stop ", format!("Stop {} before its next tool call? It is saved; `claude --resume` continues it.", c.name))
+    };
+    let w = (what.chars().count() as u16 + 4).min(area.width);
+    let [_, rect, _] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(w), Constraint::Fill(1)]).areas(area);
+    let [_, rect, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(4), Constraint::Fill(1)]).areas(rect);
+    f.render_widget(Clear, rect);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(Color::Yellow)).title(Line::from(title).bold());
+    let lines = vec![Line::from(what), Line::from(Span::styled("y does it, any other key keeps it running", Style::new().dark_gray()))];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
+}
+
 fn draw_copy_note(f: &mut Frame, area: Rect, note: &crate::app::CopyNote) {
     let mut lines = vec![Line::from(note.headline.yellow())];
     if note.command.chars().count() <= area.width as usize {
@@ -577,7 +629,6 @@ fn draw_copy_note(f: &mut Frame, area: Rect, note: &crate::app::CopyNote) {
 
 /// The `c` picker, a small modal: the prompts with tick boxes, then a choice of session or team.
 fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker) {
-    use crate::rules::Mode;
     let row = |selected: bool, label: String, title: String, tag: Option<Span<'static>>| {
         let mut spans = vec![Span::raw(if selected { "› " } else { "  " }), Span::styled(label, Style::new().fg(ACCENT)), title.bold()];
         spans.extend(tag);
@@ -626,11 +677,11 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
         }
         (Some(mode), _) => {
             let mut lines = vec![Line::from(dim(format!("Start {} as:", crate::rules::titles(&picker.chosen())))), Line::from("")];
-            for (i, m) in [Mode::Session, Mode::Team].into_iter().enumerate() {
+            for (i, m) in crate::rules::Choice::ALL.into_iter().enumerate() {
                 lines.push(row(m == mode, format!("{} ", i + 1), m.title().to_string(), None));
                 lines.push(Line::from(dim(format!("    {}", m.summary()))));
             }
-            let footer = vec![Line::from(""), Line::from(dim("Applies to new conversations; your choice is remembered."))];
+            let footer = vec![Line::from(""), Line::from(dim("A command applies to new conversations; your choice is remembered."))];
             (lines, footer, " Launch command · 2 of 2 ", 2)
         }
     };
@@ -1513,7 +1564,9 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
         }
     }
 
-    let lines = vec![Line::from(vec![label("now"), now]), Line::from(usage), Line::from(id), Line::from(work)];
+    let mut lines = vec![Line::from(vec![label("now"), now]), Line::from(usage), Line::from(id), Line::from(work)];
+    lines.extend(flag_line(s));
+    lines.extend(channel_line(s));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
@@ -1524,6 +1577,34 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
         );
     // Each line keeps to one row; a long one is cut rather than pushing the others out.
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// What the session last posted with `marsad say`, and what marsad has waiting for it.
+fn channel_line(s: &Session) -> Option<Line<'static>> {
+    let mut spans = vec![label("marsad")];
+    if let Some(said) = &s.said {
+        spans.push(Span::raw(format!("says: {said}")));
+    }
+    let mut waiting = Vec::new();
+    if s.waiting > 0 {
+        waiting.push(format!("{} message{} waiting", s.waiting, if s.waiting == 1 { "" } else { "s" }));
+    }
+    if s.stop_requested {
+        waiting.push("stop requested".to_string());
+    }
+    if !waiting.is_empty() {
+        if spans.len() > 1 {
+            spans.push(dim("   ·   "));
+        }
+        spans.push(Span::styled(waiting.join(" · "), Style::new().fg(Color::Yellow)));
+    }
+    (spans.len() > 1).then(|| Line::from(spans))
+}
+
+/// The command check's latest finding for the session, in yellow, until the next prompt.
+fn flag_line(s: &Session) -> Option<Line<'static>> {
+    let flag = s.flag.as_ref()?;
+    Some(Line::from(vec![label("check"), Span::styled(flag.clone(), Style::new().fg(Color::Yellow))]))
 }
 
 const EVENT_WIDTHS: [Constraint; 6] = [
@@ -2138,5 +2219,7 @@ mod tests {
         assert!(rows.iter().all(|r| r.width() <= 8));
     }
 }
+
+
 
 

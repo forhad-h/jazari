@@ -4,6 +4,7 @@ mod badge_art;
 mod badges;
 mod board;
 mod card;
+mod channel;
 mod clean;
 mod clean_judge;
 mod clean_view;
@@ -20,6 +21,7 @@ mod model;
 mod pin;
 mod portable;
 mod prompt_gen;
+mod pressure;
 mod prompt_view;
 mod report;
 mod risk;
@@ -108,6 +110,10 @@ enum Cmd {
     Disk(disk::DiskArgs),
     /// Find caches, build output and Docker data that can be rebuilt, and remove them safely.
     Clean(clean::CleanArgs),
+    /// Send a running session a message, or stop (--stop) or interrupt (--interrupt) it.
+    Tell(channel::TellArgs),
+    /// From inside a session: post what it is doing to marsad (--attention: it needs the user).
+    Say(channel::SayArgs),
     /// Disk, memory, swap and CPU in one reading, with what to be careful about before heavy work.
     System(system::SystemArgs),
     /// Ask about or refuse risky tool calls: check a command (--check), turn it on/off, list findings.
@@ -210,6 +216,8 @@ fn main() -> anyhow::Result<()> {
         Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
         Some(Cmd::Disk(args)) => disk::run(args),
         Some(Cmd::System(args)) => system::run(args),
+        Some(Cmd::Tell(args)) => channel::run_tell(args),
+        Some(Cmd::Say(args)) => channel::run_say(args),
         Some(Cmd::Clean(args)) => clean::run(args),
         Some(Cmd::Risk(args)) => risk::run(args),
         Some(Cmd::Guard { hook }) => {

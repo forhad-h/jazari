@@ -48,6 +48,8 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     // A new prompt, a resume or the end of the session closes a stop by marsad's guard.
     if matches!(event, "UserPromptSubmit" | "SessionStart" | "SessionEnd") && ev.get("agent_id").is_none() {
         session.halted = None;
+        session.flag = None;
+        session.stop_requested = false;
     }
 
     let summary = s("summary").unwrap_or("");
@@ -144,13 +146,37 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
             session.set_status(Status::Ended, ts);
             session.detail = s("reason").unwrap_or("").to_string();
         }
+        crate::risk::FLAGGED_EVENT => {
+            let decision = if s("decision") == Some("block") { "refused" } else { "asked" };
+            let who = if ev.get("agent_id").is_some() { "a subagent's call " } else { "" };
+            session.flag = Some(format!("{who}{decision} ({}): {}", s("rule").unwrap_or("?"), s("reason").unwrap_or("")));
+        }
         crate::disk::HALTED_EVENT => {
-            let why = match s("reason") {
-                Some("disk") | None => "disk almost full",
-                Some(other) => other,
+            let (why, then) = match s("reason") {
+                Some("disk") | None => ("disk almost full", "free space, then "),
+                Some(other) => (other, ""),
             };
             let full = s("message").map(|m| format!(" ({m})")).unwrap_or_default();
-            session.halted = Some(format!("halted: {why}{full} · free space, then claude --resume {}", session.id));
+            session.halted = Some(format!("halted: {why}{full} · {then}claude --resume {}", session.id));
+            session.stop_requested = false;
+        }
+        crate::channel::TOLD_EVENT => match s("kind") {
+            Some("stop") => session.stop_requested = true,
+            _ => session.waiting += 1,
+        },
+        crate::channel::DELIVERED_EVENT => {
+            session.waiting = 0;
+            if ev["stop"] == true {
+                session.stop_requested = false;
+            }
+        }
+        crate::channel::SAID_EVENT => {
+            let text = s("message").unwrap_or("").to_string();
+            if ev["attention"] == true {
+                session.set_status(Status::Question, ts);
+                session.detail = text.clone();
+            }
+            session.said = Some(text);
         }
         _ => {}
     }
@@ -213,6 +239,32 @@ mod tests {
         assert!(s.detail.ends_with(&format!("claude --resume {}", s.id)), "{}", s.detail);
         let resumed = run(&[tool, halt, json!({"hook_event_name": "SessionStart", "source": "resume"})]);
         assert_eq!((resumed.status, resumed.halted), (Status::Idle, None));
+    }
+
+    #[test]
+    fn a_command_check_finding_stays_until_the_next_prompt() {
+        let flagged = json!({"hook_event_name": crate::risk::FLAGGED_EVENT, "decision": "ask", "rule": "download-exec", "reason": "piping into `bash`"});
+        let s = run(&[flagged.clone(), json!({"hook_event_name": "PreToolUse", "tool_name": "Bash"})]);
+        assert_eq!(s.flag.as_deref(), Some("asked (download-exec): piping into `bash`"));
+        let s = run(&[flagged, json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"})]);
+        assert_eq!(s.flag, None);
+    }
+
+    #[test]
+    fn messages_stops_and_status_lines_from_the_channel() {
+        let told = json!({"hook_event_name": crate::channel::TOLD_EVENT, "kind": "message", "message": "hi"});
+        let stop = json!({"hook_event_name": crate::channel::TOLD_EVENT, "kind": "stop"});
+        let s = run(&[told.clone(), told.clone(), stop.clone()]);
+        assert_eq!((s.waiting, s.stop_requested), (2, true));
+        let s = run(&[told, stop.clone(), json!({"hook_event_name": crate::channel::DELIVERED_EVENT, "messages": 1, "stop": true})]);
+        assert_eq!((s.waiting, s.stop_requested), (0, false));
+        let said = json!({"hook_event_name": crate::channel::SAID_EVENT, "message": "need the API key", "attention": true});
+        let s = run(&[json!({"hook_event_name": "PreToolUse", "tool_name": "Bash"}), said]);
+        assert_eq!((s.status, s.said.as_deref(), s.detail.as_str()), (Status::Question, Some("need the API key"), "need the API key"));
+        let s = run(&[stop.clone(), json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"})]);
+        assert!(!s.stop_requested, "a new prompt drops a waiting stop");
+        let halted = run(&[json!({"hook_event_name": crate::disk::HALTED_EVENT, "reason": "stopped from marsad"})]);
+        assert_eq!(halted.detail, format!("halted: stopped from marsad · claude --resume {}", halted.id));
     }
 
     #[test]

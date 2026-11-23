@@ -60,6 +60,12 @@ const BUILTIN: &[Builtin] = &[
         summary: "keeps the request, the requester and the process out of code, commits and docs",
         body: include_str!("../assets/OUTPUT-HYGIENE.md"),
     },
+    Builtin {
+        key: "marsad",
+        title: "Working with marsad",
+        summary: "the session reads marsad's messages, reports with `marsad say`, and checks the machine before heavy work",
+        body: include_str!("../assets/MARSAD.md"),
+    },
 ];
 
 /// The coordination prompt's key, the default choice before the user picks one.
@@ -99,10 +105,6 @@ impl Mode {
         }
     }
 
-    pub fn parse(s: &str) -> Option<Mode> {
-        [Mode::Session, Mode::Team].into_iter().find(|m| m.key() == s)
-    }
-
     pub fn title(self) -> &'static str {
         match self {
             Mode::Session => "Normal session",
@@ -114,6 +116,63 @@ impl Mode {
         match self {
             Mode::Session => "one Claude Code session follows the prompts",
             Mode::Team => "the lead follows them and passes them on to every teammate it spawns",
+        }
+    }
+}
+
+/// What the picker's last step copies: a command that starts a session or a team lead, or only the
+/// prompts' file path, to paste into a session that is already running.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Choice {
+    #[default]
+    Session,
+    Team,
+    Path,
+}
+
+impl Choice {
+    pub const ALL: [Choice; 3] = [Choice::Session, Choice::Team, Choice::Path];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Choice::Session => "session",
+            Choice::Team => "team",
+            Choice::Path => "path",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Choice> {
+        Choice::ALL.into_iter().find(|c| c.key() == s)
+    }
+
+    /// The choice after (`step` 1) or before (`step` -1) this one, wrapping around.
+    pub fn step(self, step: isize) -> Choice {
+        let n = Choice::ALL.len() as isize;
+        let at = Choice::ALL.iter().position(|c| *c == self).unwrap_or(0) as isize;
+        Choice::ALL[(at + step).rem_euclid(n) as usize]
+    }
+
+    /// The choice for its number key, `1` to `3`.
+    pub fn numbered(digit: char) -> Option<Choice> {
+        digit.to_digit(10).and_then(|d| (d as usize).checked_sub(1)).and_then(|i| Choice::ALL.get(i).copied())
+    }
+
+    /// The file a choice writes: a pasted path is read by one session, as in a normal launch.
+    pub fn mode(self) -> Mode {
+        if self == Choice::Team { Mode::Team } else { Mode::Session }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Choice::Path => "File path only",
+            c => c.mode().title(),
+        }
+    }
+
+    pub fn summary(self) -> &'static str {
+        match self {
+            Choice::Path => "copies the prompts' file path, to paste into a session that is already running",
+            c => c.mode().summary(),
         }
     }
 }
@@ -688,8 +747,11 @@ pub struct RulesArgs {
     /// Prompts to start with, e.g. `coordination output-hygiene`, or `all`. Without any, lists them.
     keys: Vec<String>,
     /// Start the lead of an agent team, which has every teammate it spawns read the same prompts.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "path")]
     team: bool,
+    /// Print only the prompts' file path, to paste into a session that is already running.
+    #[arg(long)]
+    path: bool,
     #[arg(long, value_enum, default_value = "table")]
     format: crate::report::Format,
 }
@@ -708,8 +770,13 @@ pub fn run(args: RulesArgs) -> anyhow::Result<()> {
         println!("{}", render_list(args.format, &lib, &prompts_dir()));
         return Ok(());
     }
+    let chosen = parse(&lib, &args.keys)?;
+    if args.path {
+        println!("{}", ensure(&chosen, Mode::Session)?.display());
+        return Ok(());
+    }
     let mode = if args.team { Mode::Team } else { Mode::Session };
-    print_command(&parse(&lib, &args.keys)?, mode, args.format)
+    print_command(&chosen, mode, args.format)
 }
 
 /// `marsad coordination`: the command for the coordination rules alone, at a stable path, so a
@@ -742,7 +809,8 @@ fn render_list(format: crate::report::Format, lib: &[Rule], dir: &Path) -> Strin
             out.push(String::new());
             out.push("`marsad rules <name>…` prints the command that starts Claude Code with them, e.g.".into());
             out.push(format!("marsad rules {}", lib.iter().map(|r| quote_arg(&r.key)).collect::<Vec<_>>().join(" ")));
-            out.push("Add --team to start the lead of an agent team that passes them to its teammates.".into());
+            out.push("Add --team to start the lead of an agent team that passes them to its teammates,".into());
+            out.push("or --path to print only the file's path, to paste into a session that is already running.".into());
             out.push("Write your own with `marsad prompt new \"<rough idea>\"`, or add .md files to".into());
             out.push(dir.display().to_string());
             out.join("\n")
@@ -843,11 +911,11 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "not a prompt").unwrap();
         let lib = library_in(&dir);
         let keys: Vec<_> = lib.iter().map(|r| r.key.as_str()).collect();
-        assert_eq!(keys, ["coordination", "output-hygiene", "a-plain", "review-style"]);
-        assert!(!lib[0].own && lib[2].own);
+        assert_eq!(keys, ["coordination", "output-hygiene", "marsad", "a-plain", "review-style"]);
+        assert!(!lib[0].own && !lib[2].own && lib[3].own);
         assert_eq!(lib[0].title, "Coordination", "the built-in wins a name clash");
-        assert_eq!((lib[3].title.as_str(), lib[3].summary.as_str()), ("Review style", "Keep reviews short and kind."));
-        assert_eq!((lib[2].title.as_str(), lib[2].summary.as_str()), ("a-plain", "No heading here, just rules."));
+        assert_eq!((lib[4].title.as_str(), lib[4].summary.as_str()), ("Review style", "Keep reviews short and kind."));
+        assert_eq!((lib[3].title.as_str(), lib[3].summary.as_str()), ("a-plain", "No heading here, just rules."));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -856,11 +924,11 @@ mod tests {
         let lib = builtins();
         let keys = |v: Vec<&Rule>| v.iter().map(|r| r.key.clone()).collect::<Vec<_>>();
         assert_eq!(keys(parse(&lib, &["output-hygiene", "coordination"]).unwrap()), ["coordination", "output-hygiene"]);
-        assert_eq!(keys(parse(&lib, &["all"]).unwrap()).len(), 2);
+        assert_eq!(keys(parse(&lib, &["all"]).unwrap()).len(), 3);
         let err = parse(&lib, &["nope"]).unwrap_err().to_string();
-        assert!(err.contains("coordination, output-hygiene"), "{err}");
+        assert!(err.contains("coordination, output-hygiene, marsad"), "{err}");
         assert_eq!(keys(known(&lib, &["retired", "output-hygiene"])), ["output-hygiene"]);
-        assert_eq!(titles(&known(&lib, &["all"])), "coordination + output hygiene");
+        assert_eq!(titles(&known(&lib, &["coordination", "output-hygiene"])), "coordination + output hygiene");
     }
 
     #[test]
@@ -875,7 +943,7 @@ mod tests {
     fn a_session_set_has_one_stable_file() {
         let data = temp_dir("session");
         let lib = builtins();
-        let both = known(&lib, &["all"]);
+        let both = known(&lib, &["coordination", "output-hygiene"]);
         let a = ensure_in(&data, &both, Mode::Session).unwrap();
         assert_eq!(ensure_in(&data, &both, Mode::Session).unwrap(), a, "the same set reuses its file");
         assert!(a.is_absolute() && a.starts_with(launch_dir(&data)));
@@ -906,7 +974,7 @@ mod tests {
     fn coordination_stays_with_the_lead() {
         let data = temp_dir("team-coord");
         let lib = builtins();
-        let lead = ensure_in(&data, &known(&lib, &["all"]), Mode::Team).unwrap();
+        let lead = ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Team).unwrap();
         let text = std::fs::read_to_string(&lead).unwrap();
         assert!(text.contains("# Multi-session coordination") && text.contains("You represent the whole team on the board"));
         let files = names(&launch_dir(&data));
@@ -953,7 +1021,7 @@ mod tests {
         std::fs::write(data.join("coordination+output-hygiene.md"), "old").unwrap();
         prune_in(&data, &data, SystemTime::now()).unwrap();
         let lib = builtins();
-        assert_eq!(std::fs::read_to_string(data.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["all"])));
+        assert_eq!(std::fs::read_to_string(data.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["coordination", "output-hygiene"])));
         assert!(!data.join("coordination.md").exists(), "only files that exist are rewritten");
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -975,7 +1043,7 @@ mod tests {
         std::fs::write(data.join("output-hygiene.md"), "old").unwrap();
         std::fs::create_dir_all(data.join("prompts")).unwrap();
         std::fs::write(data.join("prompts").join("mine.md"), "# Mine\n").unwrap();
-        ensure_in(&data, &known(&lib, &["all"]), Mode::Session).unwrap();
+        ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Session).unwrap();
         ensure_in(&data, &known(&lib, &["output-hygiene"]), Mode::Team).unwrap();
 
         assert_eq!(remove_all_in(&data).unwrap(), 4, "a legacy file, a session file, a lead's and a teammates' file");
@@ -1145,12 +1213,12 @@ mod tests {
     fn launch_files_are_named_role_keys_hash() {
         let data = temp_dir("names");
         let lib = builtins();
-        let session = ensure_in(&data, &known(&lib, &["all"]), Mode::Session).unwrap();
+        let session = ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Session).unwrap();
         let name = session.file_name().unwrap().to_string_lossy().into_owned();
         let hash = name.strip_prefix("session-coordination+output-hygiene-").and_then(|r| r.strip_suffix(".md")).unwrap();
         assert!(hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
 
-        let lead = ensure_in(&data, &known(&lib, &["all"]), Mode::Team).unwrap();
+        let lead = ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Team).unwrap();
         assert!(lead.file_name().unwrap().to_string_lossy().starts_with("lead-coordination+output-hygiene-"));
         let mut files = names(&launch_dir(&data));
         files.retain(|n| n.starts_with(TEAMMATE_PREFIX));
@@ -1194,9 +1262,22 @@ mod tests {
         let later = SystemTime::now() + KEEP_FOR + KEEP_FOR;
         prune_in(&data, &legacy, later).unwrap();
         let lib = builtins();
-        assert_eq!(std::fs::read_to_string(legacy.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["all"])));
+        assert_eq!(std::fs::read_to_string(legacy.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["coordination", "output-hygiene"])));
         assert!(stale.exists(), "nothing in the legacy dir is removed");
         let _ = std::fs::remove_dir_all(&data);
         let _ = std::fs::remove_dir_all(&legacy);
+    }
+
+    #[test]
+    fn the_last_step_offers_session_team_and_the_path_alone() {
+        assert_eq!(Choice::ALL.map(Choice::title), ["Normal session", "Agent team", "File path only"]);
+        assert_eq!(Choice::Session.step(1), Choice::Team);
+        assert_eq!(Choice::Path.step(1), Choice::Session, "wraps around");
+        assert_eq!(Choice::Session.step(-1), Choice::Path);
+        assert_eq!(Choice::numbered('3'), Some(Choice::Path));
+        assert_eq!((Choice::numbered('0'), Choice::numbered('4'), Choice::numbered('x')), (None, None, None));
+        // A pasted path is read by one session, so it points at the normal session's file.
+        assert_eq!(Choice::Path.mode(), Mode::Session);
+        assert_eq!(Choice::parse("path"), Some(Choice::Path));
     }
 }
