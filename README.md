@@ -400,8 +400,11 @@ terminal.
 the last 7 and 30 days', the daily average and all-time tokens, and your rank. You see the whole
 post beside your badges first: `enter` shares it to LinkedIn, `c` copies the whole post (and works
 again on the Done screen), `s` saves the badge image, `e` edits the line, `E` opens the whole post
-in `$VISUAL`/`$EDITOR`, `r` drafts a new line, and `q`/`esc` cancels without writing or opening
-anything. Confirming:
+in `$VISUAL`/`$EDITOR`, `r` drafts a new line, `v` shows the next of three variants of the line, and
+`q`/`esc` cancels without writing or opening anything. Each variant names the features you worked
+on that day (your busiest session titles, with project names taken out), and lines you shared or
+copied in the last 10 days are kept in `~/.marsad/share/posts.jsonl` so new drafts don't repeat
+them. Confirming:
 
 1. saves a 1200×627 card with your badge, rank, stats, achievements and `git config user.name` to
    `Downloads/marsad-YYYY-MM-DD.png` (or `~/.marsad/cards/`); sharing again the same day

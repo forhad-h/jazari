@@ -95,7 +95,7 @@ Sessions started with that command coordinate on `AGENT-BOARD.md` at the root of
 ```sh
 marsad badges --format json          # rank and the four achievements, with progress to the next level
 marsad share --print --no-ai         # the LinkedIn post on stdout, the card PNG written; opens nothing
-marsad share --print --out card.png  # drafts the post's first line with an isolated `claude -p` call
+marsad share --print --out card.png  # drafts the post's first line with an isolated `claude -p` call; other variants go to stderr
 ```
 
 `badges` JSON: `rank` has `tier` (0 Novice to 6 Grandmaster), `name`, `tokens` (all-time, cache
