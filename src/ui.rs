@@ -521,7 +521,11 @@ fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: 
 
 fn draw_list(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let selected = app.selected_session();
-    let details_height = if selected.is_some() { 6 } else { 0 };
+    let details_height = match selected {
+        Some(s) if s.flag.is_some() => 7,
+        Some(_) => 6,
+        None => 0,
+    };
     let [table, details] =
         Layout::vertical([Constraint::Min(4), Constraint::Length(details_height)]).areas(area);
     if visible.is_empty() {
@@ -1513,7 +1517,8 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
         }
     }
 
-    let lines = vec![Line::from(vec![label("now"), now]), Line::from(usage), Line::from(id), Line::from(work)];
+    let mut lines = vec![Line::from(vec![label("now"), now]), Line::from(usage), Line::from(id), Line::from(work)];
+    lines.extend(flag_line(s));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
@@ -1524,6 +1529,12 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
         );
     // Each line keeps to one row; a long one is cut rather than pushing the others out.
     f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The command check's latest finding for the session, in yellow, until the next prompt.
+fn flag_line(s: &Session) -> Option<Line<'static>> {
+    let flag = s.flag.as_ref()?;
+    Some(Line::from(vec![label("check"), Span::styled(flag.clone(), Style::new().fg(Color::Yellow))]))
 }
 
 const EVENT_WIDTHS: [Constraint; 6] = [
