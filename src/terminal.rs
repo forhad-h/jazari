@@ -465,7 +465,9 @@ mod tests {
         assert_eq!(path, Path::new("/home/.warp/launch_configurations/marsad-handoff.yaml"));
         assert!(text.contains("cwd: \"/w/it's\""), "{text}");
         assert!(text.contains("- exec: \"'/opt/my tools/marsad' handoff resume h1\""), "{text}");
-        assert_eq!(p.steps, [step("open", strs(&["warp://launch//home/.warp/launch_configurations/marsad-handoff.yaml"]), true)]);
+        // The URI carries the path as the platform joins it.
+        let uri = format!("warp://launch/{}", Path::new("/home/.warp/launch_configurations").join(WARP_FILE).to_string_lossy());
+        assert_eq!(p.steps, [step("open", vec![uri], true)]);
     }
 
     #[test]
