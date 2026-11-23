@@ -45,7 +45,13 @@ marsad rules                                         # lists the prompts session
 marsad rules coordination --format json              # {command, protocol_path, rules, mode}: starts a session with the coordination rules
 marsad rules coordination output-hygiene             # both, merged into one file (claude reads only one prompt file)
 marsad rules output-hygiene --team                   # starts an agent team lead that passes the prompts on to its teammates
+marsad prompt new "<rough idea>" --yes --format json # Claude writes a prompt from the idea and saves it: {key, title, summary, body, assumptions, questions, saved}
+marsad prompt edit <name> --with "<feedback>" --yes  # revises one of the user's prompts with Claude
+marsad prompt copy <name> --as <new-name>            # copies a prompt (a built-in one, say) into the user's library
+marsad prompt rm <name>                              # deletes one of the user's prompts; built-in ones can't be deleted
 ```
+
+Writing a prompt runs `claude -p` once (about a minute); show the user the `assumptions` and `questions` it returns, since those are the choices the idea left open.
 
 Sessions started with that command coordinate on `AGENT-BOARD.md` at the root of the repo's main checkout: beside the absolute `git rev-parse --git-common-dir` when that is a `.git` dir, inside it otherwise (a bare clone or a submodule). Read it to see which sessions are active and which files they have claimed; the dashboard's `b` key shows it too.
 

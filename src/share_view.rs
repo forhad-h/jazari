@@ -508,7 +508,8 @@ impl ShareView {
 }
 
 /// Opens `text` in `$VISUAL`, `$EDITOR`, or `vi` (`notepad` on Windows), and returns what was saved.
-pub fn edit_in_editor(text: &str) -> Result<String, String> {
+/// The temp file is named `marsad-<kind>-…<ext>`, so the editor picks the right mode.
+pub fn edit_in_editor(text: &str, kind: &str, ext: &str) -> Result<String, String> {
     let editor = ["VISUAL", "EDITOR"]
         .iter()
         .filter_map(|v| std::env::var(v).ok())
@@ -518,7 +519,7 @@ pub fn edit_in_editor(text: &str) -> Result<String, String> {
     let program = parts.next().ok_or("no editor is set")?;
     // A fresh file that must not exist yet, so a planted file or symlink in the shared temp dir is never written through.
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let path = std::env::temp_dir().join(format!("marsad-post-{}-{nanos:x}.txt", std::process::id()));
+    let path = std::env::temp_dir().join(format!("marsad-{kind}-{}-{nanos:x}{ext}", std::process::id()));
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

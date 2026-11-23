@@ -26,6 +26,10 @@ const KEEP: &[&str] = &[
 ];
 
 pub fn run() -> anyhow::Result<()> {
+    // marsad's own `claude -p` run that writes a prompt: not a session to show or count.
+    if std::env::var_os(crate::prompt_gen::MARKER_ENV).is_some() {
+        return Ok(());
+    }
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let raw: Value = serde_json::from_str(&input)?;

@@ -235,6 +235,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("p", "share".into()),
                 ("b", "board".into()),
                 ("c", "launch cmd".into()),
+                ("n", "new prompt".into()),
                 ("a", ended.into()),
                 ("m", format!("alerts: {}", if app.alerts_on { "on" } else { "off" })),
                 ("s/S", format!("sort: {}", app.sort.label())),
@@ -243,20 +244,34 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     };
     let picker_digits = app.rules_picker.as_ref().map(|p| format!("space/1-{}", p.library.len().clamp(1, 9))).unwrap_or_default();
-    let keys = match (&app.share, &app.rules_picker) {
-        (Some(share), _) => {
+    let keys = match (&app.share, &app.prompt_view, &app.rules_picker) {
+        (Some(share), ..) => {
             draw_share(f, body, share, app.badges.as_ref(), app.cell_aspect, app.tick);
             share.keys().into_iter().map(|(k, label)| (k, label.to_string())).collect()
         }
-        (None, Some(picker)) => {
+        (None, Some(view), _) => {
+            draw_prompt_view(f, body, view, app.tick);
+            view.keys().into_iter().map(|(k, label)| (k, label.to_string())).collect()
+        }
+        (None, None, Some(picker)) => {
             draw_rules_picker(f, body, picker);
-            if picker.mode.is_some() {
+            if picker.deleting.is_some() {
+                vec![("y", "delete".into()), ("any key", "keep".into())]
+            } else if picker.mode.is_some() {
                 vec![("↑↓", "move".into()), ("1/2", "pick".into()), ("enter", "copy".into()), ("esc", "back".into())]
             } else {
-                vec![("↑↓", "move".into()), (picker_digits.as_str(), "tick".into()), ("enter", "next".into()), ("esc", "cancel".into())]
+                vec![
+                    ("↑↓", "move".into()),
+                    (picker_digits.as_str(), "tick".into()),
+                    ("enter", "next".into()),
+                    ("n", "new".into()),
+                    ("e", "edit".into()),
+                    ("d", "delete".into()),
+                    ("esc", "cancel".into()),
+                ]
             }
         }
-        (None, None) => keys,
+        (None, None, None) => keys,
     };
     let mut spans = vec![Span::raw(" ")];
     for (k, label) in keys {
@@ -394,10 +409,17 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
                 lines.push(row(i == picker.cursor, format!("{digit} {tick} "), format!("{}{own}", rule.title)));
                 lines.push(Line::from(dim(format!("        {}", rule.summary))));
             }
-            let dir = crate::rules::prompts_dir();
-            let home = dirs::home_dir().unwrap_or_default();
-            let dir = dir.strip_prefix(&home).map(|rest| format!("~/{}", rest.display())).unwrap_or_else(|_| dir.display().to_string());
-            let footer = vec![Line::from(""), Line::from(dim(format!("Add your own as .md files in {dir}")))];
+            let footer = match picker.deleting.and_then(|i| picker.library.get(i)) {
+                Some(rule) => vec![
+                    Line::from(""),
+                    Line::from(Span::styled(format!("Delete {}? y deletes its file, any other key keeps it.", rule.title), Style::new().fg(Color::Yellow).bold())),
+                ],
+                None => vec![
+                    Line::from(""),
+                    Line::from(dim("n writes a new prompt with Claude · e edits yours or copies a built-in · d deletes yours")),
+                    Line::from(dim(format!("Your prompts are .md files in {}", home_relative(&crate::rules::prompts_dir())))),
+                ],
+            };
             (lines, footer, " Launch command ", 2 + picker.cursor * 2)
         }
         Some(mode) => {
@@ -424,6 +446,258 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
     let visible = inner.height as usize;
     let scroll = (cursor_line + 2).saturating_sub(visible).min(body_len.saturating_sub(1));
     f.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
+}
+
+/// `path` with the home directory shown as `~`.
+fn home_relative(path: &std::path::Path) -> String {
+    let home = dirs::home_dir().unwrap_or_default();
+    path.strip_prefix(&home).map(|rest| format!("~/{}", rest.display())).unwrap_or_else(|_| path.display().to_string())
+}
+
+/// The prompt writer over the picker: the rough idea, a spinner while Claude writes, then the review.
+fn draw_prompt_view(f: &mut Frame, area: Rect, view: &crate::prompt_view::PromptView, tick: u64) {
+    use crate::prompt_view::Screen as Prompt;
+    f.render_widget(Clear, area);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(ACCENT)).title(view.title().bold());
+    let inner = block.inner(area).inner(Margin { horizontal: 1, vertical: 0 });
+    f.render_widget(block, area);
+    let status: Vec<Line<'static>> = view
+        .warning
+        .iter()
+        .map(|w| Line::from(w.clone().red()))
+        .chain(view.notice.iter().map(|n| Line::from(n.clone().green())))
+        .collect();
+    match view.screen() {
+        Prompt::Idea { idea, name, field } => draw_prompt_idea(f, inner, idea, name, field, status),
+        Prompt::Generating { model, secs, revising } => {
+            let what = if revising { "Revising the prompt" } else { "Writing the prompt" };
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(format!("{} ", SPINNER[(tick / 2 % 4) as usize]), Style::new().fg(ACCENT)),
+                    Span::raw(format!("{what} with Claude ({model})… {}:{:02}", secs / 60, secs % 60)),
+                ]),
+                Line::from(""),
+                Line::from(dim("A strong model can take a minute or two. Esc cancels.")),
+            ];
+            let [_, mid, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(3), Constraint::Fill(1)]).areas(inner);
+            f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), mid);
+        }
+        Prompt::Review { draft, key, line } => draw_prompt_review(f, inner, view, draft, key, line, status),
+    }
+}
+
+/// A text field's lines with the cursor drawn as a reversed cell when it is focused.
+fn cursor_lines(text: &crate::prompt_view::TextBox, focused: bool) -> Vec<Line<'static>> {
+    let cursor = Style::new().add_modifier(Modifier::REVERSED);
+    let (mut lines, mut spans, mut buf) = (Vec::new(), Vec::new(), String::new());
+    for (i, &c) in text.chars.iter().enumerate() {
+        if focused && i == text.cursor {
+            spans.push(Span::raw(std::mem::take(&mut buf)));
+            spans.push(Span::styled(if c == '\n' { " ".to_string() } else { c.to_string() }, cursor));
+            if c != '\n' {
+                continue;
+            }
+        }
+        if c == '\n' {
+            spans.push(Span::raw(std::mem::take(&mut buf)));
+            lines.push(Line::from(std::mem::take(&mut spans)));
+        } else {
+            buf.push(c);
+        }
+    }
+    spans.push(Span::raw(buf));
+    if focused && text.cursor >= text.chars.len() {
+        spans.push(Span::styled(" ", cursor));
+    }
+    lines.push(Line::from(spans));
+    lines
+}
+
+fn draw_prompt_idea(
+    f: &mut Frame,
+    area: Rect,
+    idea: &crate::prompt_view::TextBox,
+    name: &crate::prompt_view::TextBox,
+    field: crate::prompt_view::Field,
+    status: Vec<Line<'static>>,
+) {
+    use crate::prompt_view::Field;
+    let width = area.width as usize;
+    let intro = wrap_line(
+        Line::from(dim(
+            "Describe the standing instruction you want, in your own words. Claude turns it into a prompt for your library, \
+             and you review it before it is saved.",
+        )),
+        width,
+    );
+    let status: Vec<Line> = status.into_iter().flat_map(|l| wrap_line(l, width)).collect();
+    let [intro_area, _, idea_label, idea_box, _, name_label, name_box, _, buttons, _, status_area, _] = Layout::vertical([
+        Constraint::Length(intro.len() as u16),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Max(14),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(status.len() as u16),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    f.render_widget(Paragraph::new(intro), intro_area);
+    let boxed = |focused: bool| Block::bordered().border_type(BorderType::Rounded).border_style(if focused { Style::new().fg(ACCENT) } else { Style::new().dark_gray() });
+    let labelled = |text: &'static str, focused: bool| Paragraph::new(Span::styled(text, if focused { Style::new().fg(ACCENT).bold() } else { Style::new().bold() }));
+    f.render_widget(labelled("Rough idea", field == Field::Idea), idea_label);
+    let block = boxed(field == Field::Idea);
+    let inner = block.inner(idea_box);
+    f.render_widget(block, idea_box);
+    let rows: Vec<Line> = cursor_lines(idea, field == Field::Idea).into_iter().flat_map(|l| wrap_line(l, inner.width as usize)).collect();
+    // Typing happens at the end, so a long idea shows its last rows.
+    let scroll = rows.len().saturating_sub(inner.height as usize) as u16;
+    f.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+    f.render_widget(labelled("Name (optional)", field == Field::Name), name_label);
+    let block = boxed(field == Field::Name);
+    let inner = block.inner(name_box);
+    f.render_widget(block, name_box);
+    f.render_widget(Paragraph::new(cursor_lines(name, field == Field::Name)), inner);
+    let button = |text: &'static str, focused: bool, primary: bool| {
+        let style = match (focused, primary) {
+            (true, _) => Style::new().fg(Color::Black).bg(ACCENT).bold(),
+            (false, true) => Style::new().fg(ACCENT).bold(),
+            (false, false) => Style::new().dark_gray(),
+        };
+        Span::styled(format!("[ {text} ]"), style)
+    };
+    let row = Line::from(vec![
+        button("Write prompt", field == Field::Submit, true),
+        Span::raw("  "),
+        button("Cancel", field == Field::Cancel, false),
+        dim("   tab moves here · enter presses"),
+    ]);
+    f.render_widget(Paragraph::new(row), buttons);
+    f.render_widget(Paragraph::new(status), status_area);
+}
+
+/// Markdown as styled lines: headings, bullets, code fences and inline code and bold.
+fn markdown_lines(text: &str) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    let mut fenced = false;
+    for raw in text.lines() {
+        let line = raw.trim_end();
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            out.push(Line::from(dim(line.to_string())));
+            continue;
+        }
+        if fenced {
+            out.push(Line::from(Span::styled(line.to_string(), Style::new().fg(Color::Green))));
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("# ") {
+            out.push(Line::from(Span::styled(h.to_string(), Style::new().fg(ACCENT).bold())));
+            continue;
+        }
+        if let Some(h) = line.strip_prefix("## ").or_else(|| line.strip_prefix("### ")) {
+            out.push(Line::from(Span::styled(h.to_string(), Style::new().bold())));
+            continue;
+        }
+        let rest = line.trim_start();
+        let indent = " ".repeat(line.len() - rest.len());
+        let mut spans = vec![Span::raw(indent)];
+        let body = match rest.strip_prefix("- ").or_else(|| rest.strip_prefix("* ")) {
+            Some(item) => {
+                spans.push(Span::styled("• ", Style::new().fg(ACCENT)));
+                item
+            }
+            None => rest,
+        };
+        spans.extend(inline_markdown(body));
+        out.push(Line::from(spans));
+    }
+    out
+}
+
+/// `code` in the accent colour and **bold** in bold; everything else as is.
+fn inline_markdown(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, part) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            spans.push(Span::styled(part.to_string(), Style::new().fg(ACCENT)));
+            continue;
+        }
+        for (j, piece) in part.split("**").enumerate() {
+            if !piece.is_empty() {
+                spans.push(if j % 2 == 1 { Span::styled(piece.to_string(), Style::new().bold()) } else { Span::raw(piece.to_string()) });
+            }
+        }
+    }
+    spans
+}
+
+fn draw_prompt_review(
+    f: &mut Frame,
+    area: Rect,
+    view: &crate::prompt_view::PromptView,
+    draft: &crate::prompt_gen::Draft,
+    key: &str,
+    line: Option<(crate::prompt_view::LineFor, &crate::prompt_view::TextBox)>,
+    status: Vec<Line<'static>>,
+) {
+    use crate::prompt_view::LineFor;
+    let wide = area.width >= 120;
+    let side_width = if wide { (area.width * 2 / 5).clamp(44, 70) } else { area.width };
+    let w = side_width as usize;
+    let mut side: Vec<Line<'static>> = vec![
+        Line::from(vec![Span::styled("Saves as ", Style::new().bold()), Span::styled(key.to_string(), Style::new().fg(ACCENT).bold())]),
+        Line::from(dim(home_relative(&crate::rules::prompts_dir().join(format!("{key}.md"))))),
+    ];
+    let list = |side: &mut Vec<Line<'static>>, heading: &str, items: &[String], numbered: bool, empty: &str| {
+        side.push(Line::from(""));
+        side.push(Line::from(Span::styled(heading.to_string(), Style::new().fg(ACCENT).bold())));
+        if items.is_empty() {
+            side.push(Line::from(dim(empty.to_string())));
+        }
+        for (i, item) in items.iter().enumerate() {
+            let mark = if numbered { format!("{}. ", i + 1) } else { "• ".into() };
+            side.push(Line::from(vec![Span::styled(mark, Style::new().fg(ACCENT)), Span::raw(item.trim().to_string())]));
+        }
+    };
+    list(&mut side, "What I assumed", &draft.assumptions, false, "nothing beyond the idea");
+    list(&mut side, "Questions for you", &draft.questions, true, "none: the idea settled every choice");
+    if !draft.questions.is_empty() && line.is_none() {
+        side.push(Line::from(dim("Press a question's number to answer it; the answer revises the draft.")));
+    }
+    if let Some((purpose, text)) = line {
+        let prompt = match purpose {
+            LineFor::Feedback => "What should change?".to_string(),
+            LineFor::Answer(i) => format!("Your answer to question {}:", i + 1),
+            LineFor::Key => "New name (lowercase letters, digits, hyphens):".to_string(),
+        };
+        side.push(Line::from(""));
+        side.push(Line::from(Span::styled(prompt, Style::new().bold())));
+        let mut input = vec![Span::styled("› ", Style::new().fg(ACCENT).bold())];
+        input.extend(cursor_lines(text, true).into_iter().flat_map(|l| l.spans));
+        side.push(Line::from(input));
+    }
+    side.extend(status.into_iter().flat_map(|l| [Line::from(""), l]));
+    let side: Vec<Line> = side.into_iter().flat_map(|l| wrap_line(l, w)).collect();
+    let [draft_area, side_area] = if wide {
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(side_width)]).spacing(2).areas(area)
+    } else {
+        let rows = (side.len() as u16).min(area.height / 2);
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(rows)]).spacing(1).areas(area)
+    };
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().dark_gray()).title(format!(" {key}.md "));
+    let inner = block.inner(draft_area).inner(Margin { horizontal: 1, vertical: 0 });
+    f.render_widget(block, draft_area);
+    let rows: Vec<Line> = markdown_lines(&draft.body).into_iter().flat_map(|l| wrap_line(l, inner.width as usize)).collect();
+    view.max_scroll.set((rows.len() as u16).saturating_sub(inner.height));
+    f.render_widget(Paragraph::new(rows).scroll((view.scroll.min(view.max_scroll.get()), 0)), inner);
+    // The input line is last, so a long side panel keeps it in view.
+    let scroll = (side.len() as u16).saturating_sub(side_area.height);
+    f.render_widget(Paragraph::new(side).scroll((if line.is_some() { scroll } else { 0 }, 0)), side_area);
 }
 
 fn rgb(c: crate::badge_art::Rgb) -> Color {
@@ -1621,3 +1895,4 @@ mod tests {
         assert!(rows.iter().all(|r| r.width() <= 8));
     }
 }
+
