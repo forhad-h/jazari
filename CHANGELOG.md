@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.10.0 - 2026-11-23
 
 - `n` writes a new prompt from a rough idea with Claude, from the session list or the `c` picker
 - The idea box has Write prompt and Cancel buttons; `tab` reaches them
