@@ -1,4 +1,4 @@
-//! Usage history in SQLite (`~/.claude/marsad/usage.db`).
+//! Usage history in SQLite (`~/.marsad/usage.db`).
 //!
 //! Built from Claude Code transcripts, re-reading a file only when its size or mtime
 //! changes. Tokens are bucketed by the local day each API call happened; skill runs by

@@ -432,7 +432,7 @@ fn merge_live(indexed: &DayTotals, all_time: i64, day: &str, live: &HashMap<(Str
 
 impl App {
     fn new() -> Self {
-        let dir = crate::data_dir();
+        let dir = crate::claude_data_dir();
         // Generated prompt files nobody has copied a command for in a while.
         let _ = crate::rules::prune();
         let mut sessions = HashMap::new();
@@ -459,7 +459,7 @@ impl App {
             update: None,
             alerts_on: crate::settings::alerts(),
             error: None,
-            info: None,
+            info: crate::migrate::take_notice(),
             note_shown: None,
             copy_note: None,
             rules_picker: None,
