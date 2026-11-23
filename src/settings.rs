@@ -29,6 +29,15 @@ fn set_at(path: &Path, key: &str, value: Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One setting's raw value, for modules that parse their own settings.
+pub(crate) fn get(key: &str) -> Option<Value> {
+    load_at(&path()).remove(key)
+}
+
+pub(crate) fn set(key: &str, value: Value) -> anyhow::Result<()> {
+    set_at(&path(), key, value)
+}
+
 fn alerts_at(path: &Path) -> bool {
     load_at(path).get("alerts").and_then(Value::as_bool).unwrap_or(true)
 }

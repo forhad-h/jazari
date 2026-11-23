@@ -1,6 +1,6 @@
 ---
 name: marsad-usage
-description: Analyze Claude Code token usage over any period, including past and closed sessions (by day, session, skill, project, model or subagent) and check live sessions (status, context left before auto-compact, 5h/7d usage limits) using marsad. Use when the user asks which sessions, skills, projects or models used the most tokens, how usage changed over days, how much context or usage limit is left, which sessions need attention, or wants a usage report.
+description: Analyze Claude Code token usage over any period, including past and closed sessions (by day, session, skill, project, model or subagent), check live sessions (status, context left before auto-compact, 5h/7d usage limits), and check the machine's disk, memory and CPU before heavy work using marsad. Use when the user asks which sessions, skills, projects or models used the most tokens, how usage changed over days, how much context or usage limit is left, which sessions need attention, or wants a usage report, and before a large build, Docker build or pull, package install or anything else that writes many GB or runs for long.
 ---
 
 # Claude Code usage history (marsad)
@@ -24,6 +24,20 @@ auto-compact; `context_estimated: true` means the window size was inferred from 
 `tokens_total`. The top-level `rate_limits.five_hour` / `seven_day` give `used_pct` and `resets_at`
 (Unix seconds), from the most recent status line report (claude.ai Pro/Max only; null otherwise).
 Live data is not in the usage database; use `marsad status` for it.
+
+## The machine: disk, memory, CPU
+
+```sh
+marsad system --format json        # ok, concerns, disk (used_pct, free_gb, level), memory (used_pct, available_gib, swap_used_gib), cpu (used_pct, load, cores)
+marsad disk --format json          # every volume in use, the levels, and whether the guard is on
+```
+
+Before a large build, a Docker build or image pull, a package install, or a long unattended run,
+check `marsad system`. If `ok` is false, tell the user the `concerns`, and prefer smaller steps or
+waiting over starting the heavy work. A full disk hangs the machine. At the disk `warning` level
+marsad adds a note telling you to finish the current step and write a handoff: do that. At
+`critical` marsad refuses tool calls and stops the session until space is freed. Don't try to get
+around it. Never change the guard (`marsad disk --guard off`) or the thresholds unless the user asks.
 
 ## This session's context and handoffs
 

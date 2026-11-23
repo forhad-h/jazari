@@ -38,6 +38,11 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
         session.model = Some(model);
     }
 
+    // A new prompt, a resume or the end of the session closes a stop by marsad's guard.
+    if matches!(event, "UserPromptSubmit" | "SessionStart" | "SessionEnd") && ev.get("agent_id").is_none() {
+        session.halted = None;
+    }
+
     let summary = s("summary").unwrap_or("");
     let tool = s("tool_name").unwrap_or("");
     let tool_detail = || if summary.is_empty() { tool.to_string() } else { format!("{tool}: {summary}") };
@@ -132,7 +137,20 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
             session.set_status(Status::Ended, ts);
             session.detail = s("reason").unwrap_or("").to_string();
         }
+        crate::disk::HALTED_EVENT => {
+            let why = match s("reason") {
+                Some("disk") | None => "disk almost full",
+                Some(other) => other,
+            };
+            let full = s("message").map(|m| format!(" ({m})")).unwrap_or_default();
+            session.halted = Some(format!("halted: {why}{full} · free space, then claude --resume {}", session.id));
+        }
         _ => {}
+    }
+    // The refused tool call's own PreToolUse line can land after the halt; the halt still wins.
+    if let Some(halted) = &session.halted {
+        session.detail = halted.clone();
+        session.set_status(Status::Error, ts);
     }
 }
 
@@ -175,6 +193,19 @@ mod tests {
         assert_eq!(s.detail, "Bash: npm test");
         assert_eq!(s.project(), "web");
         assert_eq!(s.pid, Some(42));
+    }
+
+    #[test]
+    fn a_disk_halt_shows_until_the_session_is_resumed() {
+        let tool = json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "summary": "docker build ."});
+        let halt = json!({"hook_event_name": crate::disk::HALTED_EVENT, "reason": "disk", "message": "96% full, 9.0 GB free"});
+        // The refused call's own PreToolUse line may land after the halt.
+        let s = run(&[tool.clone(), halt.clone(), tool.clone()]);
+        assert_eq!(s.status, Status::Error);
+        assert!(s.detail.starts_with("halted: disk almost full (96% full, 9.0 GB free)"), "{}", s.detail);
+        assert!(s.detail.ends_with(&format!("claude --resume {}", s.id)), "{}", s.detail);
+        let resumed = run(&[tool, halt, json!({"hook_event_name": "SessionStart", "source": "resume"})]);
+        assert_eq!((resumed.status, resumed.halted), (Status::Idle, None));
     }
 
     #[test]

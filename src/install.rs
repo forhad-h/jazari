@@ -35,7 +35,7 @@ fn settings_path() -> PathBuf {
 fn is_ours(entry: &Value) -> bool {
     entry["hooks"].as_array().is_some_and(|hs| {
         hs.iter().any(|h| {
-            h["command"].as_str().is_some_and(|c| c.contains("marsad") && (c.ends_with(" hook") || c.ends_with(CONTEXT_HOOK)))
+            h["command"].as_str().is_some_and(|c| c.contains("marsad") && (c.ends_with(" hook") || c.ends_with(CONTEXT_HOOK) || c.ends_with(GUARD_HOOK)))
         })
     })
 }
@@ -43,8 +43,11 @@ fn is_ours(entry: &Value) -> bool {
 /// Arguments of the prompt hook that adds the handoff warning to a session's context.
 const CONTEXT_HOOK: &str = " context --hook";
 
-/// Registers marsad for every event. The context hook is synchronous: only a hook Claude Code
-/// waits for can add text to the prompt.
+/// Arguments of the hook that checks the disk before each tool call and prompt.
+const GUARD_HOOK: &str = " guard --hook";
+
+/// Registers marsad for every event. The context and disk guard hooks are synchronous: only a hook
+/// Claude Code waits for can add text to the prompt or stop a tool call.
 fn add_hooks(settings: &mut Map<String, Value>, exe: &str) -> anyhow::Result<()> {
     let command = format!("\"{exe}\" hook");
     let hooks = settings.entry("hooks").or_insert_with(|| json!({}));
@@ -58,6 +61,11 @@ fn add_hooks(settings: &mut Map<String, Value>, exe: &str) -> anyhow::Result<()>
         if *event == "UserPromptSubmit" {
             list.push(json!({
                 "hooks": [{ "type": "command", "command": format!("\"{exe}\"{CONTEXT_HOOK}"), "timeout": 5 }]
+            }));
+        }
+        if matches!(*event, "UserPromptSubmit" | "PreToolUse") {
+            list.push(json!({
+                "hooks": [{ "type": "command", "command": format!("\"{exe}\"{GUARD_HOOK}"), "timeout": 5 }]
             }));
         }
     }
@@ -287,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn reinstall_keeps_one_async_and_one_sync_prompt_hook() {
+    fn reinstall_keeps_one_of_each_marsad_hook() {
         let foreign = json!({ "hooks": [{ "type": "command", "command": "echo hi" }] });
         let mut s = settings(json!({ "hooks": { "UserPromptSubmit": [foreign.clone()] } }));
         for _ in 0..2 {
@@ -299,9 +307,17 @@ mod tests {
             .iter()
             .map(|e| (e["hooks"][0]["command"].as_str().unwrap(), e["hooks"][0]["async"] == true))
             .collect();
-        assert_eq!(commands, [("echo hi", false), ("\"/x/marsad\" hook", true), ("\"/x/marsad\" context --hook", false)]);
+        assert_eq!(commands, [
+            ("echo hi", false),
+            ("\"/x/marsad\" hook", true),
+            ("\"/x/marsad\" context --hook", false),
+            ("\"/x/marsad\" guard --hook", false),
+        ]);
+        let tool: Vec<&str> = s["hooks"]["PreToolUse"].as_array().unwrap().iter().map(|e| e["hooks"][0]["command"].as_str().unwrap()).collect();
+        assert_eq!(tool, ["\"/x/marsad\" hook", "\"/x/marsad\" guard --hook"], "the disk guard checks every tool call");
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1, "other events get only the async hook");
         strip(&mut s);
-        assert_eq!(s["hooks"]["UserPromptSubmit"], json!([foreign]), "uninstall removes both");
+        assert_eq!(s["hooks"]["UserPromptSubmit"], json!([foreign]), "uninstall removes all three");
+        assert!(s["hooks"].get("PreToolUse").is_none());
     }
 }

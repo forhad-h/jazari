@@ -392,6 +392,8 @@ pub struct Session {
     pub model: Option<String>,
     pub title: Option<String>,
     pub pid: Option<u32>,
+    /// Why marsad's guard stopped the session and how to resume it, until it is resumed.
+    pub halted: Option<String>,
     pub subagents: BTreeMap<String, Subagent>,
     pub stats: TranscriptStats,
     pub snapshot: Option<StatusSnapshot>,
@@ -416,6 +418,7 @@ impl Session {
             model: None,
             title: None,
             pid: None,
+            halted: None,
             subagents: BTreeMap::new(),
             stats: TranscriptStats::default(),
             snapshot: None,
