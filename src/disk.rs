@@ -20,6 +20,10 @@ pub struct Reading {
     pub path: PathBuf,
     pub total: u64,
     pub available: u64,
+    /// The volume holding the home folder, where swap and the system's own files fill up too.
+    /// Only there do the free-space floors apply; elsewhere (a small tmpfs, a USB stick, a
+    /// devcontainer disk) a level is reached by percent alone.
+    pub system: bool,
 }
 
 impl Reading {
@@ -44,7 +48,7 @@ pub fn measure(path: &Path) -> Option<Reading> {
         return None;
     }
     let block = u64::from(s.f_bsize);
-    Some(Reading { path: path.to_path_buf(), total: s.f_blocks.saturating_mul(block), available: s.f_bavail.saturating_mul(block) })
+    reading(path, s.f_blocks.saturating_mul(block), s.f_bavail.saturating_mul(block))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -58,15 +62,27 @@ pub fn measure(path: &Path) -> Option<Reading> {
     }
     #[allow(clippy::unnecessary_cast, clippy::useless_conversion)]
     let (frsize, blocks, bavail) = (s.f_frsize as u64, s.f_blocks as u64, s.f_bavail as u64);
-    Some(Reading { path: path.to_path_buf(), total: blocks.saturating_mul(frsize), available: bavail.saturating_mul(frsize) })
+    reading(path, blocks.saturating_mul(frsize), bavail.saturating_mul(frsize))
 }
 
 /// Elsewhere, the disk whose mount point is the longest one containing `path`.
 #[cfg(not(unix))]
 pub fn measure(path: &Path) -> Option<Reading> {
     let disks = sysinfo::Disks::new_with_refreshed_list();
-    let disk = disks.list().iter().filter(|d| path.starts_with(d.mount_point())).max_by_key(|d| d.mount_point().as_os_str().len())?;
-    Some(Reading { path: path.to_path_buf(), total: disk.total_space(), available: disk.available_space() })
+    let mount = |p: &Path| disks.list().iter().filter(|d| p.starts_with(d.mount_point())).max_by_key(|d| d.mount_point().as_os_str().len());
+    let disk = mount(path)?;
+    let system = dirs::home_dir().and_then(|h| mount(&h)).is_some_and(|h| h.mount_point() == disk.mount_point());
+    (disk.total_space() > 0).then(|| Reading { path: path.to_path_buf(), total: disk.total_space(), available: disk.available_space(), system })
+}
+
+/// A reading from statfs figures. A volume reporting no size (some FUSE and network mounts) can't be
+/// judged, so it gives none rather than reading as full.
+#[cfg(unix)]
+fn reading(path: &Path, total: u64, available: u64) -> Option<Reading> {
+    use std::os::unix::fs::MetadataExt;
+    let dev = |p: &Path| std::fs::metadata(p).ok().map(|m| m.dev());
+    let system = dirs::home_dir().is_some_and(|h| dev(&h).is_some() && dev(&h) == dev(path));
+    (total > 0).then(|| Reading { path: path.to_path_buf(), total, available, system })
 }
 
 /// Identifies the volume holding `path`, so two folders on one disk are shown once.
@@ -163,8 +179,13 @@ impl Thresholds {
             .map_or(Level::Ok, |(level, _)| *level)
     }
 
+    /// Free space that counts toward the floors: all of it on the home volume, none elsewhere.
+    fn floor_space(r: &Reading, available: f64) -> f64 {
+        if r.system { available } else { f64::INFINITY }
+    }
+
     pub fn level(&self, r: &Reading) -> Level {
-        self.level_at(r.used_pct(), r.available as f64)
+        self.level_at(r.used_pct(), Self::floor_space(r, r.available as f64))
     }
 
     /// One observation of the disk against the level last announced. Returns the level to announce
@@ -173,7 +194,7 @@ impl Thresholds {
     pub fn step(&self, r: &Reading, announced: Level) -> (Option<Level>, Level) {
         let now = self.level(r);
         let margin = r.total as f64 * HYSTERESIS_PCT / 100.0;
-        let near = self.level_at(r.used_pct() + HYSTERESIS_PCT, r.available as f64 - margin);
+        let near = self.level_at(r.used_pct() + HYSTERESIS_PCT, Self::floor_space(r, r.available as f64 - margin));
         let announced = announced.min(near);
         if now > announced { (Some(now), now) } else { (None, announced) }
     }
@@ -524,7 +545,7 @@ mod tests {
 
     /// A 228 GB disk with `free` GB available.
     fn disk(free: f64) -> Reading {
-        Reading { path: "/x".into(), total: (228.0 * GB) as u64, available: (free * GB) as u64 }
+        Reading { system: true, path: "/x".into(), total: (228.0 * GB) as u64, available: (free * GB) as u64 }
     }
 
     #[test]
@@ -536,18 +557,30 @@ mod tests {
         assert_eq!(t.level(&disk(10.0)), Level::Critical, "95.6% full");
         assert_eq!(t.level(&disk(2.0)), Level::Emergency);
         // On a 2 TB disk, 95% full still leaves 100 GB: only the percent fires.
-        let big = Reading { path: "/x".into(), total: (2000.0 * GB) as u64, available: (100.0 * GB) as u64 };
+        let big = Reading { system: true, path: "/x".into(), total: (2000.0 * GB) as u64, available: (100.0 * GB) as u64 };
         assert_eq!(t.level(&big), Level::Critical);
         // On a small disk the free-space floor fires first.
-        let small = Reading { path: "/x".into(), total: (64.0 * GB) as u64, available: (7.0 * GB) as u64 };
+        let small = Reading { system: true, path: "/x".into(), total: (64.0 * GB) as u64, available: (7.0 * GB) as u64 };
         assert_eq!(t.level(&small), Level::Critical, "89% full but under 8 GB free");
-        assert_eq!(t.level(&Reading { path: "/x".into(), total: 0, available: 0 }), Level::Emergency);
+        assert_eq!(t.level(&Reading { system: true, path: "/x".into(), total: 0, available: 0 }), Level::Emergency);
+    }
+
+    #[test]
+    fn free_space_floors_apply_only_on_the_home_volume() {
+        let t = Thresholds::default();
+        // A 4 GB tmpfs with 3 GB free is 25% full: fine, though it is under every floor.
+        let tmp = Reading { system: false, path: "/tmp".into(), total: (4.0 * GB) as u64, available: (3.0 * GB) as u64 };
+        assert_eq!(t.level(&tmp), Level::Ok);
+        assert_eq!(t.level(&Reading { available: (0.1 * GB) as u64, ..tmp.clone() }), Level::Critical, "97.5% full");
+        assert_eq!(t.level(&Reading { system: true, ..tmp }), Level::Critical, "the same figures on the home volume: under 8 GB free");
+        #[cfg(unix)]
+        assert!(reading(Path::new("/"), 0, 0).is_none(), "a volume reporting no size can't be judged");
     }
 
     #[test]
     fn each_level_is_announced_once_per_crossing() {
         let t = Thresholds { limits: [80.0, 90.0, 95.0, 98.0].map(|pct| Limit { pct, free_gb: 0.0 }) };
-        let pct = |p: f64| Reading { path: "/x".into(), total: 1000, available: (1000.0 - p * 10.0) as u64 };
+        let pct = |p: f64| Reading { system: true, path: "/x".into(), total: 1000, available: (1000.0 - p * 10.0) as u64 };
         let mut announced = Level::Ok;
         let mut out = Vec::new();
         for p in [70.0, 80.5, 79.0, 81.0, 90.0, 96.0, 95.5, 93.5, 96.0, 92.0, 96.0, 77.0, 85.0] {
@@ -652,7 +685,7 @@ mod tests {
         let t = Thresholds::default();
         let read = |p: &Path| match p.to_str()? {
             "/home" => Some(disk(100.0)),
-            "/scratch" => Some(Reading { path: p.into(), ..disk(5.0) }),
+            "/scratch" => Some(Reading { system: true, path: p.into(), ..disk(5.0) }),
             _ => None,
         };
         let (level, r) = worst([Path::new("/home"), Path::new("/gone"), Path::new("/scratch")], &t, read).unwrap();

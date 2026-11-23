@@ -53,6 +53,8 @@ pub enum Action {
     GitWorktreeRemove { repo: PathBuf, path: PathBuf },
     /// `docker volume rm` of one volume no container uses.
     DockerVolumeRm(String),
+    /// `docker rm` of one stopped container, by id.
+    DockerContainerRm(String),
     /// Report only.
     None,
 }
@@ -92,6 +94,8 @@ pub struct Env {
     pub projects: Vec<(PathBuf, f64)>,
     /// Names of running processes, lowercased, without `.exe`.
     pub running: HashSet<String>,
+    /// Working folders of running processes, so a subagent busy in a worktree keeps it.
+    pub cwds: Vec<PathBuf>,
     pub run: Runner,
 }
 
@@ -113,12 +117,13 @@ impl Env {
             })
             .collect();
         let mut sys = System::new();
-        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cwd(sysinfo::UpdateKind::Always));
         let running = sys
             .processes()
             .values()
             .map(|p| p.name().to_string_lossy().to_lowercase().trim_end_matches(".exe").to_string())
             .collect();
+        let cwds = sys.processes().values().filter_map(|p| p.cwd().map(Path::to_path_buf)).collect();
         Env {
             home: dirs::home_dir().unwrap_or_default(),
             temp: std::env::temp_dir(),
@@ -126,6 +131,7 @@ impl Env {
             live,
             projects,
             running,
+            cwds,
             run: Box::new(run_with_timeout),
         }
     }
@@ -314,6 +320,11 @@ fn is_live(root: &Path, env: &Env) -> bool {
     env.live.iter().any(|l| l.starts_with(root) || (root.starts_with(l) && l != &env.home))
 }
 
+/// Whether a session or any process is working inside `path`.
+fn in_use(path: &Path, env: &Env) -> bool {
+    env.live.iter().chain(&env.cwds).any(|l| l.starts_with(path))
+}
+
 /// Whether git says the folder is ignored, meaning it holds nothing committed.
 fn git_ignored(path: &Path, env: &Env) -> bool {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return false };
@@ -403,13 +414,17 @@ fn worktree_items(roots: &[(PathBuf, f64)], env: &Env) -> Vec<Item> {
     };
     let mut out = Vec::new();
     for (root, _) in roots {
+        // A session in the repo may have subagents working in its worktrees.
+        if is_live(root, env) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(root.join(".claude/worktrees")) else { continue };
         let default = git(root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).filter(|b| !b.is_empty()).unwrap_or_else(|| "main".into());
         for e in entries.flatten() {
             let path = e.path();
             // A subagent working in a worktree is not a session of its own, so recent changes count as use.
             let recent = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a < WORKTREE_QUIET);
-            if !e.file_type().is_ok_and(|t| t.is_dir()) || recent || env.live.iter().any(|l| l.starts_with(&path)) {
+            if !e.file_type().is_ok_and(|t| t.is_dir()) || recent || in_use(&path, env) {
                 continue;
             }
             let Some(status) = git(&path, &["status", "--porcelain"]) else { continue };
@@ -448,18 +463,13 @@ fn docker_items(env: &Env) -> Vec<Item> {
         let (id, tier, what, action): (&str, Tier, &str, Action) = match v["Type"].as_str().unwrap_or("") {
             "Build Cache" => ("docker-build-cache", Tier::A, "Docker build cache", Action::Docker(&["builder", "prune", "-a", "-f"])),
             "Images" => ("docker-unused-images", Tier::B, "Docker images no container uses", Action::Docker(&["image", "prune", "-a", "-f"])),
-            "Containers" => (
-                "docker-stopped-containers",
-                Tier::B,
-                "Docker containers stopped for over 7 days",
-                Action::Docker(&["container", "prune", "-f", "--filter", "until=168h"]),
-            ),
             _ => continue,
         };
         if bytes >= MIN_BYTES {
             out.push(Item { id: id.into(), tier, what: what.into(), bytes, action, note: note.clone() });
         }
     }
+    out.extend(stopped_containers(env));
     // Each volume no container uses, named, since one may hold a database.
     let Some(text) = (env.run)("docker", &["system", "df", "-v", "--format", "{{json .}}"], Duration::from_secs(15)) else { return out };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim()) else { return out };
@@ -485,6 +495,58 @@ fn docker_items(env: &Env) -> Vec<Item> {
     out
 }
 
+/// How long a container must have been stopped before it is offered.
+const CONTAINER_STOPPED_SECS: f64 = 7.0 * 86_400.0;
+
+/// Each container stopped for over a week, one item apiece: its own writable layer can hold data
+/// (a database kept without a volume), so they are never pruned together.
+fn stopped_containers(env: &Env) -> Vec<Item> {
+    let Some(list) = (env.run)("docker", &["ps", "-a", "--filter", "status=exited", "--size", "--format", "{{json .}}"], Duration::from_secs(15)) else {
+        return Vec::new();
+    };
+    let rows: Vec<serde_json::Value> = list.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let ids: Vec<&str> = rows.iter().filter_map(|r| r["ID"].as_str()).filter(|id| valid_container_id(id)).collect();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    // When each one stopped: `docker ps` only says when it was created.
+    let mut args = vec!["inspect", "--format", "{{.Id}} {{.State.FinishedAt}}"];
+    args.extend(&ids);
+    let finished: Vec<(String, f64)> = (env.run)("docker", &args, Duration::from_secs(15))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (id, at) = l.split_once(' ')?;
+            Some((id.to_string(), chrono::DateTime::parse_from_rfc3339(at.trim()).ok()?.timestamp() as f64))
+        })
+        .collect();
+    let mut out = Vec::new();
+    for r in rows {
+        let Some(id) = r["ID"].as_str().filter(|id| valid_container_id(id)) else { continue };
+        let Some((_, at)) = finished.iter().find(|(full, _)| full.starts_with(id)) else { continue };
+        let bytes = parse_size(r["Size"].as_str().unwrap_or(""));
+        let days = (env.now - at) / 86_400.0;
+        if env.now - at < CONTAINER_STOPPED_SECS || bytes < MIN_BYTES {
+            continue;
+        }
+        let (name, image) = (r["Names"].as_str().unwrap_or(id), r["Image"].as_str().unwrap_or(""));
+        out.push(Item {
+            id: format!("docker-container:{id}"),
+            tier: Tier::C,
+            what: format!("stopped Docker container {name} ({image})"),
+            bytes,
+            action: Action::DockerContainerRm(id.to_string()),
+            note: format!("stopped {days:.0} days ago; its own files go with it"),
+        });
+    }
+    out
+}
+
+/// Container ids as Docker prints them: hex only, so one can never read as a flag.
+fn valid_container_id(id: &str) -> bool {
+    (12..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Docker volume names marsad passes to `docker volume rm`: letters, digits, `_`, `.` and `-`.
 fn valid_volume_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('-') && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
@@ -492,6 +554,10 @@ fn valid_volume_name(name: &str) -> bool {
 
 /// Everything that could be cleaned, largest first within each tier.
 pub fn plan(env: &Env) -> Vec<Item> {
+    // Without a real home folder every path check below would pass.
+    if !env.home.is_absolute() {
+        return Vec::new();
+    }
     let mut items = Vec::new();
     for c in CACHES {
         let Some(path) = c.paths.iter().map(|p| env.home.join(p)).find(|p| p.is_dir()) else { continue };
@@ -563,6 +629,9 @@ pub fn plan(env: &Env) -> Vec<Item> {
 
 /// The last checks right before a folder is deleted. Returns why it must be kept, if it must.
 pub fn check_remove(path: &Path, kind: &DirKind, env: &Env) -> Result<(), String> {
+    if !env.home.is_absolute() || !path.is_absolute() {
+        return Err("the home folder or the path isn't known for certain".into());
+    }
     let meta = std::fs::symlink_metadata(path).map_err(|_| "it no longer exists".to_string())?;
     if meta.file_type().is_symlink() || !meta.is_dir() {
         return Err("it is not a plain folder".into());
@@ -641,9 +710,16 @@ pub fn run_item(item: &Item, env: &Env, measure: &dyn Fn() -> Option<u64>) -> Ou
             // Without -f, Docker refuses a volume a container still uses.
             (env.run)("docker", &["volume", "rm", name], Duration::from_secs(60)).map(|_| ()).ok_or_else(|| "docker refused (a container may use it)".to_string())
         }
+        Action::DockerContainerRm(id) => {
+            if !valid_container_id(id) {
+                return Outcome::Kept("not a container id".into());
+            }
+            // Without -f, Docker refuses a running container.
+            (env.run)("docker", &["rm", id], Duration::from_secs(60)).map(|_| ()).ok_or_else(|| "docker refused (it may be running again)".to_string())
+        }
         Action::GitWorktreeRemove { repo, path } => {
-            if env.live.iter().any(|l| l.starts_with(path)) {
-                return Outcome::Kept("a session is running in it".into());
+            if is_live(repo, env) || in_use(path, env) {
+                return Outcome::Kept("a session or process is working in it".into());
             }
             let (repo, path) = (repo.to_string_lossy(), path.to_string_lossy());
             // Without --force, git refuses a worktree with changes.
@@ -668,7 +744,7 @@ pub fn run_and_record(item: &Item, env: &Env, auto: bool) -> Outcome {
     {
         let path = match &item.action {
             Action::RemoveDir { path, .. } | Action::GitWorktreeRemove { path, .. } => path.display().to_string(),
-            Action::DockerVolumeRm(name) => name.clone(),
+            Action::DockerVolumeRm(name) | Action::DockerContainerRm(name) => name.clone(),
             _ => String::new(),
         };
         let c = crate::store::Cleanup { item: &item.id, tier: item.tier.key(), path: &path, estimated: item.bytes, freed: *freed, auto };
@@ -917,6 +993,7 @@ mod tests {
             live: Vec::new(),
             projects: Vec::new(),
             running: HashSet::new(),
+            cwds: Vec::new(),
             run: Box::new(move |prog, args, _| match prog {
                 "git" if !tracked.iter().any(|t| args.contains(t)) => Some(String::new()),
                 _ => None,
@@ -1055,6 +1132,11 @@ mod tests {
         assert_eq!(check_remove(&web.join(".next"), &kind, &e), Ok(()));
         e.live = vec![web.clone()];
         assert!(check_remove(&web.join(".next"), &kind, &e).unwrap_err().contains("session"));
+        // Without a home folder nothing is planned or removed.
+        let mut lost = env(Path::new(""), 0.0, &[]);
+        lost.temp = PathBuf::new();
+        assert!(check_remove(&cache, &npm, &lost).is_err());
+        assert!(plan(&lost).is_empty());
         // A session in the home folder itself doesn't make every project live.
         e.live = vec![home.clone()];
         assert_eq!(check_remove(&web.join(".next"), &kind, &e), Ok(()));
@@ -1132,7 +1214,8 @@ mod tests {
             }
         }
         let mut e = env(&t.0, 0.0, &[]);
-        e.live = vec![repo.join(".claude/worktrees/live")];
+        // A subagent's process works in one; it is no session of its own.
+        e.cwds = vec![repo.join(".claude/worktrees/live/src")];
         e.run = Box::new(|prog, args, _| {
             if prog != "git" {
                 return None;
@@ -1155,6 +1238,35 @@ mod tests {
         assert_eq!(got, [("ahead".to_string(), Tier::C, false), ("dirty".into(), Tier::C, false), ("done".into(), Tier::B, true)]);
         assert!(items[0].note.contains("not in origin/main"));
         assert!(items[2].note.starts_with("branch done-branch is merged"), "{}", items[2].note);
+        // A session in the repo may have subagents in any of its worktrees: none is offered.
+        e.live = vec![repo.clone()];
+        assert!(worktree_items(&[(repo.clone(), 0.0)], &e).is_empty());
+        let item = Item { id: "w".into(), tier: Tier::B, what: "w".into(), bytes: 1, action: Action::GitWorktreeRemove { repo: repo.clone(), path: repo.join(".claude/worktrees/done") }, note: String::new() };
+        assert!(matches!(run_item(&item, &e, &|| None), Outcome::Kept(_)), "rechecked before removing");
+    }
+
+    #[test]
+    fn containers_are_offered_one_by_one_by_when_they_stopped() {
+        let t = tree("containers");
+        let mut e = env(&t.0, 30.0 * 86_400.0, &[]);
+        e.run = Box::new(|prog, args, _| match (prog, args.first()) {
+            ("docker", Some(&"ps")) => Some(
+                [
+                    r#"{"ID":"aaaaaaaaaaaa","Names":"pg","Image":"postgres:16","Size":"900MB (virtual 1.3GB)"}"#,
+                    r#"{"ID":"bbbbbbbbbbbb","Names":"fresh","Image":"redis","Size":"200MB (virtual 300MB)"}"#,
+                    r#"{"ID":"--rm-all","Names":"x","Image":"x","Size":"9GB"}"#,
+                ]
+                .join("\n"),
+            ),
+            // Created long ago both, but `fresh` stopped only yesterday.
+            ("docker", Some(&"inspect")) => Some("aaaaaaaaaaaa11 1970-01-02T00:00:00.5Z\nbbbbbbbbbbbb22 1970-01-30T00:00:00Z\n".into()),
+            _ => None,
+        });
+        let items = stopped_containers(&e);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!((items[0].tier, items[0].what.as_str()), (Tier::C, "stopped Docker container pg (postgres:16)"));
+        assert_eq!(items[0].action, Action::DockerContainerRm("aaaaaaaaaaaa".into()));
+        assert!(!valid_container_id("--rm-all") && !valid_container_id("abc"));
     }
 
     #[test]
