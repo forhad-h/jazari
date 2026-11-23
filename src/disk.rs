@@ -333,7 +333,13 @@ pub fn hook() -> Option<String> {
         verdict = with_note(verdict, note);
         refuse = no;
     }
-    respond(event, verdict, refuse, |note| crate::risk::hook(&raw, id, note)).map(|v| v.to_string())
+    // A marsad command that acts, or an edit to marsad's own files, waits for the user's yes first.
+    let ask = if event == "PreToolUse" { crate::act::hook_check(&raw) } else { None };
+    respond(event, verdict, refuse, |note| match ask {
+        Some(reason) => Some(crate::act::ask_json(&reason, note)),
+        None => crate::risk::hook(&raw, id, note),
+    })
+    .map(|v| v.to_string())
 }
 
 /// Adds `note` to a note verdict, or makes one; a halt stays as it is.

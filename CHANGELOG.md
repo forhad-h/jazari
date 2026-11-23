@@ -3,6 +3,16 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- Every action marsad takes (messages, stops, interrupts, cleanups, settings, updates) goes through one gate
+- `marsad actions` lists what marsad did, refused or held, and who asked
+- `marsad pause [--for 2h]` / `marsad resume` hold everything marsad does on its own
+- A session gets a permission prompt before a marsad command that stops sessions, removes items or changes a guard
+- A message from another session is marked as not from you
+- The same interrupt can't fire twice within 30 seconds
+- `marsad disk --guard off` also stops the watcher's emergency interrupts
+- `MARSAD_DRY_RUN=1` shows what any action would do without doing it
 ## 0.13.0 - 2026-11-23
 
 - Run `marsad install` again after updating: it adds the new guard, message and handoff hooks

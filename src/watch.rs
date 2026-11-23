@@ -28,6 +28,8 @@ pub struct Settings {
     pub ntfy: Option<String>,
     /// A URL that gets a JSON POST.
     pub webhook: Option<String>,
+    /// `disk.guard` is off: sessions are warned but never interrupted.
+    pub guard_off: bool,
 }
 
 impl Settings {
@@ -40,7 +42,8 @@ impl Settings {
                 .map(String::from)
         };
         let gb = disk.and_then(|d| d.get("ballast_gb")).and_then(Value::as_f64).filter(|g| g.is_finite() && *g > 0.0).unwrap_or(0.0);
-        Settings { ballast: (gb.min(1000.0) * GB) as u64, ntfy: url("ntfy"), webhook: url("webhook") }
+        let guard_off = disk.and_then(|d| d.get("guard")).and_then(Value::as_bool) == Some(false);
+        Settings { ballast: (gb.min(1000.0) * GB) as u64, ntfy: url("ntfy"), webhook: url("webhook"), guard_off }
     }
 
     pub fn load() -> Self {
@@ -62,6 +65,7 @@ type Measure = Box<dyn Fn(&Path) -> Option<Reading>>;
 type Alert = Box<dyn FnMut(&str, &str)>;
 type Curl = Box<dyn FnMut(&[String])>;
 type Halted = Box<dyn FnMut(&str, &Reading)>;
+type Interrupt = Box<dyn FnMut(u32, &str) -> bool>;
 
 /// Everything the watcher reads from or does to the machine, so tests can replace it.
 pub struct Env {
@@ -85,8 +89,8 @@ pub struct Env {
     /// Whether the pid is still a Claude Code process that started by the given time, so a reused
     /// pid never gets the signal.
     pub is_claude: Box<dyn Fn(u32, f64) -> bool>,
-    /// Sends SIGINT; true when it was delivered.
-    pub interrupt: Box<dyn FnMut(u32) -> bool>,
+    /// Sends SIGINT to the session's process; true when it was delivered.
+    pub interrupt: Interrupt,
     /// Records that a session was stopped, so the dashboard marks it.
     pub halted: Halted,
     /// The ballast file.
@@ -139,7 +143,7 @@ impl Watcher {
             if self.announced < Level::Emergency {
                 self.interrupted.clear();
             }
-            if level == Level::Emergency {
+            if level == Level::Emergency && !settings.guard_off {
                 let hit: Vec<Live> = on_full_volume(&sessions, &reading, &t, &env.measure).into_iter().cloned().collect();
                 self.interrupt(env, &hit, &reading);
             }
@@ -176,7 +180,7 @@ impl Watcher {
                 continue;
             }
             self.interrupted.insert(pid);
-            if (env.interrupt)(pid) {
+            if (env.interrupt)(pid, &s.id) {
                 (env.halted)(&s.id, reading);
             }
         }
@@ -352,30 +356,59 @@ fn on_full_volume<'a>(sessions: &'a [Live], full: &Reading, t: &Thresholds, meas
 const START_SLACK_SECS: f64 = 120.0;
 
 /// A process's name, executable and start time (Unix seconds).
-fn process(pid: u32) -> Option<(String, Option<PathBuf>, u64)> {
+/// A process's name, executable, command line and start time (Unix seconds).
+struct Proc {
+    name: String,
+    exe: Option<PathBuf>,
+    cmd: String,
+    started: u64,
+}
+
+fn process(pid: u32) -> Option<Proc> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut sys = System::new();
     let pid = Pid::from_u32(pid);
-    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet));
+    let what = ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet).with_cmd(UpdateKind::OnlyIfNotSet);
+    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, what);
     let p = sys.process(pid)?;
-    Some((p.name().to_string_lossy().into_owned(), p.exe().map(Path::to_path_buf), p.start_time()))
+    let cmd = p.cmd().iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ");
+    Some(Proc { name: p.name().to_string_lossy().into_owned(), exe: p.exe().map(Path::to_path_buf), cmd, started: p.start_time() })
+}
+
+impl Proc {
+    fn is_claude(&self) -> bool {
+        looks_like_claude(&self.name, self.exe.as_deref(), &self.cmd)
+    }
+
+    /// Claude Code, already running when the session's run started; a pid reused by a newer
+    /// process fails this.
+    fn is_session(&self, since: f64) -> bool {
+        self.is_claude() && self.started as f64 <= since + START_SLACK_SECS
+    }
+}
+
+/// Whether the pid is a Claude Code process.
+pub(crate) fn is_claude_process(pid: u32) -> bool {
+    process(pid).is_some_and(|p| p.is_claude())
 }
 
 fn is_marsad(pid: u32) -> bool {
-    process(pid).is_some_and(|(name, ..)| name.to_lowercase().contains("marsad"))
+    process(pid).is_some_and(|p| p.name.to_lowercase().contains("marsad"))
 }
 
-/// Claude Code runs as `claude`, as `node` (npm installs), or as a binary named after its version
-/// inside a `claude` folder (native installs).
-fn looks_like_claude(name: &str, exe: Option<&Path>) -> bool {
+/// Claude Code runs as `claude`, as `node` running Claude Code's script (npm installs), or as a
+/// binary named after its version inside a `claude` folder (native installs).
+fn looks_like_claude(name: &str, exe: Option<&Path>, cmd: &str) -> bool {
     let name = name.to_lowercase();
     let name = name.trim_end_matches(".exe");
-    name.contains("claude") || name == "node" || exe.is_some_and(|e| e.to_string_lossy().to_lowercase().contains("claude"))
+    name.contains("claude")
+        || (name == "node" && cmd.to_lowercase().contains("claude"))
+        || exe.is_some_and(|e| e.to_string_lossy().to_lowercase().contains("claude"))
 }
 
 /// Ends the session's Claude Code process if it is still that process; true when it was told to.
 pub(crate) fn end_session(pid: u32, since: f64) -> bool {
-    pid > 1 && pid != std::process::id() && process(pid).is_some_and(|(name, exe, started)| still_the_session(&name, exe.as_deref(), started, since)) && terminate(pid)
+    pid > 1 && pid != std::process::id() && process(pid).is_some_and(|p| p.is_session(since)) && terminate(pid)
 }
 
 #[cfg(unix)]
@@ -397,13 +430,7 @@ fn terminate(pid: u32) -> bool {
 
 /// Sends SIGINT to the session's Claude Code process if it is still that process; true when sent.
 pub(crate) fn interrupt_session(pid: u32, since: f64) -> bool {
-    pid > 1 && pid != std::process::id() && process(pid).is_some_and(|(name, exe, started)| still_the_session(&name, exe.as_deref(), started, since)) && sigint(pid)
-}
-
-/// The process is Claude Code and was already running when the session's run started; a pid
-/// reused by a newer process fails this.
-fn still_the_session(name: &str, exe: Option<&Path>, started: u64, since: f64) -> bool {
-    looks_like_claude(name, exe) && started as f64 <= since + START_SLACK_SECS
+    pid > 1 && pid != std::process::id() && process(pid).is_some_and(|p| p.is_session(since)) && sigint(pid)
 }
 
 /// Starts the watcher, detached, unless one is already running.
@@ -469,8 +496,11 @@ impl Env {
                 out.sort_by_key(|i| std::cmp::Reverse(i.1));
                 out
             }),
-            is_claude: Box::new(|pid, since| process(pid).is_some_and(|(name, exe, started)| still_the_session(&name, exe.as_deref(), started, since))),
-            interrupt: Box::new(sigint),
+            is_claude: Box::new(|pid, since| process(pid).is_some_and(|p| p.is_session(since))),
+            interrupt: Box::new(|pid, id| {
+                let a = crate::act::Action::new(crate::act::Kind::Interrupt, id).detail("disk at the emergency level").on_its_own(true);
+                crate::act::run(&a, || if sigint(pid) { Ok(()) } else { anyhow::bail!("the signal wasn't delivered") }).is_ok()
+            }),
             halted: Box::new(crate::disk::log_halt),
             ballast: ballast_path(),
         }
@@ -566,8 +596,8 @@ mod tests {
             clean: Box::new(move |l| s3.borrow_mut().cleans.push(l)),
             pressure: Box::new(move || p.borrow_mut().pop()),
             suggest: Box::new(|| vec![("Docker build cache".into(), 30_000_000_000), ("npm cache".into(), 7_200_000_000)]),
-            is_claude: Box::new(move |pid, since| since >= 0.0 && names(pid).is_some_and(|n| looks_like_claude(n, None))),
-            interrupt: Box::new(move |pid| {
+            is_claude: Box::new(move |pid, since| since >= 0.0 && names(pid).is_some_and(|n| looks_like_claude(n, None, "node /usr/local/bin/claude"))),
+            interrupt: Box::new(move |pid, _| {
                 s4.borrow_mut().interrupts.push(pid);
                 true
             }),
@@ -651,12 +681,26 @@ mod tests {
     }
 
     #[test]
+    fn with_the_guard_off_the_emergency_warns_but_interrupts_nothing() {
+        let (f, mut env) = fake(temp("guard-off").join("ballast"));
+        *f.settings.borrow_mut() = Settings { guard_off: true, ..Settings::default() };
+        *f.sessions.borrow_mut() = vec![live("claude", Some(100))];
+        *f.disk.borrow_mut() = pct(98.5);
+        Watcher::default().tick(&mut env);
+        assert!(f.seen.borrow().interrupts.is_empty());
+        assert!(!f.seen.borrow().alerts.is_empty());
+        assert!(Settings::from_settings(Some(&serde_json::json!({ "guard": false }))).guard_off);
+        assert!(!Settings::from_settings(Some(&serde_json::json!({}))).guard_off);
+    }
+
+    #[test]
     fn plausible_claude_code_process_names() {
-        assert!(looks_like_claude("claude", None));
-        assert!(looks_like_claude("node.exe", None));
-        assert!(looks_like_claude("2.1.0", Some(Path::new("/Users/me/.local/share/claude/versions/2.1.0"))));
-        assert!(!looks_like_claude("2.1.0", None));
-        assert!(!looks_like_claude("python3", Some(Path::new("/usr/bin/python3"))));
+        assert!(looks_like_claude("claude", None, ""));
+        assert!(looks_like_claude("node.exe", None, "node C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js"));
+        assert!(!looks_like_claude("node", None, "node server.js"));
+        assert!(looks_like_claude("2.1.0", Some(Path::new("/Users/me/.local/share/claude/versions/2.1.0")), ""));
+        assert!(!looks_like_claude("2.1.0", None, ""));
+        assert!(!looks_like_claude("python3", Some(Path::new("/usr/bin/python3")), ""));
     }
 
     #[test]
@@ -723,7 +767,7 @@ mod tests {
 
     #[test]
     fn phone_payloads_carry_the_level_and_space_but_no_paths() {
-        let s = Settings { ballast: 0, ntfy: Some("https://ntfy.sh/topic".into()), webhook: Some("https://example.com/hook".into()) };
+        let s = Settings { ballast: 0, ntfy: Some("https://ntfy.sh/topic".into()), webhook: Some("https://example.com/hook".into()), guard_off: false };
         let r = Reading { system: true, path: "/Users/me/secret-project".into(), ..pct(91.04) };
         assert!(phone_requests(&s, Level::Notice, &r).is_empty());
         let reqs = phone_requests(&s, Level::Warning, &r);
@@ -743,7 +787,7 @@ mod tests {
     #[test]
     fn settings_parse_the_ballast_and_only_web_urls() {
         let s = Settings::from_settings(Some(&json!({ "ballast_gb": 2.5, "ntfy": "https://ntfy.sh/x", "webhook": "file:///etc/passwd" })));
-        assert_eq!(s, Settings { ballast: 2_500_000_000, ntfy: Some("https://ntfy.sh/x".into()), webhook: None });
+        assert_eq!(s, Settings { ballast: 2_500_000_000, ntfy: Some("https://ntfy.sh/x".into()), webhook: None, guard_off: false });
         assert_eq!(Settings::from_settings(Some(&json!({ "ballast_gb": -1 }))), Settings::default());
         assert_eq!(Settings::from_settings(None), Settings::default());
     }
@@ -767,10 +811,11 @@ mod tests {
 
     #[test]
     fn a_reused_pid_is_never_interrupted() {
-        assert!(still_the_session("claude", None, 1_000, 1_010.0));
-        assert!(still_the_session("node", None, 1_100, 1_010.0), "within the start slack");
-        assert!(!still_the_session("node", None, 5_000, 1_010.0), "a newer process took the pid");
-        assert!(!still_the_session("python", None, 1_000, 1_010.0));
+        let p = |name: &str, started| Proc { name: name.into(), exe: None, cmd: format!("{name} /usr/local/lib/claude-code/cli.js"), started };
+        assert!(p("claude", 1_000).is_session(1_010.0));
+        assert!(p("node", 1_100).is_session(1_010.0), "within the start slack");
+        assert!(!p("node", 5_000).is_session(1_010.0), "a newer process took the pid");
+        assert!(!p("python", 1_000).is_session(1_010.0));
     }
 
     #[test]

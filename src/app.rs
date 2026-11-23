@@ -1027,11 +1027,11 @@ impl App {
 
     fn apply_control(&mut self, c: &Control) {
         if c.interrupt {
-            let sent = self.sessions.get(&c.session).is_some_and(crate::channel::interrupt);
-            if sent {
-                self.info = Some(format!("interrupted {} ", c.name));
-            } else {
-                self.error = Some(format!("couldn't interrupt {}: its Claude Code process isn't known or has changed ", c.name));
+            let sent = self.sessions.get(&c.session).map(crate::channel::interrupt);
+            match sent {
+                Some(Ok(())) => self.info = Some(format!("interrupted {} ", c.name)),
+                Some(Err(e)) => self.error = Some(format!("couldn't interrupt {}: {e:#} ", c.name)),
+                None => self.error = Some(format!("couldn't interrupt {}: the session is gone ", c.name)),
             }
         } else {
             match crate::channel::request_stop(&c.session) {

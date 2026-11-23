@@ -1,3 +1,4 @@
+mod act;
 mod alerts;
 mod app;
 mod badge_art;
@@ -132,6 +133,12 @@ enum Cmd {
     },
     /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
     Update(update::UpdateArgs),
+    /// Hold what marsad does on its own (interrupting or ending sessions, cleaning up, updating).
+    Pause(act::PauseArgs),
+    /// Turn marsad's own actions back on after `marsad pause`.
+    Resume,
+    /// What marsad did, refused or held: messages, stops, cleanups, setting changes and more.
+    Actions(act::ActionsArgs),
 }
 
 /// The folder `MARSAD_HOME` names, which replaces both `data_dir` and `legacy_dir`.
@@ -188,6 +195,18 @@ fn main() -> anyhow::Result<()> {
     {
         eprintln!("{note}");
     }
+    act::set_origin(match &cmd {
+        None => act::Origin::Dashboard,
+        Some(Cmd::Guard { hook: false }) => act::Origin::Watcher,
+        Some(Cmd::Hook | Cmd::Statusline | Cmd::Guard { hook: true }) => act::Origin::Hook,
+        Some(Cmd::Context(_)) if quiet && std::env::args().any(|a| a == "--hook") => act::Origin::Hook,
+        // Anything else is worked out on first use: the user's terminal or a Claude Code session.
+        Some(_) => return dispatch(cmd),
+    });
+    dispatch(cmd)
+}
+
+fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
     match cmd {
         Some(Cmd::Hook) => {
             // Never fail or print: a hook must not disturb the session.
@@ -198,8 +217,10 @@ fn main() -> anyhow::Result<()> {
             let _ = statusline::run();
             Ok(())
         }
-        Some(Cmd::Install { no_statusline }) => install::install(!no_statusline),
-        Some(Cmd::Uninstall) => install::uninstall(),
+        Some(Cmd::Install { no_statusline }) => {
+            act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("install"), || install::install(!no_statusline))
+        }
+        Some(Cmd::Uninstall) => act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("uninstall"), install::uninstall),
         Some(Cmd::Sync) => report::sync_now(),
         Some(Cmd::Retention(args)) => report::retention(args),
         Some(Cmd::Total(args)) => report::total(args),
@@ -238,6 +259,9 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Cmd::Update(args)) => update::run(args),
+        Some(Cmd::Pause(args)) => act::run_pause(args),
+        Some(Cmd::Resume) => act::run_resume(),
+        Some(Cmd::Actions(args)) => act::run_actions(args),
         None => app::run(),
     }
 }

@@ -25,8 +25,19 @@ fn set_at(path: &Path, key: &str, value: Value) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, serde_json::to_vec_pretty(&Value::Object(map))?)?;
+    // Written beside it and renamed over it, so a reader never sees half a file.
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&Value::Object(map))?)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
     Ok(())
+}
+
+/// Writes one setting to the real file through marsad's action gate, so it is recorded.
+fn save(key: &str, value: Value) -> anyhow::Result<()> {
+    let a = crate::act::Action::new(crate::act::Kind::Setting, key).detail(value.to_string());
+    crate::act::run(&a, || set_at(&path(), key, value))
 }
 
 /// One setting's raw value, for modules that parse their own settings.
@@ -35,7 +46,7 @@ pub(crate) fn get(key: &str) -> Option<Value> {
 }
 
 pub(crate) fn set(key: &str, value: Value) -> anyhow::Result<()> {
-    set_at(&path(), key, value)
+    save(key, value)
 }
 
 fn alerts_at(path: &Path) -> bool {
@@ -48,7 +59,7 @@ pub fn alerts() -> bool {
 }
 
 pub fn set_alerts(on: bool) -> anyhow::Result<()> {
-    set_at(&path(), "alerts", json!(on))
+    save("alerts", json!(on))
 }
 
 fn rules_at(path: &Path) -> Vec<String> {
@@ -67,7 +78,7 @@ pub fn rules() -> Vec<String> {
 }
 
 pub fn set_rules(keys: &[&str]) -> anyhow::Result<()> {
-    set_at(&path(), "rules", json!(keys))
+    save("rules", json!(keys))
 }
 
 fn launch_mode_at(path: &Path) -> crate::rules::Choice {
@@ -80,7 +91,7 @@ pub fn launch_mode() -> crate::rules::Choice {
 }
 
 pub fn set_launch_mode(choice: crate::rules::Choice) -> anyhow::Result<()> {
-    set_at(&path(), "launch_mode", json!(choice.key()))
+    save("launch_mode", json!(choice.key()))
 }
 
 fn generator_model_at(path: &Path) -> String {
@@ -128,7 +139,7 @@ pub fn retention_days() -> Option<u64> {
 }
 
 pub fn set_retention_days(days: u64) -> anyhow::Result<()> {
-    set_at(&path(), "retention_days", json!(days))
+    save("retention_days", json!(days))
 }
 
 /// Default share of the auto-compact point at which a session is told to hand off.
@@ -148,7 +159,7 @@ pub fn context_warning() -> Option<u32> {
 }
 
 pub fn set_context_warning(pct: Option<u32>) -> anyhow::Result<()> {
-    set_at(&path(), "context_warning_pct", pct.map_or(json!(false), |p| json!(p)))
+    save("context_warning_pct", pct.map_or(json!(false), |p| json!(p)))
 }
 
 /// Badge levels last announced on this machine (`badges_announced`), or None when never

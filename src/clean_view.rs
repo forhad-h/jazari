@@ -72,8 +72,12 @@ impl CleanView {
         let (tx, rx) = channel();
         std::thread::spawn(move || {
             let env = crate::clean::Env::real();
+            let lock = crate::clean::CleanLock::take();
             for item in &items {
-                let outcome = crate::clean::run_and_record(item, &env, false);
+                let outcome = match lock {
+                    Some(_) => crate::clean::run_and_record(item, &env, false),
+                    None => crate::clean::Outcome::Kept("another cleanup is running".into()),
+                };
                 let _ = tx.send(Msg::Ran { what: format!("{} ({})", item.what, crate::clean::fmt_bytes(item.bytes)), outcome });
             }
             let _ = tx.send(Msg::Plan(crate::clean::plan(&env)));
