@@ -31,6 +31,13 @@ pub struct Rule {
     pub own: bool,
 }
 
+impl Rule {
+    /// The prompt's text, as it goes into the launch file.
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+}
+
 struct Builtin {
     key: &'static str,
     title: &'static str,
@@ -128,7 +135,7 @@ fn builtin_library() -> Vec<Rule> {
         .collect()
 }
 
-fn library_in(dir: &Path) -> Vec<Rule> {
+pub(crate) fn library_in(dir: &Path) -> Vec<Rule> {
     let mut rules = builtin_library();
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md")).collect())
@@ -152,12 +159,125 @@ fn library_in(dir: &Path) -> Vec<Rule> {
 /// A user's prompt: titled by its first `# ` heading (or its key), summarised by its first line of
 /// text. None for an empty file.
 fn own_rule(key: String, text: String) -> Option<Rule> {
+    let (title, summary) = title_and_summary(&key, &text)?;
+    Some(Rule { key, title, summary, body: text, own: true })
+}
+
+/// The title and summary the library reads from a prompt file's `text`. None for an empty file.
+pub fn title_and_summary(key: &str, text: &str) -> Option<(String, String)> {
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
     let first = lines.next()?;
-    let title = first.strip_prefix("# ").map(str::trim).filter(|t| !t.is_empty()).unwrap_or(&key).to_string();
+    let title = first.strip_prefix("# ").map(str::trim).filter(|t| !t.is_empty()).unwrap_or(key).to_string();
     let rest = if first.starts_with("# ") { lines.find(|l| !l.starts_with('#')) } else { Some(first) };
-    let summary = rest.map(|l| shorten(l, 80)).unwrap_or_default();
-    Some(Rule { key, title, summary, body: text, own: true })
+    Some((title, rest.map(|l| shorten(l, 80)).unwrap_or_default()))
+}
+
+/// The longest key a new prompt may have.
+const MAX_KEY: usize = 41;
+
+/// Why `key` can't name a new or renamed prompt, or None when it can. `replacing` is the key of
+/// the user's prompt being edited, which may keep its name.
+pub fn key_problem(lib: &[Rule], key: &str, replacing: Option<&str>) -> Option<String> {
+    if Some(key) == replacing {
+        return None;
+    }
+    if !well_formed(key) {
+        return Some(format!("a name is 2-{MAX_KEY} lowercase letters, digits and hyphens, starting with a letter or digit"));
+    }
+    if key == "all" {
+        return Some("\"all\" stands for every prompt".into());
+    }
+    match lib.iter().find(|r| r.key == key) {
+        Some(r) if r.own => Some(format!("you already have a prompt named {key}")),
+        Some(_) => Some(format!("{key} is a built-in prompt")),
+        None => None,
+    }
+}
+
+/// 2 to `MAX_KEY` lowercase letters, digits and hyphens, starting with a letter or digit.
+fn well_formed(key: &str) -> bool {
+    (2..=MAX_KEY).contains(&key.len())
+        && key.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// `title` as a key: lowercase ASCII letters and digits, with hyphens between words.
+pub fn slug(title: &str) -> String {
+    let mut out = String::new();
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let mut out: String = out.chars().take(MAX_KEY).collect();
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+/// A free key for a prompt titled `title`, made from `preferred` when that is valid: its slug,
+/// with a number added when that name is taken.
+pub fn suggest_key(lib: &[Rule], preferred: &str, title: &str) -> String {
+    let base = [preferred, &slug(preferred), &slug(title)]
+        .into_iter()
+        .find(|k| well_formed(k) && *k != "all")
+        .unwrap_or("my-prompt")
+        .to_string();
+    if key_problem(lib, &base, None).is_none() {
+        return base;
+    }
+    (2..)
+        .map(|n| {
+            let suffix = format!("-{n}");
+            let stem: String = base.chars().take(MAX_KEY - suffix.len()).collect();
+            format!("{}{suffix}", stem.trim_end_matches('-'))
+        })
+        .find(|k| key_problem(lib, k, None).is_none())
+        .unwrap_or_default()
+}
+
+/// Saves `body` as the user's prompt `key`, replacing the file in one step. When `replacing` names
+/// another of the user's prompts (a rename), that file is removed once the new one is written.
+/// Returns the new file's path.
+pub fn save_own(key: &str, body: &str, replacing: Option<&str>) -> anyhow::Result<PathBuf> {
+    save_in(&prompts_dir(), &library(), key, body, replacing)
+}
+
+fn save_in(dir: &Path, lib: &[Rule], key: &str, body: &str, replacing: Option<&str>) -> anyhow::Result<PathBuf> {
+    if let Some(why) = key_problem(lib, key, replacing) {
+        anyhow::bail!("can't save as {key:?}: {why}");
+    }
+    if let Some(old) = replacing {
+        anyhow::ensure!(lib.iter().any(|r| r.key == old && r.own), "{old} is not one of your prompts");
+    }
+    anyhow::ensure!(!body.trim().is_empty(), "the prompt is empty");
+    let path = dir.join(format!("{key}.md"));
+    write_if_changed(&path, &format!("{}\n", body.trim_end()))?;
+    if let Some(old) = replacing.filter(|old| *old != key) {
+        let old = dir.join(format!("{old}.md"));
+        std::fs::remove_file(&old).with_context(|| format!("removing {}", old.display()))?;
+    }
+    Ok(path)
+}
+
+/// Deletes the user's prompt `key`. Built-in prompts can't be deleted. Returns the removed path.
+pub fn remove_own(key: &str) -> anyhow::Result<PathBuf> {
+    remove_in(&prompts_dir(), &library(), key)
+}
+
+fn remove_in(dir: &Path, lib: &[Rule], key: &str) -> anyhow::Result<PathBuf> {
+    match lib.iter().find(|r| r.key == key) {
+        None => anyhow::bail!("no prompt named {key:?}"),
+        Some(r) if !r.own => anyhow::bail!("{key} is built in and can't be deleted"),
+        Some(_) => {
+            let path = dir.join(format!("{key}.md"));
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            Ok(path)
+        }
+    }
 }
 
 fn shorten(s: &str, max: usize) -> String {
@@ -266,11 +386,11 @@ fn team_section(teammates: Option<&Path>, coordination: bool) -> String {
 }
 
 /// 64-bit FNV-1a: stable across versions and platforms, which `DefaultHasher` doesn't promise.
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
 }
 
-fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<()> {
+pub(crate) fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<()> {
     if std::fs::read(path).is_ok_and(|current| current == content.as_bytes()) {
         return Ok(());
     }
@@ -447,7 +567,8 @@ fn render_list(format: crate::report::Format, lib: &[Rule], dir: &Path) -> Strin
             out.push("`marsad rules <name>…` prints the command that starts Claude Code with them, e.g.".into());
             out.push(format!("marsad rules {}", lib.iter().map(|r| quote_arg(&r.key)).collect::<Vec<_>>().join(" ")));
             out.push("Add --team to start the lead of an agent team that passes them to its teammates.".into());
-            out.push(format!("Add your own prompts as .md files in {}", dir.display()));
+            out.push("Write your own with `marsad prompt new \"<rough idea>\"`, or add .md files to".into());
+            out.push(dir.display().to_string());
             out.join("\n")
         }
         Format::Json => {
@@ -706,6 +827,66 @@ mod tests {
         let mine = Rule { key: "my rules".into(), title: "x".into(), summary: String::new(), body: "x".into(), own: true };
         let chosen = vec![&lib[1], &mine];
         assert_eq!(cli_command(&chosen, Mode::Team), format!("marsad rules output-hygiene {} --team", quote_arg("my rules")));
+    }
+
+    #[test]
+    fn keys_are_slugs_and_clashes_are_refused() {
+        assert_eq!(slug("Short PRs, please!"), "short-prs-please");
+        assert_eq!(slug("  --Tone & voice--  "), "tone-voice");
+        assert_eq!(slug("ছোট পিআর"), "", "no ASCII letters, no slug");
+        assert_eq!(slug(&"a".repeat(60)).len(), MAX_KEY);
+        let dir = temp_dir("keys");
+        std::fs::write(dir.join("tone.md"), "# Tone\n").unwrap();
+        let lib = library_in(&dir);
+        assert_eq!(key_problem(&lib, "short-prs", None), None);
+        for bad in ["-wip", "--team", "Tone", "a", "has space", "x_y", &"a".repeat(MAX_KEY + 1)] {
+            assert!(key_problem(&lib, bad, None).unwrap().contains("lowercase letters"), "{bad}");
+        }
+        assert!(key_problem(&lib, "all", None).unwrap().contains("every prompt"));
+        assert!(key_problem(&lib, "coordination", None).unwrap().contains("built-in"));
+        assert!(key_problem(&lib, "tone", None).unwrap().contains("already have"));
+        assert_eq!(key_problem(&lib, "tone", Some("tone")), None, "an edit keeps its own name");
+        assert_eq!(suggest_key(&lib, "", "Tone"), "tone-2");
+        assert_eq!(suggest_key(&lib, "Short PRs", "ignored"), "short-prs", "the preferred name wins");
+        assert_eq!(suggest_key(&lib, "", "ছোট"), "my-prompt");
+        assert_eq!(suggest_key(&lib, "coordination-copy", "Coordination"), "coordination-copy");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_writes_atomically_and_reads_back_into_the_library() {
+        let dir = temp_dir("save");
+        let lib = library_in(&dir);
+        let path = save_in(&dir, &lib, "short-prs", "# Short PRs\n\nKeep them short.\n\n- Under 150 words.", None).unwrap();
+        assert_eq!(path, dir.join("short-prs.md"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Short PRs\n\nKeep them short.\n\n- Under 150 words.\n");
+        assert_eq!(names(&dir), ["short-prs.md"], "no temp file left behind");
+        let lib = library_in(&dir);
+        let mine = lib.iter().find(|r| r.key == "short-prs").unwrap();
+        assert!(mine.own && mine.title == "Short PRs" && mine.summary == "Keep them short.");
+
+        assert!(save_in(&dir, &lib, "short-prs", "# Again\n", None).is_err(), "a new prompt can't take a used name");
+        save_in(&dir, &lib, "short-prs", "# Short PRs\n\nShorter.\n", Some("short-prs")).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("Shorter."), "an edit replaces the file");
+        save_in(&dir, &lib, "brief-prs", "# Brief PRs\n", Some("short-prs")).unwrap();
+        assert_eq!(names(&dir), ["brief-prs.md"], "a rename removes the old file");
+        let lib = library_in(&dir);
+        assert!(save_in(&dir, &lib, "x-copy", "  \n", None).is_err(), "an empty prompt isn't saved");
+        assert!(save_in(&dir, &lib, "mine", "# Mine\n", Some("coordination")).is_err(), "a built-in is never replaced");
+        assert!(save_in(&dir, &lib, "-flag", "# Flag\n", None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_your_own_prompts_can_be_deleted() {
+        let dir = temp_dir("remove-own");
+        std::fs::write(dir.join("tone.md"), "# Tone\n").unwrap();
+        let lib = library_in(&dir);
+        assert!(remove_in(&dir, &lib, "coordination").unwrap_err().to_string().contains("built in"));
+        assert!(remove_in(&dir, &lib, "nope").unwrap_err().to_string().contains("no prompt named"));
+        assert_eq!(remove_in(&dir, &lib, "tone").unwrap(), dir.join("tone.md"));
+        assert!(names(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

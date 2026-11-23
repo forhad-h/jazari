@@ -48,7 +48,7 @@ marsad update      # install the latest version (shows current → latest and wh
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `p` badges and share to LinkedIn · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `u` usage history · `p` badges and share to LinkedIn · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, and write your own (`n` new, `e` edit, `d` delete) · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 
@@ -148,13 +148,27 @@ When several Claude Code sessions work in one repo, marsad's coordination rules 
 
 Press `enter` to copy the command. Your choice is remembered, so next time `c`, `enter`, `enter` is enough.
 
+**Writing your own.** In the picker, `n` asks for a rough idea in your own words ("make Claude stop over-explaining in PRs") and an optional name. Claude turns it into a prompt file: explicit, checkable rules with their reasons, short enough to follow. The review shows the draft, what Claude assumed, and the questions the idea left open. `enter` saves it to your prompts and ticks it, `e` opens it in `$EDITOR`, `r` revises it with a line of feedback, a question's number answers that question (which also revises it), `n` renames it, and `esc` discards it. On one of your prompts, `e` opens the same review to edit or revise it and `d` deletes it after asking. A built-in prompt can't be changed; `e` on one saves a copy under a new name.
+
+The draft is written by one `claude -p` run with no tools, in `--safe-mode` (no CLAUDE.md, hooks, plugins or MCP servers), from marsad's own folder and without a transcript, so nothing from your projects reaches it and it never shows up as a session. Your situation, names and reasons stay out of the prompt unless they are the rule itself. It uses the strongest model Claude Code accepts, `fable`, falling back to `opus` and then your default when an alias isn't available; set `"generator_model"` in `~/.claude/marsad/settings.json` to choose another. `MARSAD_CLAUDE` points marsad at a different `claude` program.
+
+From the command line:
+
+```sh
+marsad prompt new "make Claude stop over-explaining in PRs"   # draft, review, save; --from <file> or stdin also work
+marsad prompt new --name "Short PRs" --yes < idea.txt          # save without reviewing; --format json for scripts
+marsad prompt edit short-prs                                   # open in $EDITOR; --with "<feedback>" revises it with Claude
+marsad prompt copy coordination --as my-coordination          # a copy of a built-in prompt you can change
+marsad prompt rm short-prs
+```
+
 Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.claude/marsad/launch/`, written when the command is copied and named after a hash of its text. A session's or lead's file whose command hasn't been copied for a week is removed (a conversation keeps the prompt it started with); a teammates' file is kept, since a resumed lead still points at it. `marsad coordination` keeps printing the stable `~/.claude/marsad/coordination.md`.
 
 The prompts are added to the session's system prompt, so they survive `/clear` and compaction. They apply to new conversations only: a resumed conversation keeps the system prompt it started with. The coordination rules add about 2k tokens to each request of those sessions.
 
 Over SSH, `c` sends the command through your terminal (OSC 52, which kitty, WezTerm, Alacritty and iTerm2 with clipboard access allow; tmux needs `set-clipboard on`) and also shows it so you can copy it by hand. `marsad rules` lists the prompts and `marsad rules coordination output-hygiene` prints the command (`--team` for an agent team, `--format json` for scripts); `marsad coordination` is short for `marsad rules coordination`.
 
-`b` on a session opens its repo's board, read-only and live: agents with their last-seen times, claims, decisions, messages, conflicts and handoff notes. Agents and their claims not seen for more than 2 hours are marked `[stale]`, and `needs-human` conflicts are tagged in yellow. marsad never edits the board; the sessions own it. To change a shipped prompt, save your own version in `~/.claude/marsad/prompts/` under another name and tick that instead.
+`b` on a session opens its repo's board, read-only and live: agents with their last-seen times, claims, decisions, messages, conflicts and handoff notes. Agents and their claims not seen for more than 2 hours are marked `[stale]`, and `needs-human` conflicts are tagged in yellow. marsad never edits the board; the sessions own it. To change a shipped prompt, save a copy (`e` in the picker, or `marsad prompt copy`) and tick that instead.
 
 ### Badges and sharing
 

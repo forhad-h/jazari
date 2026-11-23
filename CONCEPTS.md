@@ -60,6 +60,10 @@ Claude Code records a conversation's system prompt on its first request and repl
 ### Rules file
 A markdown file of instructions for a session's system prompt: one marsad ships, such as the coordination protocol or the output-hygiene rules, or the user's own in `<data dir>/prompts/`. A session can start with any set of them; the set is merged into one launch file, because `claude` reads only one `--append-system-prompt-file`.
 
+### Prompt generator
+The `claude -p` run that turns a user's rough idea into a rules file for their library, returning the draft with what it assumed and the questions the idea left open. It runs isolated from the user's projects and settings, and keeps the user's situation out of the rules it writes.
+*Avoid:* template, wizard
+
 ### Team launch
 Starting the lead of an agent team with a set of rules files. A teammate never sees the lead's system prompt, so the team gets a lead's file and a teammates' file, and the lead's file tells it to start every spawn prompt with "read the teammates' file". Coordination goes in the lead's file only.
 *Avoid:* protocol (for anything but the coordination rules)
