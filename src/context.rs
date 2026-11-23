@@ -151,6 +151,9 @@ fn hook() -> Option<String> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok()?;
     let raw: Value = serde_json::from_str(&input).ok()?;
+    if from_subagent(&raw) {
+        return None;
+    }
     let threshold = crate::settings::context_warning()?;
     // Only these events let a hook add text to the session's context.
     let event = raw["hook_event_name"].as_str().filter(|e| matches!(*e, "UserPromptSubmit" | "PostToolUse")).unwrap_or("UserPromptSubmit");
@@ -181,6 +184,13 @@ fn hook() -> Option<String> {
         })
         .to_string()
     })
+}
+
+/// A subagent's tool calls carry the parent's session id and their own `agent_id`. Only the main
+/// agent may take the once-per-crossing warning: a subagent would use it up, and the handoff it is
+/// told to run would end the main session.
+fn from_subagent(raw: &Value) -> bool {
+    raw.get("agent_id").is_some_and(|a| !a.is_null())
 }
 
 /// (whether to warn now, whether the session counts as warned afterwards). Dropping below the
@@ -250,6 +260,13 @@ fn fresher_context(snap: Option<&crate::model::StatusSnapshot>, tail: Option<&Ta
 mod tests {
     use super::*;
     use crate::model::StatusSnapshot;
+
+    #[test]
+    fn subagent_calls_never_take_the_warning() {
+        assert!(from_subagent(&json!({ "session_id": "s", "agent_id": "a1", "hook_event_name": "PostToolUse" })));
+        assert!(!from_subagent(&json!({ "session_id": "s", "hook_event_name": "PostToolUse" })));
+        assert!(!from_subagent(&json!({ "session_id": "s", "agent_id": null })));
+    }
 
     #[test]
     fn warns_once_per_crossing() {

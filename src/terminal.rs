@@ -404,13 +404,13 @@ pub fn offer_tmux() {
         println!("Install tmux so a handoff can always start its new session: {line}");
         return;
     }
-    print!("A handoff opens its new session in your terminal, and uses tmux when it can't. Install tmux now ({line})? [Y/n] ");
+    print!("A handoff opens its new session in your terminal, and uses tmux when it can't. Install tmux now ({line})? [y/N] ");
     let _ = std::io::stdout().flush();
     let mut answer = String::new();
     if std::io::stdin().lock().read_line(&mut answer).is_err() {
         return;
     }
-    if !matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes") {
+    if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
         println!("Skipped. Install it later with: {line}");
         return;
     }
