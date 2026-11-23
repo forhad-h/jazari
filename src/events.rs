@@ -49,6 +49,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     if matches!(event, "UserPromptSubmit" | "SessionStart" | "SessionEnd") && ev.get("agent_id").is_none() {
         session.halted = None;
         session.flag = None;
+        session.stop_requested = false;
     }
 
     let summary = s("summary").unwrap_or("");
@@ -255,11 +256,13 @@ mod tests {
         let stop = json!({"hook_event_name": crate::channel::TOLD_EVENT, "kind": "stop"});
         let s = run(&[told.clone(), told.clone(), stop.clone()]);
         assert_eq!((s.waiting, s.stop_requested), (2, true));
-        let s = run(&[told, stop, json!({"hook_event_name": crate::channel::DELIVERED_EVENT, "messages": 1, "stop": true})]);
+        let s = run(&[told, stop.clone(), json!({"hook_event_name": crate::channel::DELIVERED_EVENT, "messages": 1, "stop": true})]);
         assert_eq!((s.waiting, s.stop_requested), (0, false));
         let said = json!({"hook_event_name": crate::channel::SAID_EVENT, "message": "need the API key", "attention": true});
         let s = run(&[json!({"hook_event_name": "PreToolUse", "tool_name": "Bash"}), said]);
         assert_eq!((s.status, s.said.as_deref(), s.detail.as_str()), (Status::Question, Some("need the API key"), "need the API key"));
+        let s = run(&[stop.clone(), json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"})]);
+        assert!(!s.stop_requested, "a new prompt drops a waiting stop");
         let halted = run(&[json!({"hook_event_name": crate::disk::HALTED_EVENT, "reason": "stopped from marsad"})]);
         assert_eq!(halted.detail, format!("halted: stopped from marsad · claude --resume {}", halted.id));
     }

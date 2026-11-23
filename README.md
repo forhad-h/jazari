@@ -214,7 +214,7 @@ you through marsad.
   to Claude at the session's next tool call or prompt, as a note to act on before going on. The
   details pane shows messages still waiting.
 - **`x`** (`marsad tell <id> --stop`) stops the session before its next tool call. The turn ends
-  cleanly and `claude --resume <id>` continues it.
+  cleanly and `claude --resume <id>` continues it. A prompt you send the session first cancels it.
 - **`X`** (`marsad tell <id> --interrupt`) interrupts it now, as Esc does, after checking the process is
   still that session's Claude Code. Both ask for `y` first.
 - **`marsad say "…"`**, run by the session, shows what it is doing on its row in the dashboard;

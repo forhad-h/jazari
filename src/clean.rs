@@ -106,17 +106,18 @@ pub struct Env {
     pub cwds: Vec<PathBuf>,
     /// Claude Code's scratch folder root (`/tmp/claude-<uid>`), when there is one.
     pub scratch: Option<PathBuf>,
+    /// Ids of sessions that haven't ended; each one's scratch folder is named after it.
+    pub live_ids: HashSet<String>,
     pub run: Runner,
 }
 
 impl Env {
     pub fn real() -> Self {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-        let live: Vec<PathBuf> = crate::live::load_sessions(false)
-            .into_values()
-            .filter(|s| s.status != crate::model::Status::Ended && !s.cwd.is_empty())
-            .map(|s| PathBuf::from(s.cwd))
-            .collect();
+        let running: Vec<crate::model::Session> =
+            crate::live::load_sessions(false).into_values().filter(|s| s.status != crate::model::Status::Ended).collect();
+        let live_ids = running.iter().map(|s| s.id.clone()).collect();
+        let live: Vec<PathBuf> = running.into_iter().filter(|s| !s.cwd.is_empty()).map(|s| PathBuf::from(s.cwd)).collect();
         let projects = crate::store::open_readonly()
             .and_then(|c| crate::store::project_activity(&c))
             .unwrap_or_default()
@@ -143,6 +144,7 @@ impl Env {
             running,
             cwds,
             scratch: scratch_root(),
+            live_ids,
             run: Box::new(run_with_timeout),
         }
     }
@@ -693,6 +695,9 @@ pub fn check_remove(path: &Path, kind: &DirKind, env: &Env) -> Result<(), String
             }
         }
         DirKind::Scratch => {
+            if env.live_ids.contains(name) {
+                return Err("its session is still running".into());
+            }
             if age_days(path) < SCRATCH_DAYS {
                 return Err("it changed this week".into());
             }
@@ -956,7 +961,9 @@ fn scratch_items(env: &Env) -> Vec<Item> {
         for session in std::fs::read_dir(project.path()).into_iter().flatten().flatten() {
             let path = session.path();
             let name = session.file_name().to_string_lossy().into_owned();
-            if !is_session_id(&name) || age_days(&path) < SCRATCH_DAYS || env.cwds.iter().chain(&env.live).any(|c| c.starts_with(&path)) {
+            // A session's folder is named after it, and a long run may leave its top folder unchanged.
+            let running = env.live_ids.contains(&name) || env.cwds.iter().chain(&env.live).any(|c| c.starts_with(&path));
+            if !is_session_id(&name) || age_days(&path) < SCRATCH_DAYS || running {
                 continue;
             }
             let bytes = dir_size(&path);
@@ -1243,6 +1250,7 @@ mod tests {
             running: HashSet::new(),
             cwds: Vec::new(),
             scratch: None,
+            live_ids: HashSet::new(),
             run: Box::new(move |prog, args, _| match prog {
                 "git" if !tracked.iter().any(|t| args.contains(t)) => Some(String::new()),
                 _ => None,
@@ -1300,6 +1308,11 @@ mod tests {
         assert!(check_remove(&fresh, &DirKind::Scratch, &e).is_err(), "changed this week");
         e.cwds = vec![old.join("x")];
         assert!(check_remove(&old, &DirKind::Scratch, &e).is_err(), "a process works in it");
+        // A session running for over a week still owns its folder, whatever the folder's own time.
+        e.cwds.clear();
+        e.live_ids.insert("0123abcd-0000-4000-8000-0123456789ab".into());
+        assert!(scratch_items(&e).is_empty());
+        assert!(check_remove(&old, &DirKind::Scratch, &e).unwrap_err().contains("still running"));
         assert!(!is_session_id("keep-me") && is_session_id("0123abcd-0000-4000-8000-0123456789ab"));
     }
 

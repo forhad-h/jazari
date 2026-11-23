@@ -998,7 +998,6 @@ impl App {
         }
     }
 
-    /// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.
     fn on_compose_key(&mut self, code: KeyCode) {
         let Some(c) = self.compose.as_mut() else { return };
         match code {
@@ -1050,6 +1049,7 @@ impl App {
         self.system = Some(self.sampler.sample(paths.iter().map(PathBuf::as_path), &t));
     }
 
+    /// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.
     fn check_processes(&mut self) {
         mark_exited(&mut self.sessions, &mut self.sys);
     }

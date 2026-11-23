@@ -77,23 +77,25 @@ pub fn interrupt(s: &crate::model::Session) -> bool {
 pub struct Mail {
     pub notes: Vec<String>,
     pub stop: bool,
+    /// A stop that was still waiting when the user sent a prompt: they are there and chose to go
+    /// on, so it is dropped rather than cutting the new turn short.
+    pub cancelled_stop: bool,
 }
 
-/// Splits queued lines into what this event delivers and what waits: a stop takes effect only at
-/// a tool call (a prompt means the user is there and chose to go on), messages at either.
-fn sort(lines: &str, event: &str) -> (Mail, Vec<String>) {
+/// What this event delivers: messages at either event; a stop at a tool call, while a prompt
+/// drops it (the user is there and chose to go on).
+fn sort(lines: &str, event: &str) -> Mail {
     let mut mail = Mail::default();
-    let mut keep = Vec::new();
     for line in lines.lines().filter(|l| !l.trim().is_empty()) {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         match v["kind"].as_str() {
             Some("stop") if event == "PreToolUse" => mail.stop = true,
-            Some("stop") => keep.push(line.to_string()),
+            Some("stop") => mail.cancelled_stop = true,
             Some("message") => mail.notes.extend(v["text"].as_str().map(str::to_string)),
             _ => {}
         }
     }
-    (mail, keep)
+    mail
 }
 
 /// Takes the session's queued mail for this event. The inbox is renamed away first, so a message
@@ -109,19 +111,15 @@ pub fn take(session: &str, event: &str) -> Mail {
     }
     let text = std::fs::read_to_string(&taking).unwrap_or_default();
     let _ = std::fs::remove_file(&taking);
-    let (mail, keep) = sort(&text, event);
-    if !keep.is_empty()
-        && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file)
-    {
-        let _ = f.write_all((keep.join("\n") + "\n").as_bytes());
-    }
-    if !mail.notes.is_empty() || mail.stop {
+    let mail = sort(&text, event);
+    if !mail.notes.is_empty() || mail.stop || mail.cancelled_stop {
+        // `stop` clears the dashboard's pending stop either way.
         log(json!({
             "ts": crate::now(),
             "session_id": session,
             "hook_event_name": DELIVERED_EVENT,
             "messages": mail.notes.len(),
-            "stop": mail.stop,
+            "stop": mail.stop || mail.cancelled_stop,
         }));
     }
     mail
@@ -178,7 +176,6 @@ pub fn run_tell(a: TellArgs) -> anyhow::Result<()> {
     let s = match hits.as_slice() {
         [] => anyhow::bail!("no running session matches {:?}", a.session),
         [one] => *one,
-        [first, second, ..] if first.id == second.id => *first,
         _ => anyhow::bail!("{:?} matches {} sessions; give more of the id", a.session, hits.len()),
     };
     let name = s.project();
@@ -229,7 +226,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_stop_waits_for_a_tool_call_and_messages_go_at_either() {
+    fn a_stop_ends_the_turn_at_a_tool_call_and_a_prompt_drops_it() {
         let lines = [
             r#"{"kind":"message","text":"use the staging db"}"#,
             r#"{"kind":"stop","text":""}"#,
@@ -237,11 +234,10 @@ mod tests {
             r#"{"kind":"message","text":"then push"}"#,
         ]
         .join("\n");
-        let (mail, keep) = sort(&lines, "UserPromptSubmit");
-        assert_eq!(mail, Mail { notes: vec!["use the staging db".into(), "then push".into()], stop: false });
-        assert_eq!(keep.len(), 1, "the stop waits for a tool call");
-        let (mail, keep) = sort(&lines, "PreToolUse");
-        assert!(mail.stop && keep.is_empty());
+        let mail = sort(&lines, "UserPromptSubmit");
+        assert_eq!(mail, Mail { notes: vec!["use the staging db".into(), "then push".into()], stop: false, cancelled_stop: true });
+        let mail = sort(&lines, "PreToolUse");
+        assert!(mail.stop && !mail.cancelled_stop);
     }
 
     #[test]
