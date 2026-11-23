@@ -268,7 +268,20 @@ fn save_in(dir: &Path, lib: &[Rule], key: &str, body: &str, replacing: Option<&s
     }
     anyhow::ensure!(!body.trim().is_empty(), "the prompt is empty");
     let path = dir.join(format!("{key}.md"));
-    write_if_changed(&path, &format!("{}\n", body.trim_end()))?;
+    let content = format!("{}\n", body.trim_end());
+    // The text being replaced is kept as a version first, so no save loses anything. A rename takes
+    // the prompt's history along to its new name.
+    if let Some(old) = replacing {
+        if old != key {
+            move_versions(dir, old, key)?;
+        }
+        if let Ok(current) = std::fs::read_to_string(dir.join(format!("{old}.md")))
+            && current != content
+        {
+            keep_version(dir, key, &current)?;
+        }
+    }
+    write_if_changed(&path, &content)?;
     if let Some(old) = replacing.filter(|old| *old != key) {
         let old = dir.join(format!("{old}.md"));
         std::fs::remove_file(&old).with_context(|| format!("removing {}", old.display()))?;
@@ -276,7 +289,142 @@ fn save_in(dir: &Path, lib: &[Rule], key: &str, body: &str, replacing: Option<&s
     Ok(path)
 }
 
-/// Deletes the user's prompt `key`. Built-in prompts can't be deleted. Returns the removed path.
+/// How many earlier versions are kept per prompt; older ones are dropped.
+const MAX_VERSIONS: usize = 50;
+
+/// An earlier text of one of the user's prompts, kept when it was edited, renamed, restored over or
+/// deleted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version {
+    /// Counts up from 1 for each prompt.
+    pub number: u32,
+    /// When this text stopped being the prompt.
+    pub replaced: Option<chrono::DateTime<chrono::Utc>>,
+    pub title: String,
+    pub summary: String,
+    pub body: String,
+}
+
+impl Version {
+    /// When it was replaced, in local time.
+    pub fn when(&self) -> String {
+        self.replaced.map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "unknown time".into())
+    }
+}
+
+/// Where the earlier versions of prompt `key` are kept: one `<number>-<UTC time>.md` file each.
+fn versions_dir(dir: &Path, key: &str) -> PathBuf {
+    dir.join(".versions").join(key)
+}
+
+/// The version files of `key`, oldest first: (number, path, when it was replaced).
+fn version_files(dir: &Path, key: &str) -> Vec<(u32, PathBuf, Option<chrono::DateTime<chrono::Utc>>)> {
+    let mut files: Vec<_> = std::fs::read_dir(versions_dir(dir, key))
+        .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .filter_map(|p| {
+            let stem = p.file_stem()?.to_string_lossy().into_owned();
+            let (number, stamp) = stem.split_once('-').unwrap_or((&stem, ""));
+            let when = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ").ok().map(|t| t.and_utc());
+            Some((number.parse().ok()?, p, when))
+        })
+        .collect();
+    files.sort_by_key(|f| f.0);
+    files
+}
+
+/// Keeps `text` as the newest version of `key`, unless it already is, and drops the oldest beyond
+/// `MAX_VERSIONS`.
+fn keep_version(dir: &Path, key: &str, text: &str) -> anyhow::Result<()> {
+    let files = version_files(dir, key);
+    if files.last().is_some_and(|(_, p, _)| std::fs::read_to_string(p).is_ok_and(|t| t == text)) {
+        return Ok(());
+    }
+    let number = files.last().map_or(1, |f| f.0 + 1);
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    write_if_changed(&versions_dir(dir, key).join(format!("{number:04}-{stamp}.md")), text)?;
+    for (_, old, _) in files.iter().take((files.len() + 1).saturating_sub(MAX_VERSIONS)) {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(())
+}
+
+/// Moves the versions of `from` to `to`, numbered after any `to` already has.
+fn move_versions(dir: &Path, from: &str, to: &str) -> anyhow::Result<()> {
+    let files = version_files(dir, from);
+    if files.is_empty() {
+        return Ok(());
+    }
+    let target = versions_dir(dir, to);
+    std::fs::create_dir_all(&target).with_context(|| format!("creating {}", target.display()))?;
+    let first = version_files(dir, to).last().map_or(1, |f| f.0 + 1);
+    for (next, (_, path, _)) in (first..).zip(files) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stamp = name.split_once('-').map_or("", |(_, rest)| rest);
+        let dest = target.join(format!("{next:04}-{stamp}"));
+        std::fs::rename(&path, &dest).with_context(|| format!("moving {}", path.display()))?;
+    }
+    let _ = std::fs::remove_dir(versions_dir(dir, from));
+    Ok(())
+}
+
+/// The earlier versions of the user's prompt `key`, newest first.
+pub fn versions(key: &str) -> Vec<Version> {
+    versions_in(&prompts_dir(), key)
+}
+
+fn versions_in(dir: &Path, key: &str) -> Vec<Version> {
+    let mut list: Vec<Version> = version_files(dir, key)
+        .into_iter()
+        .filter_map(|(number, path, replaced)| {
+            let body = std::fs::read_to_string(path).ok()?;
+            let (title, summary) = title_and_summary(key, &body)?;
+            Some(Version { number, replaced, title, summary, body })
+        })
+        .collect();
+    list.reverse();
+    list
+}
+
+/// The keys of deleted prompts that still have versions to restore.
+pub fn deleted() -> Vec<String> {
+    deleted_in(&prompts_dir())
+}
+
+fn deleted_in(dir: &Path) -> Vec<String> {
+    let mut keys: Vec<String> = std::fs::read_dir(dir.join(".versions"))
+        .map(|entries| entries.filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    keys.retain(|k| !dir.join(format!("{k}.md")).exists() && !version_files(dir, k).is_empty());
+    keys.sort();
+    keys
+}
+
+/// Makes version `number` of `key` (the newest when None) the prompt again, bringing back a deleted
+/// one. The text it replaces is kept as a version. Returns the version restored.
+pub fn restore_own(key: &str, number: Option<u32>) -> anyhow::Result<Version> {
+    restore_in(&prompts_dir(), &library(), key, number)
+}
+
+fn restore_in(dir: &Path, lib: &[Rule], key: &str, number: Option<u32>) -> anyhow::Result<Version> {
+    if lib.iter().any(|r| r.key == key && !r.own) {
+        anyhow::bail!("{key} is built in and has no versions");
+    }
+    let list = versions_in(dir, key);
+    anyhow::ensure!(!list.is_empty(), "{key} has no earlier versions");
+    let version = match number {
+        None => list[0].clone(),
+        Some(n) => list.iter().find(|v| v.number == n).cloned().ok_or_else(|| anyhow::anyhow!("{key} has no version {n}"))?,
+    };
+    let own = lib.iter().any(|r| r.key == key && r.own);
+    save_in(dir, lib, key, &version.body, own.then_some(key))?;
+    Ok(version)
+}
+
+/// Deletes the user's prompt `key`, keeping its text as a version so it can be restored. Built-in
+/// prompts can't be deleted. Returns the removed path.
 pub fn remove_own(key: &str) -> anyhow::Result<PathBuf> {
     remove_in(&prompts_dir(), &library(), key)
 }
@@ -287,13 +435,16 @@ fn remove_in(dir: &Path, lib: &[Rule], key: &str) -> anyhow::Result<PathBuf> {
         Some(r) if !r.own => anyhow::bail!("{key} is built in and can't be deleted"),
         Some(_) => {
             let path = dir.join(format!("{key}.md"));
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                keep_version(dir, key, &text)?;
+            }
             std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
             Ok(path)
         }
     }
 }
 
-fn shorten(s: &str, max: usize) -> String {
+pub fn shorten(s: &str, max: usize) -> String {
     if s.chars().count() <= max { s.to_string() } else { format!("{}…", s.chars().take(max - 1).collect::<String>().trim_end()) }
 }
 
@@ -587,7 +738,7 @@ fn render_list(format: crate::report::Format, lib: &[Rule], dir: &Path) -> Strin
         Format::Table => {
             let width = lib.iter().map(|r| r.key.chars().count()).max().unwrap_or(0);
             let mut out: Vec<String> =
-                lib.iter().map(|r| format!("{:<width$}  {}{}", r.key, r.summary, if r.own { "  (yours)" } else { "" })).collect();
+                lib.iter().map(|r| format!("{:<width$}  {:<10}  {}", r.key, if r.own { "[yours]" } else { "[built-in]" }, r.summary)).collect();
             out.push(String::new());
             out.push("`marsad rules <name>…` prints the command that starts Claude Code with them, e.g.".into());
             out.push(format!("marsad rules {}", lib.iter().map(|r| quote_arg(&r.key)).collect::<Vec<_>>().join(" ")));
@@ -894,11 +1045,63 @@ mod tests {
         save_in(&dir, &lib, "short-prs", "# Short PRs\n\nShorter.\n", Some("short-prs")).unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().contains("Shorter."), "an edit replaces the file");
         save_in(&dir, &lib, "brief-prs", "# Brief PRs\n", Some("short-prs")).unwrap();
-        assert_eq!(names(&dir), ["brief-prs.md"], "a rename removes the old file");
+        assert_eq!(names(&dir), [".versions", "brief-prs.md"], "a rename removes the old file");
         let lib = library_in(&dir);
         assert!(save_in(&dir, &lib, "x-copy", "  \n", None).is_err(), "an empty prompt isn't saved");
         assert!(save_in(&dir, &lib, "mine", "# Mine\n", Some("coordination")).is_err(), "a built-in is never replaced");
         assert!(save_in(&dir, &lib, "-flag", "# Flag\n", None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_edit_rename_and_delete_keeps_a_version_that_can_be_restored() {
+        let dir = temp_dir("versions");
+        let lib = library_in(&dir);
+        save_in(&dir, &lib, "tone", "# Tone\n\nWarm.\n", None).unwrap();
+        assert!(versions_in(&dir, "tone").is_empty(), "a new prompt has no earlier versions");
+        let lib = library_in(&dir);
+        save_in(&dir, &lib, "tone", "# Tone\n\nWarm.\n", Some("tone")).unwrap();
+        assert!(versions_in(&dir, "tone").is_empty(), "saving the same text keeps nothing");
+        save_in(&dir, &lib, "tone", "# Tone\n\nWarmer.\n", Some("tone")).unwrap();
+        let v = versions_in(&dir, "tone");
+        assert_eq!((v.len(), v[0].number, v[0].summary.as_str()), (1, 1, "Warm."));
+        assert!(v[0].replaced.is_some());
+
+        // A rename takes the history along, plus the text it replaced.
+        save_in(&dir, &lib, "voice", "# Voice\n\nPlain.\n", Some("tone")).unwrap();
+        assert!(versions_in(&dir, "tone").is_empty());
+        let v = versions_in(&dir, "voice");
+        assert_eq!(v.iter().map(|v| (v.number, v.summary.as_str())).collect::<Vec<_>>(), [(2, "Warmer."), (1, "Warm.")], "newest first");
+
+        // Restoring keeps the text it replaces, so it can be undone too.
+        let lib = library_in(&dir);
+        assert_eq!(restore_in(&dir, &lib, "voice", Some(1)).unwrap().summary, "Warm.");
+        assert_eq!(std::fs::read_to_string(dir.join("voice.md")).unwrap(), "# Tone\n\nWarm.\n");
+        assert_eq!(versions_in(&dir, "voice")[0].summary, "Plain.");
+        assert!(restore_in(&dir, &lib, "voice", Some(9)).unwrap_err().to_string().contains("no version 9"));
+        assert!(restore_in(&dir, &lib, "coordination", None).unwrap_err().to_string().contains("built in"));
+
+        // A deleted prompt comes back with its newest version.
+        let lib = library_in(&dir);
+        remove_in(&dir, &lib, "voice").unwrap();
+        assert_eq!(deleted_in(&dir), ["voice"]);
+        let lib = library_in(&dir);
+        assert!(lib.iter().all(|r| r.key != "voice"));
+        assert_eq!(restore_in(&dir, &lib, "voice", None).unwrap().summary, "Warm.");
+        assert!(library_in(&dir).iter().any(|r| r.key == "voice" && r.own));
+        assert!(deleted_in(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_newest_versions_are_kept() {
+        let dir = temp_dir("versions-cap");
+        for i in 0..MAX_VERSIONS + 3 {
+            keep_version(&dir, "tone", &format!("# Tone\n\nText {i}.\n")).unwrap();
+        }
+        let v = versions_in(&dir, "tone");
+        assert_eq!(v.len(), MAX_VERSIONS);
+        assert_eq!((v[0].number as usize, v.last().unwrap().number), (MAX_VERSIONS + 3, 4));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -917,7 +1120,7 @@ mod tests {
         assert!(remove_in(&dir, &lib, "coordination").unwrap_err().to_string().contains("built in"));
         assert!(remove_in(&dir, &lib, "nope").unwrap_err().to_string().contains("no prompt named"));
         assert_eq!(remove_in(&dir, &lib, "tone").unwrap(), dir.join("tone.md"));
-        assert!(names(&dir).is_empty());
+        assert_eq!(names(&dir), [".versions"], "only its kept version is left");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

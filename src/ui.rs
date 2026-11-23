@@ -257,18 +257,25 @@ pub fn draw(f: &mut Frame, app: &App) {
             draw_rules_picker(f, body, picker);
             if picker.deleting.is_some() {
                 vec![("y", "delete".into()), ("any key", "keep".into())]
+            } else if picker.versions.is_some() && picker.mode.is_none() {
+                vec![("↑↓", "move".into()), ("enter", "restore".into()), ("esc", "back".into())]
             } else if picker.mode.is_some() {
                 vec![("↑↓", "move".into()), ("1/2", "pick".into()), ("enter", "copy".into()), ("esc", "back".into())]
             } else {
-                vec![
+                let mut keys = vec![
                     ("↑↓", "move".into()),
                     (picker_digits.as_str(), "tick".into()),
                     ("enter", "next".into()),
                     ("n", "new".into()),
                     ("e", "edit".into()),
                     ("d", "delete".into()),
+                    ("v", "versions".into()),
                     ("esc", "cancel".into()),
-                ]
+                ];
+                if picker.restorable.is_some() {
+                    keys.insert(7, ("u", "undo delete".into()));
+                }
+                keys
             }
         }
         (None, None, None) => keys,
@@ -395,18 +402,36 @@ fn draw_copy_note(f: &mut Frame, area: Rect, note: &crate::app::CopyNote) {
 /// The `c` picker, a small modal: the prompts with tick boxes, then a choice of session or team.
 fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker) {
     use crate::rules::Mode;
-    let row = |selected: bool, label: String, title: String| {
-        let line = Line::from(vec![Span::raw(if selected { "› " } else { "  " }), Span::styled(label, Style::new().fg(ACCENT)), title.bold()]);
+    let row = |selected: bool, label: String, title: String, tag: Option<Span<'static>>| {
+        let mut spans = vec![Span::raw(if selected { "› " } else { "  " }), Span::styled(label, Style::new().fg(ACCENT)), title.bold()];
+        spans.extend(tag);
+        let line = Line::from(spans);
         if selected { line.patch_style(Style::new().add_modifier(Modifier::REVERSED)) } else { line }
     };
-    let (mut lines, footer, title, cursor_line) = match picker.mode {
-        None => {
+    let (mut lines, footer, title, cursor_line) = match (picker.mode, &picker.versions) {
+        (None, Some(v)) => {
+            let mut lines = vec![Line::from(dim(format!("Earlier versions of {}, newest first:", v.title))), Line::from("")];
+            for (i, version) in v.list.iter().enumerate() {
+                let title = if version.title == v.title { String::new() } else { format!("  {}", version.title) };
+                lines.push(row(i == v.cursor, format!("v{:<3} ", version.number), format!("{}{title}", version.when()), None));
+                lines.push(Line::from(dim(format!("      {}", version.summary))));
+            }
+            let mut footer = vec![Line::from("")];
+            if let Some(chosen) = v.list.get(v.cursor) {
+                footer.extend(chosen.body.lines().take(8).map(|l| Line::from(dim(format!("  │ {}", crate::rules::shorten(l, 72))))));
+            }
+            footer.push(Line::from(""));
+            footer.push(Line::from(dim("enter makes it the prompt again; the current text is kept as a version")));
+            (lines, footer, " Prompt versions ", 2 + v.cursor * 2)
+        }
+        (None, None) => {
             let mut lines = vec![Line::from(dim("Copy the command that starts Claude Code with:")), Line::from("")];
             for (i, rule) in picker.library.iter().enumerate() {
                 let tick = if picker.ticked[i] { "[x]" } else { "[ ]" };
                 let digit = if i < 9 { format!("{}", i + 1) } else { " ".into() };
-                let own = if rule.own { "  (yours)" } else { "" };
-                lines.push(row(i == picker.cursor, format!("{digit} {tick} "), format!("{}{own}", rule.title)));
+                // Every prompt says whose it is: built into marsad, or the user's own file.
+                let tag = if rule.own { Span::styled("  [yours]", Style::new().fg(Color::Green)) } else { Span::styled("  [built-in]", Style::new().fg(Color::DarkGray)) };
+                lines.push(row(i == picker.cursor, format!("{digit} {tick} "), rule.title.clone(), Some(tag)));
                 lines.push(Line::from(dim(format!("        {}", rule.summary))));
             }
             let footer = match picker.deleting.and_then(|i| picker.library.get(i)) {
@@ -417,15 +442,16 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
                 None => vec![
                     Line::from(""),
                     Line::from(dim("n writes a new prompt with Claude · e edits yours or copies a built-in · d deletes yours")),
+                    Line::from(dim("v lists a prompt's earlier versions to restore · u brings back the one just deleted")),
                     Line::from(dim(format!("Your prompts are .md files in {}", home_relative(&crate::rules::prompts_dir())))),
                 ],
             };
             (lines, footer, " Launch command ", 2 + picker.cursor * 2)
         }
-        Some(mode) => {
+        (Some(mode), _) => {
             let mut lines = vec![Line::from(dim(format!("Start {} as:", crate::rules::titles(&picker.chosen())))), Line::from("")];
             for (i, m) in [Mode::Session, Mode::Team].into_iter().enumerate() {
-                lines.push(row(m == mode, format!("{} ", i + 1), m.title().to_string()));
+                lines.push(row(m == mode, format!("{} ", i + 1), m.title().to_string(), None));
                 lines.push(Line::from(dim(format!("    {}", m.summary()))));
             }
             let footer = vec![Line::from(""), Line::from(dim("Applies to new conversations; your choice is remembered."))];
@@ -1895,4 +1921,3 @@ mod tests {
         assert!(rows.iter().all(|r| r.width() <= 8));
     }
 }
-

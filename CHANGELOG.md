@@ -3,6 +3,14 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- Every edit, rename and delete of your prompts keeps a version; `v` in the `c` picker lists and restores them
+- `u` in the `c` picker brings back the prompt just deleted
+- `marsad prompt versions` and `marsad prompt restore` list and restore versions from the command line
+- The `c` picker tags each prompt `[built-in]` or `[yours]`, and so does `marsad rules`
+- `esc` on an unsaved draft asks before discarding it
+
 ## 0.11.0 - 2026-11-23
 
 - marsad keeps its data in `~/.marsad`; the data in `~/.claude/marsad` is copied over once and left there
