@@ -3,8 +3,9 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.13.0 - 2026-11-23
 
+- Run `marsad install` again after updating: it adds the new guard, message and handoff hooks
 - At 80% context a session is asked to write a handoff and pass it to `marsad handoff`
 - `marsad handoff` opens a new session in this terminal, else the default terminal, else tmux
 - Warp, iTerm2, Terminal.app, Ghostty, WezTerm, kitty, Windows Terminal and tmux are supported
