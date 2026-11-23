@@ -455,6 +455,16 @@ impl Session {
             self.set_idle(IdleCause::Interrupted, now);
             self.detail.clear();
         }
+        // Background agents that outlive the main agent's Stop keep the session active through their
+        // own hooks; once the last one stops and the hooks settle, the work is done.
+        // Only subagent hooks came after the Stop; a finished background shell instead waits for the
+        // follow-up turn Claude runs on its result.
+        let agents = self.subagents.values().any(|a| a.running);
+        let after_stop = self.last_event > self.last_hook;
+        if self.stopped && after_stop && self.status == Status::Active && !agents && !running && now - self.last_event >= INTERRUPT_GRACE_SECS {
+            self.set_idle(IdleCause::Finished, now);
+            self.detail.clear();
+        }
         if self.status == Status::Idle && running {
             let shells: Vec<&str> = self.shells().collect();
             let more = if shells.len() > 1 { format!(" +{}", shells.len() - 1) } else { String::new() };
