@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.11.0 - 2026-11-23
 
 - marsad keeps its data in `~/.marsad`; the data in `~/.claude/marsad` is copied over once and left there
 - Claude Code's own files (event log, status line reports) are in `~/.marsad/claude/`
