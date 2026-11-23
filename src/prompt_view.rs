@@ -95,11 +95,25 @@ impl TextBox {
     }
 }
 
-/// The idea screen's fields.
+/// The idea screen's fields and buttons, in `tab` order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     Idea,
     Name,
+    /// The "Write prompt" button.
+    Submit,
+    /// The "Cancel" button.
+    Cancel,
+}
+
+impl Field {
+    const ORDER: [Field; 4] = [Field::Idea, Field::Name, Field::Submit, Field::Cancel];
+
+    /// The next field, or the previous one when `back`, wrapping around.
+    fn step(self, back: bool) -> Field {
+        let i = Field::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Field::ORDER[(i + if back { 3 } else { 1 }) % 4]
+    }
 }
 
 /// What the one-line input on the review screen is for.
@@ -208,7 +222,7 @@ impl PromptView {
     /// Footer key hints for the current screen.
     pub fn keys(&self) -> Vec<(&'static str, &'static str)> {
         match &self.phase {
-            Phase::Idea => vec![("enter", "write it"), ("alt+enter", "new line"), ("tab", "name"), ("ctrl+e", "editor"), ("esc", "cancel")],
+            Phase::Idea => vec![("enter", "write it"), ("alt+enter", "new line"), ("tab", "next field"), ("ctrl+e", "editor"), ("esc", "cancel")],
             Phase::Generating { .. } => vec![("esc", "cancel")],
             Phase::Review => {
                 let mut keys = vec![("enter", "save"), ("e", "edit"), ("r", "revise"), ("n", "rename"), ("↑↓", "scroll")];
@@ -313,8 +327,12 @@ impl PromptView {
     pub fn on_paste(&mut self, pasted: &str) {
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let (target, multiline) = match &mut self.phase {
-            Phase::Idea if self.field == Field::Idea => (&mut self.idea, true),
-            Phase::Idea => (&mut self.name, false),
+            Phase::Idea if self.field == Field::Name => (&mut self.name, false),
+            Phase::Idea => {
+                // Pasting on a button still means the idea.
+                self.field = Field::Idea;
+                (&mut self.idea, true)
+            }
             Phase::Line(_, text) => (text, false),
             _ => return,
         };
@@ -328,9 +346,12 @@ impl PromptView {
         match &mut self.phase {
             Phase::Idea => match code {
                 KeyCode::Esc => return Outcome::Close,
-                KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
-                    self.field = if self.field == Field::Idea { Field::Name } else { Field::Idea };
+                KeyCode::Tab | KeyCode::Down => self.field = self.field.step(false),
+                KeyCode::BackTab | KeyCode::Up => self.field = self.field.step(true),
+                KeyCode::Left | KeyCode::Right if matches!(self.field, Field::Submit | Field::Cancel) => {
+                    self.field = if self.field == Field::Submit { Field::Cancel } else { Field::Submit };
                 }
+                KeyCode::Enter if self.field == Field::Cancel => return Outcome::Close,
                 KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.editing_draft = false;
                     return Outcome::Edit(self.idea.text());
@@ -341,7 +362,12 @@ impl PromptView {
                 KeyCode::Enter if self.idea.text().trim().is_empty() => self.warning = Some("Write the rough idea first.".into()),
                 KeyCode::Enter => self.start(self.request(None)),
                 _ => {
-                    let field = if self.field == Field::Idea { &mut self.idea } else { &mut self.name };
+                    let field = match self.field {
+                        Field::Idea => &mut self.idea,
+                        Field::Name => &mut self.name,
+                        // A button takes no text.
+                        Field::Submit | Field::Cancel => return Outcome::Stay,
+                    };
                     if field.on_key(key) {
                         self.warning = None;
                     }
@@ -597,6 +623,33 @@ mod tests {
         assert!(v.notice.as_deref().unwrap().contains("saves a copy"));
         assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved("coordination-copy".into()));
         assert_eq!(saved.lock().unwrap()[0].2, None, "a copy replaces nothing");
+    }
+
+    #[test]
+    fn tab_reaches_the_buttons_and_enter_presses_them() {
+        let (env, asked, _) = fake(vec![Ok(draft("Short pull requests", &[]))], Vec::new());
+        let mut v = PromptView::new(env);
+        typed(&mut v, "idea");
+        v.on_key(key(KeyCode::Tab));
+        v.on_key(key(KeyCode::Tab));
+        assert_eq!(v.field, Field::Submit);
+        typed(&mut v, "zz");
+        assert_eq!((v.idea.text(), v.name.text()), ("idea".to_string(), String::new()), "a button takes no text");
+        v.on_key(key(KeyCode::Right));
+        assert_eq!(v.field, Field::Cancel);
+        v.on_key(key(KeyCode::Tab));
+        assert_eq!(v.field, Field::Idea, "tab wraps around");
+        v.on_key(key(KeyCode::BackTab));
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Close, "enter on Cancel closes");
+
+        let mut v = PromptView::new(v.env.clone());
+        typed(&mut v, "idea");
+        v.on_key(key(KeyCode::BackTab));
+        v.on_key(key(KeyCode::BackTab));
+        assert_eq!(v.field, Field::Submit);
+        v.on_key(key(KeyCode::Enter));
+        wait(&mut v);
+        assert_eq!(asked.lock().unwrap()[0].idea, "idea", "enter on Write prompt sends the idea");
     }
 
     #[test]

@@ -5,7 +5,8 @@ GitHub release. Keep each bullet to one short line.
 
 ## Unreleased
 
-- `n` in the `c` picker writes a new prompt from a rough idea with Claude; review, revise and save it
+- `n` writes a new prompt from a rough idea with Claude, from the session list or the `c` picker
+- The idea box has Write prompt and Cancel buttons; `tab` reaches them
 - The review shows what Claude assumed and the questions it left open; a number answers one
 - `e` in the picker edits your prompt, or saves a copy of a built-in one; `d` deletes yours
 - `marsad prompt new|edit|copy|rm` does the same from the command line

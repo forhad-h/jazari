@@ -235,6 +235,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("p", "share".into()),
                 ("b", "board".into()),
                 ("c", "launch cmd".into()),
+                ("n", "new prompt".into()),
                 ("a", ended.into()),
                 ("m", format!("alerts: {}", if app.alerts_on { "on" } else { "off" })),
                 ("s/S", format!("sort: {}", app.sort.label())),
@@ -530,7 +531,7 @@ fn draw_prompt_idea(
         width,
     );
     let status: Vec<Line> = status.into_iter().flat_map(|l| wrap_line(l, width)).collect();
-    let [intro_area, _, idea_label, idea_box, _, name_label, name_box, _, status_area, _] = Layout::vertical([
+    let [intro_area, _, idea_label, idea_box, _, name_label, name_box, _, buttons, _, status_area, _] = Layout::vertical([
         Constraint::Length(intro.len() as u16),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -538,6 +539,8 @@ fn draw_prompt_idea(
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(status.len() as u16),
         Constraint::Fill(1),
@@ -559,6 +562,21 @@ fn draw_prompt_idea(
     let inner = block.inner(name_box);
     f.render_widget(block, name_box);
     f.render_widget(Paragraph::new(cursor_lines(name, field == Field::Name)), inner);
+    let button = |text: &'static str, focused: bool, primary: bool| {
+        let style = match (focused, primary) {
+            (true, _) => Style::new().fg(Color::Black).bg(ACCENT).bold(),
+            (false, true) => Style::new().fg(ACCENT).bold(),
+            (false, false) => Style::new().dark_gray(),
+        };
+        Span::styled(format!("[ {text} ]"), style)
+    };
+    let row = Line::from(vec![
+        button("Write prompt", field == Field::Submit, true),
+        Span::raw("  "),
+        button("Cancel", field == Field::Cancel, false),
+        dim("   tab moves here · enter presses"),
+    ]);
+    f.render_widget(Paragraph::new(row), buttons);
     f.render_widget(Paragraph::new(status), status_area);
 }
 

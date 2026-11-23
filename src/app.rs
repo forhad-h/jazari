@@ -567,10 +567,13 @@ impl App {
             Outcome::Edit(text) => return Action::EditPrompt(text),
             Outcome::Saved(key) => {
                 self.prompt_view = None;
-                if let Some(picker) = self.rules_picker.as_mut() {
-                    picker.reload(crate::rules::library(), Some(&key));
+                match self.rules_picker.as_mut() {
+                    Some(picker) => {
+                        picker.reload(crate::rules::library(), Some(&key));
+                        self.info = Some(format!("saved {key} to your prompts and ticked it "));
+                    }
+                    None => self.info = Some(format!("saved {key} to your prompts · c to start a session with it ")),
                 }
-                self.info = Some(format!("saved {key} to your prompts and ticked it "));
             }
         }
         Action::None
@@ -929,6 +932,7 @@ impl App {
             (View::List, KeyCode::Char('p')) => self.open_share(),
             (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
             (View::List | View::Board, KeyCode::Char('c')) => self.open_rules_picker(),
+            (View::List, KeyCode::Char('n')) => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real())),
             (View::Board, KeyCode::Esc | KeyCode::Char('b') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
             (View::Board, KeyCode::Down | KeyCode::Char('j')) => self.board.scroll(1),
             (View::Board, KeyCode::Up | KeyCode::Char('k')) => self.board.scroll(-1),
