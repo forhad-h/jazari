@@ -72,6 +72,8 @@ pub enum View {
     Usage,
     /// The shared AGENT-BOARD.md of the selected session's repo.
     Board,
+    /// Caches, build output and Docker data that can be removed (`D`).
+    Clean,
 }
 
 /// Which events the history shows; `f` cycles through them.
@@ -168,6 +170,8 @@ pub struct App {
     pub counter: Counter,
     /// Disk, memory and CPU for the header meters, sampled once a second.
     pub system: Option<crate::system::Snapshot>,
+    /// The cleanup view's state while it is open.
+    pub clean: Option<crate::clean_view::CleanView>,
     sampler: crate::system::Sampler,
 }
 
@@ -492,6 +496,7 @@ impl App {
             last_slow_refresh: Instant::now() - Duration::from_secs(60),
             counter: Counter::default(),
             system: None,
+            clean: None,
             sampler: crate::system::Sampler::default(),
         }
     }
@@ -879,6 +884,9 @@ impl App {
             self.usage.reload();
             self.announce(b);
         }
+        if let Some(clean) = self.clean.as_mut() {
+            clean.tick();
+        }
         if let Ok(notice) = self.update_rx.try_recv() {
             self.update = Some(notice);
         }
@@ -1002,6 +1010,15 @@ impl App {
             (View::List, KeyCode::Char('u')) => {
                 self.view = View::Usage;
                 self.usage.reload();
+            }
+            (View::List, KeyCode::Char('D')) => {
+                self.clean = Some(crate::clean_view::CleanView::open());
+                self.view = View::Clean;
+            }
+            (View::Clean, code) => {
+                if !self.clean.as_mut().is_some_and(|c| c.on_key(code)) {
+                    self.view = View::List;
+                }
             }
             (View::List, KeyCode::Esc) => return Action::Quit,
             (View::List, KeyCode::Down | KeyCode::Char('j')) => self.move_selection(1),

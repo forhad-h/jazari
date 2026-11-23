@@ -191,6 +191,11 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("q", "quit".into()),
             ]
         }
+        (View::Clean, _) if app.clean.is_some() => {
+            let clean = app.clean.as_ref().unwrap();
+            draw_clean(f, body, clean, app.system.as_ref(), app.tick);
+            clean.keys().into_iter().map(|(k, label)| (k, label.to_string())).chain([("q", "quit".to_string())]).collect()
+        }
         (View::History, Some(s)) => {
             draw_history(f, body, app, s);
             vec![
@@ -232,6 +237,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("enter", "history".into()),
                 ("tab", "subagents".into()),
                 ("u", "usage".into()),
+                ("D", "disk cleanup".into()),
                 ("p", "share".into()),
                 ("b", "board".into()),
                 ("c", "launch cmd".into()),
@@ -310,7 +316,13 @@ pub fn draw(f: &mut Frame, app: &App) {
 fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let [area, meters] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
     if let Some(snap) = &app.system {
-        f.render_widget(Paragraph::new(Line::from(system_spans(snap, meters.width))), meters);
+        let left = Line::from(system_spans(snap, meters.width));
+        let own = Line::from(own_spans(snap));
+        // marsad's own share goes on the right when it fits beside the meters.
+        if left.width() + own.width() + 2 <= meters.width as usize {
+            f.render_widget(Paragraph::new(own).alignment(Alignment::Right), meters);
+        }
+        f.render_widget(Paragraph::new(left), meters);
     }
     let waiting = visible.iter().filter(|s| s.status.needs_user()).count();
     let active = visible.iter().filter(|s| s.status == Status::Active).count();
@@ -399,6 +411,107 @@ fn system_spans(s: &crate::system::Snapshot, width: u16) -> Vec<Span<'static>> {
         spans.push(Span::styled(format!(" · load {:.1}", s.load[0]), style));
     }
     spans
+}
+
+/// What marsad itself uses: its CPU, memory and data folder.
+fn own_spans(s: &crate::system::Snapshot) -> Vec<Span<'static>> {
+    let dim = |t: String| Span::styled(t, Style::new().dark_gray());
+    let mut text = String::from("marsad");
+    if let Some(cpu) = s.own_cpu {
+        text.push_str(&format!(" cpu {cpu:.1}%"));
+    }
+    text.push_str(&format!(" · mem {:.0} MB", s.own_mem as f64 / 1e6));
+    if let Some(n) = s.own_data {
+        text.push_str(&format!(" · data {}", crate::clean::fmt_bytes(n)));
+    }
+    vec![dim(text), Span::raw(" ")]
+}
+
+fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: Option<&crate::system::Snapshot>, tick: u64) {
+    use crate::clean::{Tier, fmt_bytes};
+    let dim = |t: String| Span::styled(t, Style::new().dark_gray());
+    let mut title = vec![Span::styled(" Disk cleanup ", Style::new().fg(ACCENT).bold())];
+    if let Some((_, r)) = sys.and_then(|s| s.disk.as_ref()) {
+        title.push(dim(format!("· {:.0}% full, {:.1} GB free ", r.used_pct(), r.free_gb())));
+    }
+    let mut right = vec![dim(format!(" auto-clean {} ", if v.auto { "on" } else { "off" }))];
+    if let Some(n) = v.freed_30d.filter(|n| *n > 0) {
+        right.push(dim(format!("· freed {} in 30 days ", fmt_bytes(n))));
+    }
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().dark_gray())
+        .title(Line::from(title))
+        .title(Line::from(right).alignment(Alignment::Right));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let status_lines = if v.confirm.is_some() || v.busy() || v.judging || !v.log.is_empty() { (v.log.len() as u16 + 1).clamp(2, 6) } else { 0 };
+    let [list, status] = Layout::vertical([Constraint::Min(3), Constraint::Length(status_lines)]).areas(inner);
+    let heads = [
+        (Tier::A, "A · rebuilt automatically, holds no data", Color::Green),
+        (Tier::B, "B · rebuilt, but slow to get back", Color::Yellow),
+        (Tier::C, "C · holds data: one at a time, after you check it", Color::Red),
+    ];
+    let mut lines = Vec::new();
+    let mut selected_line = 0;
+    for (tier, head, color) in heads {
+        let items: Vec<(usize, &crate::clean::Item)> = v.items.iter().enumerate().filter(|(_, i)| i.tier == tier).collect();
+        if items.is_empty() {
+            continue;
+        }
+        let total: u64 = items.iter().map(|(_, i)| i.bytes).sum();
+        lines.push(Line::from(vec![Span::styled(format!(" {head}"), Style::new().fg(color).bold()), dim(format!("  {}", fmt_bytes(total)))]));
+        for (idx, item) in items {
+            let sel = idx == v.selected;
+            if sel {
+                selected_line = lines.len();
+            }
+            let style = if sel { Style::new().reversed() } else { Style::new() };
+            let id = if item.id.starts_with('/') { short_path(&item.id) } else { item.id.clone() };
+            let mut spans = vec![
+                Span::styled(format!("   {:>9}  {}", fmt_bytes(item.bytes), item.what), style),
+                dim(format!("  {id}")),
+            ];
+            if !item.note.is_empty() {
+                spans.push(dim(format!("  · {}", item.note)));
+            }
+            lines.push(Line::from(spans));
+            if let Some(verdict) = v.verdict(item) {
+                let color = match verdict.call.as_str() {
+                    "safe" => Color::Green,
+                    "suggest" => Color::Yellow,
+                    _ => Color::Red,
+                };
+                lines.push(Line::from(vec![
+                    Span::raw("              "),
+                    Span::styled(format!("Claude: {}", verdict.call), Style::new().fg(color)),
+                    dim(format!(" · {}", verdict.reason)),
+                ]));
+            }
+        }
+        lines.push(Line::from(""));
+    }
+    if lines.is_empty() {
+        let msg = if v.scanning { "Measuring caches, idle projects and Docker…" } else { "Nothing to clean." };
+        lines.push(Line::from(dim(format!(" {msg}"))));
+    }
+    let skip = selected_line.saturating_sub(list.height.saturating_sub(2) as usize);
+    f.render_widget(Paragraph::new(lines).scroll((skip as u16, 0)), list);
+
+    let mut out = Vec::new();
+    let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][(tick as usize) % 10];
+    if let Some(q) = v.question() {
+        out.push(Line::from(Span::styled(format!(" {q}  y to remove, any other key keeps it"), Style::new().fg(Color::Yellow).bold())));
+    } else if v.running {
+        out.push(Line::from(dim(format!(" {spin} removing…"))));
+    } else if v.judging {
+        out.push(Line::from(dim(format!(" {spin} asking Claude about the data-holding items…"))));
+    } else if v.scanning && !v.items.is_empty() {
+        out.push(Line::from(dim(format!(" {spin} measuring…"))));
+    }
+    out.extend(v.log.iter().map(|l| Line::from(format!(" {l}"))));
+    f.render_widget(Paragraph::new(out).wrap(Wrap { trim: false }), status);
 }
 
 fn draw_list(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
@@ -1980,4 +2093,5 @@ mod tests {
         assert!(rows.iter().all(|r| r.width() <= 8));
     }
 }
+
 

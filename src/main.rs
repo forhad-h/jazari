@@ -5,6 +5,8 @@ mod badges;
 mod board;
 mod card;
 mod clean;
+mod clean_judge;
+mod clean_view;
 mod clipboard;
 mod context;
 mod disk;

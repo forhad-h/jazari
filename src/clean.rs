@@ -32,7 +32,7 @@ pub enum Tier {
 }
 
 impl Tier {
-    fn key(self) -> &'static str {
+    pub fn key(self) -> &'static str {
         match self {
             Tier::A => "A",
             Tier::B => "B",
@@ -47,6 +47,10 @@ pub enum Action {
     /// Delete a cache or build-output folder (after the checks in `check_remove`).
     RemoveDir { path: PathBuf, kind: DirKind },
     Docker(&'static [&'static str]),
+    /// `git worktree remove` (which itself refuses a worktree with changes).
+    GitWorktreeRemove { repo: PathBuf, path: PathBuf },
+    /// `docker volume rm` of one volume no container uses.
+    DockerVolumeRm(String),
     /// Report only.
     None,
 }
@@ -57,6 +61,8 @@ pub enum DirKind {
     Cache { tools: &'static [&'static str] },
     /// Build output or dependencies inside a project folder.
     Project { root: PathBuf },
+    /// A backup copy that sits next to the folder it copies.
+    Backup { original: PathBuf },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -313,6 +319,114 @@ fn git_ignored(path: &Path, env: &Env) -> bool {
     (env.run)("git", &["-C", &parent, "check-ignore", "-q", name], Duration::from_secs(5)).is_some()
 }
 
+/// The name a backup folder copies, when `name` looks like a backup: `src.bak-1119` → `src`,
+/// `app-backup` → `app`, `site_old` → `site`.
+fn backup_base(name: &str) -> Option<&str> {
+    let lower = name.to_ascii_lowercase();
+    let cut = [".bak", "-bak", "_bak", " bak", ".backup", "-backup", "_backup", " backup", "-old", "_old", ".old", " copy"]
+        .iter()
+        .filter_map(|m| lower.find(m))
+        .min()?;
+    (cut > 0).then(|| &name[..cut])
+}
+
+/// Days since a folder last changed.
+fn age_days(path: &Path) -> u64 {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map_or(0, |d| d.as_secs() / 86_400)
+}
+
+/// Backup copies next to their original, in project folders and the folders that hold them.
+fn backup_items(roots: &[(PathBuf, f64)], env: &Env) -> Vec<Item> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for (root, _) in roots {
+        for d in [Some(root.as_path()), root.parent()].into_iter().flatten() {
+            if d != env.home && d.starts_with(&env.home) && !dirs.iter().any(|x| x == d) {
+                dirs.push(d.to_path_buf());
+            }
+        }
+    }
+    let mut found: Vec<(Item, PathBuf, u64)> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if !ft.is_dir() || ft.is_symlink() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(base) = backup_base(&name) else { continue };
+            let original = dir.join(base);
+            let path = e.path();
+            if !original.is_dir() || env.live.iter().any(|l| l.starts_with(&path)) {
+                continue;
+            }
+            let bytes = dir_size(&path);
+            if bytes < MIN_BYTES {
+                continue;
+            }
+            let age = age_days(&path);
+            let item = Item {
+                id: path.display().to_string(),
+                tier: Tier::C,
+                what: format!("backup of {base}"),
+                bytes,
+                action: Action::RemoveDir { path, kind: DirKind::Backup { original: original.clone() } },
+                note: format!("changed {age} days ago"),
+            };
+            found.push((item, original, age));
+        }
+    }
+    // Of several copies of one folder, the newest is marked so it is kept.
+    let mut out = Vec::new();
+    for (i, (item, original, age)) in found.iter().enumerate() {
+        let mut item = item.clone();
+        let copies: Vec<&(Item, PathBuf, u64)> = found.iter().filter(|(_, o, _)| o == original).collect();
+        let newest = copies.iter().map(|(_, _, a)| *a).min() == Some(*age) && found.iter().position(|(_, o, a)| o == original && a == age) == Some(i);
+        if copies.len() > 1 && newest {
+            item.note.push_str(" · the newest copy");
+        }
+        out.push(item);
+    }
+    out
+}
+
+/// Claude Code worktrees under each project's `.claude/worktrees`: merged and clean ones can go
+/// (tier B); ones with changes or unmerged commits are reported so they aren't forgotten.
+fn worktree_items(roots: &[(PathBuf, f64)], env: &Env) -> Vec<Item> {
+    let git = |dir: &Path, args: &[&str]| {
+        let d = dir.to_string_lossy();
+        let mut a = vec!["-C", d.as_ref()];
+        a.extend_from_slice(args);
+        (env.run)("git", &a, Duration::from_secs(10)).map(|s| s.trim().to_string())
+    };
+    let mut out = Vec::new();
+    for (root, _) in roots {
+        let Ok(entries) = std::fs::read_dir(root.join(".claude/worktrees")) else { continue };
+        let default = git(root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).filter(|b| !b.is_empty()).unwrap_or_else(|| "main".into());
+        for e in entries.flatten() {
+            let path = e.path();
+            if !e.file_type().is_ok_and(|t| t.is_dir()) || env.live.iter().any(|l| l.starts_with(&path)) {
+                continue;
+            }
+            let Some(status) = git(&path, &["status", "--porcelain"]) else { continue };
+            let branch = git(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+            let head = git(&path, &["rev-parse", "HEAD"]).unwrap_or_default();
+            let merged = !head.is_empty() && git(root, &["merge-base", "--is-ancestor", &head, &default]).is_some();
+            let bytes = dir_size(&path);
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let (tier, action, note) = if status.is_empty() && merged {
+                (Tier::B, Action::GitWorktreeRemove { repo: root.clone(), path: path.clone() }, format!("branch {branch} is merged into {default}, no changes"))
+            } else if !status.is_empty() {
+                (Tier::C, Action::None, format!("branch {branch} has uncommitted changes; kept"))
+            } else {
+                (Tier::C, Action::None, format!("branch {branch} has commits not in {default}; kept"))
+            };
+            out.push(Item { id: path.display().to_string(), tier, what: format!("Claude Code worktree in {name}"), bytes, action, note });
+        }
+    }
+    out
+}
+
 /// Docker's reclaimable space by kind, when the daemon answers.
 fn docker_items(env: &Env) -> Vec<Item> {
     let Some(text) = (env.run)("docker", &["system", "df", "--format", "{{json .}}"], Duration::from_secs(8)) else { return Vec::new() };
@@ -330,15 +444,40 @@ fn docker_items(env: &Env) -> Vec<Item> {
                 "Docker containers stopped for over 7 days",
                 Action::Docker(&["container", "prune", "-f", "--filter", "until=168h"]),
             ),
-            "Local Volumes" => ("docker-volumes", Tier::C, "Docker volumes no container uses (may hold databases)", Action::None),
             _ => continue,
         };
         if bytes >= MIN_BYTES {
-            let note = if tier == Tier::C { "check with `docker volume ls -f dangling=true`; marsad never removes volumes".into() } else { note.clone() };
-            out.push(Item { id: id.into(), tier, what: what.into(), bytes, action, note });
+            out.push(Item { id: id.into(), tier, what: what.into(), bytes, action, note: note.clone() });
         }
     }
+    // Each volume no container uses, named, since one may hold a database.
+    let Some(text) = (env.run)("docker", &["system", "df", "-v", "--format", "{{json .}}"], Duration::from_secs(15)) else { return out };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim()) else { return out };
+    for vol in v["Volumes"].as_array().into_iter().flatten() {
+        let name = vol["Name"].as_str().unwrap_or("");
+        let bytes = parse_size(vol["Size"].as_str().unwrap_or(""));
+        if vol["Links"].as_str() != Some("0") || !valid_volume_name(name) || bytes < MIN_BYTES {
+            continue;
+        }
+        let labels = vol["Labels"].as_str().unwrap_or("");
+        let label = |k: &str| labels.split(',').find_map(|kv| kv.strip_prefix(k)?.strip_prefix('=')).unwrap_or("");
+        let (project, short) = (label("com.docker.compose.project"), label("com.docker.compose.volume"));
+        let what = if project.is_empty() { format!("Docker volume {name}") } else { format!("Docker volume {short} of {project}") };
+        out.push(Item {
+            id: format!("docker-volume:{name}"),
+            tier: Tier::C,
+            what,
+            bytes,
+            action: Action::DockerVolumeRm(name.to_string()),
+            note: "no container uses it; may hold a database".into(),
+        });
+    }
     out
+}
+
+/// Docker volume names marsad passes to `docker volume rm`: letters, digits, `_`, `.` and `-`.
+fn valid_volume_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('-') && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
 /// Everything that could be cleaned, largest first within each tier.
@@ -403,6 +542,8 @@ pub fn plan(env: &Env) -> Vec<Item> {
         }
     }
 
+    items.extend(worktree_items(&roots, env));
+    items.extend(backup_items(&roots, env));
     items.extend(docker_items(env));
     items.sort_by(|a, b| a.tier.cmp(&b.tier).then(b.bytes.cmp(&a.bytes)));
     items
@@ -417,7 +558,11 @@ pub fn check_remove(path: &Path, kind: &DirKind, env: &Env) -> Result<(), String
         return Err("it is not a plain folder".into());
     }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if !REMOVABLE_NAMES.contains(&name) {
+    let named_right = match kind {
+        DirKind::Backup { original } => backup_base(name).is_some_and(|b| path.parent().map(|p| p.join(b)).as_ref() == Some(original)),
+        _ => REMOVABLE_NAMES.contains(&name),
+    };
+    if !named_right {
         return Err(format!("marsad never removes a folder named {name:?}"));
     }
     if path.components().any(|c| matches!(c.as_os_str().to_str(), Some(".git" | ".ssh" | ".gnupg")) || c.as_os_str().to_string_lossy().starts_with(".env")) {
@@ -450,6 +595,14 @@ pub fn check_remove(path: &Path, kind: &DirKind, env: &Env) -> Result<(), String
                 return Err("it no longer looks like build output".into());
             }
         }
+        DirKind::Backup { original } => {
+            if !original.is_dir() {
+                return Err("the folder it copies is gone, so it may be the only copy".into());
+            }
+            if env.live.iter().any(|l| l.starts_with(path)) {
+                return Err("a session is running in it".into());
+            }
+        }
     }
     Ok(())
 }
@@ -471,6 +624,23 @@ pub fn run_item(item: &Item, env: &Env, measure: &dyn Fn() -> Option<u64>) -> Ou
             Ok(()) => std::fs::remove_dir_all(path).map_err(|e| e.to_string()),
         },
         Action::Docker(args) => (env.run)("docker", args, Duration::from_secs(600)).map(|_| ()).ok_or_else(|| "docker failed".to_string()),
+        Action::DockerVolumeRm(name) => {
+            if !valid_volume_name(name) {
+                return Outcome::Kept("not a plain volume name".into());
+            }
+            // Without -f, Docker refuses a volume a container still uses.
+            (env.run)("docker", &["volume", "rm", name], Duration::from_secs(60)).map(|_| ()).ok_or_else(|| "docker refused (a container may use it)".to_string())
+        }
+        Action::GitWorktreeRemove { repo, path } => {
+            if env.live.iter().any(|l| l.starts_with(path)) {
+                return Outcome::Kept("a session is running in it".into());
+            }
+            let (repo, path) = (repo.to_string_lossy(), path.to_string_lossy());
+            // Without --force, git refuses a worktree with changes.
+            (env.run)("git", &["-C", &repo, "worktree", "remove", &path], Duration::from_secs(60))
+                .map(|_| ())
+                .ok_or_else(|| "git refused (the worktree has changes)".to_string())
+        }
     };
     match result {
         Ok(()) => Outcome::Done { freed: measure().zip(before).map_or(0, |(after, before)| after.saturating_sub(before)) },
@@ -478,25 +648,40 @@ pub fn run_item(item: &Item, env: &Env, measure: &dyn Fn() -> Option<u64>) -> Ou
     }
 }
 
-/// Runs the items one at a time and records each in the usage history.
-fn run_all(items: &[&Item], env: &Env, auto: bool) -> Vec<(String, u64, Outcome)> {
+/// Runs one item and records it in the usage history when it ran.
+pub fn run_and_record(item: &Item, env: &Env, auto: bool) -> Outcome {
     let home = env.home.clone();
     let measure = move || crate::disk::measure(&home).map(|r| r.available);
-    let conn = crate::store::open().ok();
-    let mut out = Vec::new();
-    for item in items {
-        let outcome = run_item(item, env, &measure);
-        if let (Some(conn), Outcome::Done { freed }) = (&conn, &outcome) {
-            let path = match &item.action {
-                Action::RemoveDir { path, .. } => path.display().to_string(),
-                _ => String::new(),
-            };
-            let c = crate::store::Cleanup { item: &item.id, tier: item.tier.key(), path: &path, estimated: item.bytes, freed: *freed, auto };
-            let _ = crate::store::record_cleanup(conn, crate::now(), &c);
-        }
-        out.push((item.what.clone(), item.bytes, outcome));
+    let outcome = run_item(item, env, &measure);
+    if let Outcome::Done { freed } = &outcome
+        && let Ok(conn) = crate::store::open()
+    {
+        let path = match &item.action {
+            Action::RemoveDir { path, .. } | Action::GitWorktreeRemove { path, .. } => path.display().to_string(),
+            Action::DockerVolumeRm(name) => name.clone(),
+            _ => String::new(),
+        };
+        let c = crate::store::Cleanup { item: &item.id, tier: item.tier.key(), path: &path, estimated: item.bytes, freed: *freed, auto };
+        let _ = crate::store::record_cleanup(&conn, crate::now(), &c);
     }
-    out
+    outcome
+}
+
+/// Runs the items one at a time.
+fn run_all(items: &[&Item], env: &Env, auto: bool) -> Vec<(String, u64, Outcome)> {
+    items.iter().map(|item| (item.what.clone(), item.bytes, run_and_record(item, env, auto))).collect()
+}
+
+/// Bytes freed in the last 30 days, from the usage history.
+pub fn freed_last_30_days(now: f64) -> Option<u64> {
+    crate::store::open_readonly().ok().and_then(|c| crate::store::freed_since(&c, now - 30.0 * 86_400.0).ok())
+}
+
+/// Turns automatic tier A cleanup on or off.
+pub fn set_auto(on: bool) -> anyhow::Result<()> {
+    let mut disk = crate::settings::get("disk").and_then(|v| v.as_object().cloned()).unwrap_or_default();
+    disk.insert("auto_clean".into(), json!(on));
+    crate::settings::set("disk", serde_json::Value::Object(disk))
 }
 
 // ---------- automatic cleanup ----------
@@ -575,6 +760,9 @@ pub struct CleanArgs {
     /// Turn automatic tier A cleanup at the warning level on or off.
     #[arg(long, value_parser = ["on", "off"])]
     auto_clean: Option<String>,
+    /// Ask Claude whether each data-holding item (tier C) can go; it only advises.
+    #[arg(long)]
+    judge: bool,
     /// Started by the disk guard: clean tier A if the disk is at the warning level.
     #[arg(long, hide = true)]
     auto: bool,
@@ -587,9 +775,7 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
         return auto();
     }
     if let Some(on) = a.auto_clean {
-        let mut disk = crate::settings::get("disk").and_then(|v| v.as_object().cloned()).unwrap_or_default();
-        disk.insert("auto_clean".into(), json!(on == "on"));
-        crate::settings::set("disk", serde_json::Value::Object(disk))?;
+        set_auto(on == "on")?;
         println!("{}", auto_label(on == "on"));
         return Ok(());
     }
@@ -600,7 +786,7 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
         for id in &a.run {
             match items.iter().find(|i| &i.id == id) {
                 None => eprintln!("{id}: not in the plan (run `marsad clean` to list items)"),
-                Some(i) if i.tier == Tier::C => eprintln!("{id}: holds data; marsad only reports it"),
+                Some(i) if i.tier == Tier::C => eprintln!("{id}: holds data; remove it from the dashboard (`D`), one item at a time"),
                 Some(_) => {}
             }
         }
@@ -615,7 +801,18 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let freed_30d = crate::store::open_readonly().ok().and_then(|c| crate::store::freed_since(&c, env.now - 30.0 * 86_400.0).ok());
+    if a.judge {
+        let ask = crate::clean_judge::candidates(&items);
+        if ask.is_empty() {
+            println!("No data-holding items to ask about.");
+        }
+        for (id, v) in crate::clean_judge::judge(&ask).map_err(anyhow::Error::msg)? {
+            println!("{:<8} {id}\n         {}", v.call, v.reason);
+        }
+        return Ok(());
+    }
+    let freed_30d = freed_last_30_days(env.now);
+    let verdicts = crate::clean_judge::load();
     match a.format {
         Format::Json => {
             let out = json!({
@@ -628,6 +825,7 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
                     "bytes": i.bytes,
                     "gb": (i.bytes as f64 / GB * 10.0).round() / 10.0,
                     "note": i.note,
+                    "claude": crate::clean_judge::lookup(&verdicts, i).map(|v| json!({ "call": v.call, "reason": v.reason })),
                     "path": match &i.action { Action::RemoveDir { path, .. } => Some(path.display().to_string()), _ => None },
                 })).collect::<Vec<_>>(),
             });
@@ -640,7 +838,7 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
             let heads = [
                 (Tier::A, "A  rebuilt automatically, holds no data (`marsad clean --tier-a`)"),
                 (Tier::B, "B  rebuilt, but slow to get back (`marsad clean --run <id>`)"),
-                (Tier::C, "C  holds data: reported, never removed by marsad"),
+                (Tier::C, "C  holds data: removed only one at a time from the dashboard (`D`); `--judge` asks Claude"),
             ];
             for (tier, head) in heads {
                 let list: Vec<&Item> = items.iter().filter(|i| i.tier == tier).collect();
@@ -652,6 +850,9 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
                 for i in list {
                     let note = if i.note.is_empty() { String::new() } else { format!("  ({})", i.note) };
                     println!("  {:>9}  {}  [{}]{note}", fmt_bytes(i.bytes), i.what, i.id);
+                    if let Some(v) = crate::clean_judge::lookup(&verdicts, i) {
+                        println!("             Claude: {} · {}", v.call, v.reason);
+                    }
                 }
             }
             if items.is_empty() {
@@ -666,7 +867,7 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn auto_label(on: bool) -> String {
+pub fn auto_label(on: bool) -> String {
     if on {
         "Auto-clean: on. Tier A is cleaned on its own when the disk reaches the warning level (`marsad clean --auto-clean off`).".into()
     } else {
@@ -752,7 +953,7 @@ mod tests {
         e.live = vec![api.join("src")];
         e.run = Box::new(|prog, args, _| match (prog, args.first()) {
             ("git", _) if !args.contains(&".turbo") => Some(String::new()),
-            ("docker", Some(&"system")) => Some(
+            ("docker", Some(&"system")) if !args.contains(&"-v") => Some(
                 [
                     r#"{"Type":"Build Cache","Reclaimable":"27.7GB"}"#,
                     r#"{"Type":"Images","Reclaimable":"30.2GB (70%)"}"#,
@@ -760,6 +961,14 @@ mod tests {
                     r#"{"Type":"Containers","Reclaimable":"0B (0%)"}"#,
                 ]
                 .join("\n"),
+            ),
+            ("docker", Some(&"system")) if args.contains(&"-v") => Some(
+                r#"{"Volumes":[
+                    {"Name":"web_pgdata","Links":"0","Size":"2.1GB","Labels":"com.docker.compose.project=web,com.docker.compose.volume=pgdata"},
+                    {"Name":"in_use","Links":"1","Size":"9GB","Labels":""},
+                    {"Name":"--evil","Links":"0","Size":"9GB","Labels":""}
+                ]}"#
+                .into(),
             ),
             _ => None,
         });
@@ -771,10 +980,11 @@ mod tests {
             (Tier::A, "~/Projects/web/.next".into()),
             (Tier::B, "docker-unused-images".into()),
             (Tier::B, "~/Projects/web/node_modules".into()),
-            (Tier::C, "docker-volumes".into()),
+            (Tier::C, "docker-volume:web_pgdata".into()),
         ]);
         assert_eq!(items[0].action, Action::Docker(&["builder", "prune", "-a", "-f"]));
-        assert_eq!(items[5].action, Action::None, "volumes are never removed");
+        assert_eq!(items[5].what, "Docker volume pgdata of web");
+        assert_eq!(items[5].action, Action::DockerVolumeRm("web_pgdata".into()), "one named volume, never a flag");
     }
 
     #[test]
@@ -867,6 +1077,79 @@ mod tests {
         assert!(!cache.exists() && home.join(".npm").exists());
         let report = Item { action: Action::None, ..item };
         assert!(matches!(run_item(&report, &e, &measure), Outcome::Kept(_)));
+    }
+
+    #[test]
+    fn backups_are_found_next_to_their_original_and_the_newest_is_marked() {
+        assert_eq!(backup_base("src.bak-1119"), Some("src"));
+        assert_eq!(backup_base("App-Backup"), Some("App"));
+        assert_eq!(backup_base("site_old"), Some("site"));
+        assert_eq!(backup_base("bakery"), None);
+        assert_eq!(backup_base(".bak"), None);
+
+        let t = tree("backup");
+        let web = t.0.join("Projects/web");
+        file(&web.join("src/main.ts"), 10);
+        file(&web.join("src.bak-1119/main.ts"), 60_000_000);
+        file(&web.join("src.bak-1120/main.ts"), 60_000_000);
+        file(&web.join("lib.bak/x"), 60_000_000); // no `lib` next to it: maybe the only copy
+        let e = env(&t.0, 0.0, &[]);
+        let items = backup_items(&[(web.clone(), 0.0)], &e);
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert!(items.iter().all(|i| i.tier == Tier::C && i.what == "backup of src"));
+        assert_eq!(items.iter().filter(|i| i.note.contains("newest")).count(), 1);
+
+        let path = web.join("src.bak-1119");
+        let kind = DirKind::Backup { original: web.join("src") };
+        assert_eq!(check_remove(&path, &kind, &e), Ok(()));
+        let wrong = DirKind::Backup { original: web.join("other") };
+        assert!(check_remove(&path, &wrong, &e).is_err(), "the original must be the folder it is named after");
+        std::fs::remove_dir_all(web.join("src")).unwrap();
+        assert!(check_remove(&path, &kind, &e).unwrap_err().contains("only copy"));
+    }
+
+    #[test]
+    fn only_merged_clean_worktrees_can_be_removed() {
+        let t = tree("worktrees");
+        let repo = t.0.join("Projects/app");
+        for w in ["done", "dirty", "ahead", "live"] {
+            file(&repo.join(format!(".claude/worktrees/{w}/f")), 10);
+        }
+        let mut e = env(&t.0, 0.0, &[]);
+        e.live = vec![repo.join(".claude/worktrees/live")];
+        e.run = Box::new(|prog, args, _| {
+            if prog != "git" {
+                return None;
+            }
+            let dir = args[1];
+            let wt = dir.rsplit('/').next().unwrap_or("");
+            match &args[2..] {
+                ["symbolic-ref", ..] => Some("origin/main\n".into()),
+                ["status", ..] => Some(if wt == "dirty" { " M f\n".into() } else { String::new() }),
+                ["rev-parse", "--abbrev-ref", ..] => Some(format!("{wt}-branch\n")),
+                ["rev-parse", "HEAD"] => Some(format!("sha-{wt}\n")),
+                ["merge-base", "--is-ancestor", sha, _] => (*sha != "sha-ahead").then(String::new),
+                _ => None,
+            }
+        });
+        let mut items = worktree_items(&[(repo.clone(), 0.0)], &e);
+        items.sort_by(|a, b| a.id.cmp(&b.id));
+        let got: Vec<(String, Tier, bool)> =
+            items.iter().map(|i| (i.id.rsplit('/').next().unwrap().to_string(), i.tier, i.action != Action::None)).collect();
+        assert_eq!(got, [("ahead".to_string(), Tier::C, false), ("dirty".into(), Tier::C, false), ("done".into(), Tier::B, true)]);
+        assert!(items[0].note.contains("not in origin/main"));
+    }
+
+    #[test]
+    fn volume_names_are_checked_before_docker_sees_them() {
+        assert!(valid_volume_name("web_pgdata-1.2"));
+        assert!(!valid_volume_name("-f"));
+        assert!(!valid_volume_name("a b"));
+        assert!(!valid_volume_name("x;rm"));
+        let t = tree("volume");
+        let e = env(&t.0, 0.0, &[]);
+        let item = Item { id: "v".into(), tier: Tier::C, what: "v".into(), bytes: 1, action: Action::DockerVolumeRm("--all".into()), note: String::new() };
+        assert!(matches!(run_item(&item, &e, &|| None), Outcome::Kept(_)));
     }
 
     #[test]
