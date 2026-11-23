@@ -54,6 +54,8 @@ pub struct Live {
     pub id: String,
     pub cwd: String,
     pub pid: Option<u32>,
+    /// When this run of the session started (Unix seconds); its process can't be younger.
+    pub since: f64,
 }
 
 type Measure = Box<dyn Fn(&Path) -> Option<Reading>>;
@@ -76,7 +78,9 @@ pub struct Env {
     /// Starts a cleanup of rebuildable data at this level.
     pub clean: Box<dyn FnMut(Level)>,
     /// Whether this pid is still a process that looks like Claude Code.
-    pub is_claude: Box<dyn Fn(u32) -> bool>,
+    /// Whether the pid is still a Claude Code process that started by the given time, so a reused
+    /// pid never gets the signal.
+    pub is_claude: Box<dyn Fn(u32, f64) -> bool>,
     /// Sends SIGINT; true when it was delivered.
     pub interrupt: Box<dyn FnMut(u32) -> bool>,
     /// Records that a session was stopped, so the dashboard marks it.
@@ -144,7 +148,7 @@ impl Watcher {
     fn interrupt(&mut self, env: &mut Env, sessions: &[Live], reading: &Reading) {
         for s in sessions {
             let Some(pid) = s.pid.filter(|p| *p > 1 && *p != std::process::id()) else { continue };
-            if self.interrupted.contains(&pid) || !(env.is_claude)(pid) {
+            if self.interrupted.contains(&pid) || !(env.is_claude)(pid, s.since) {
                 continue;
             }
             self.interrupted.insert(pid);
@@ -305,17 +309,21 @@ pub fn running_pid(dir: &Path, is_marsad: impl Fn(u32) -> bool) -> Option<u32> {
     std::fs::read_to_string(pid_path(dir)).ok()?.trim().parse().ok().filter(|p| is_marsad(*p))
 }
 
-fn process(pid: u32) -> Option<(String, Option<PathBuf>)> {
+/// Hooks fire after the process starts; this covers a slow start and clock rounding.
+const START_SLACK_SECS: f64 = 120.0;
+
+/// A process's name, executable and start time (Unix seconds).
+fn process(pid: u32) -> Option<(String, Option<PathBuf>, u64)> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut sys = System::new();
     let pid = Pid::from_u32(pid);
     sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_exe(UpdateKind::OnlyIfNotSet));
     let p = sys.process(pid)?;
-    Some((p.name().to_string_lossy().into_owned(), p.exe().map(Path::to_path_buf)))
+    Some((p.name().to_string_lossy().into_owned(), p.exe().map(Path::to_path_buf), p.start_time()))
 }
 
 fn is_marsad(pid: u32) -> bool {
-    process(pid).is_some_and(|(name, _)| name.to_lowercase().contains("marsad"))
+    process(pid).is_some_and(|(name, ..)| name.to_lowercase().contains("marsad"))
 }
 
 /// Claude Code runs as `claude`, as `node` (npm installs), or as a binary named after its version
@@ -324,6 +332,12 @@ fn looks_like_claude(name: &str, exe: Option<&Path>) -> bool {
     let name = name.to_lowercase();
     let name = name.trim_end_matches(".exe");
     name.contains("claude") || name == "node" || exe.is_some_and(|e| e.to_string_lossy().to_lowercase().contains("claude"))
+}
+
+/// The process is Claude Code and was already running when the session's run started; a pid
+/// reused by a newer process fails this.
+fn still_the_session(name: &str, exe: Option<&Path>, started: u64, since: f64) -> bool {
+    looks_like_claude(name, exe) && started as f64 <= since + START_SLACK_SECS
 }
 
 /// Starts the watcher, detached, unless one is already running.
@@ -367,7 +381,7 @@ impl Env {
                 }
                 crate::app::mark_exited(&mut sessions, &mut sys);
                 sessions.retain(|_, s| s.status != crate::model::Status::Ended);
-                sessions.values().map(|s| Live { id: s.id.clone(), cwd: s.cwd.clone(), pid: s.pid }).collect()
+                sessions.values().map(|s| Live { id: s.id.clone(), cwd: s.cwd.clone(), pid: s.pid, since: s.run_started.max(s.started) }).collect()
             }),
             measure: Box::new(crate::disk::measure),
             alert: Box::new(|title, body| {
@@ -379,7 +393,7 @@ impl Env {
                 let _ = crate::alerts::detached("curl", &args);
             }),
             clean: Box::new(crate::clean::maybe_start),
-            is_claude: Box::new(|pid| process(pid).is_some_and(|(name, exe)| looks_like_claude(&name, exe.as_deref()))),
+            is_claude: Box::new(|pid, since| process(pid).is_some_and(|(name, exe, started)| still_the_session(&name, exe.as_deref(), started, since))),
             interrupt: Box::new(sigint),
             halted: Box::new(crate::disk::log_halt),
             ballast: ballast_path(),
@@ -470,7 +484,7 @@ mod tests {
             alert: Box::new(move |title, _| s1.borrow_mut().alerts.push(title.to_string())),
             curl: Box::new(move |args| s2.borrow_mut().curls.push(args.to_vec())),
             clean: Box::new(move |l| s3.borrow_mut().cleans.push(l)),
-            is_claude: Box::new(move |pid| names(pid).is_some_and(|n| looks_like_claude(n, None))),
+            is_claude: Box::new(move |pid, since| since >= 0.0 && names(pid).is_some_and(|n| looks_like_claude(n, None))),
             interrupt: Box::new(move |pid| {
                 s4.borrow_mut().interrupts.push(pid);
                 true
@@ -482,7 +496,7 @@ mod tests {
     }
 
     fn live(id: &str, pid: Option<u32>) -> Live {
-        Live { id: id.into(), cwd: format!("/p/{id}"), pid }
+        Live { id: id.into(), cwd: format!("/p/{id}"), pid, since: 0.0 }
     }
 
     fn temp(name: &str) -> PathBuf {
@@ -667,5 +681,13 @@ mod tests {
         assert!(at(600.0, &mut w, &mut env), "idle starts again when the last session ends");
         assert!(at(1199.0, &mut w, &mut env));
         assert!(!at(1200.0, &mut w, &mut env));
+    }
+
+    #[test]
+    fn a_reused_pid_is_never_interrupted() {
+        assert!(still_the_session("claude", None, 1_000, 1_010.0));
+        assert!(still_the_session("node", None, 1_100, 1_010.0), "within the start slack");
+        assert!(!still_the_session("node", None, 5_000, 1_010.0), "a newer process took the pid");
+        assert!(!still_the_session("python", None, 1_000, 1_010.0));
     }
 }
