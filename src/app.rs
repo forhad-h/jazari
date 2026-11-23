@@ -175,10 +175,27 @@ pub struct CopyNote {
     pub cli: String,
 }
 
-/// The rules ticked in the `c` picker and the highlighted row.
+/// The `c` picker: first the prompts to tick, then whether they start a session or a team.
 pub struct RulesPicker {
-    pub selection: crate::rules::Selection,
+    pub library: Vec<crate::rules::Rule>,
+    /// One per library entry.
+    pub ticked: Vec<bool>,
+    /// The highlighted prompt.
     pub cursor: usize,
+    /// The highlighted mode once the prompts are chosen; None while ticking them.
+    pub mode: Option<crate::rules::Mode>,
+}
+
+impl RulesPicker {
+    pub fn chosen(&self) -> Vec<&crate::rules::Rule> {
+        self.library.iter().zip(&self.ticked).filter(|(_, t)| **t).map(|(r, _)| r).collect()
+    }
+
+    fn toggle(&mut self, i: usize) {
+        if let Some(t) = self.ticked.get_mut(i) {
+            *t = !*t;
+        }
+    }
 }
 
 /// How long a success note stays in the footer. Errors stay until a key, so one isn't missed.
@@ -401,8 +418,8 @@ fn merge_live(indexed: &DayTotals, all_time: i64, day: &str, live: &HashMap<(Str
 impl App {
     fn new() -> Self {
         let dir = crate::data_dir();
-        // `marsad update` only swaps the binary, so refresh the rules this build ships.
-        let _ = crate::rules::refresh();
+        // Generated prompt files nobody has copied a command for in a while.
+        let _ = crate::rules::prune();
         let mut sessions = HashMap::new();
         // Replay the rotated log first so long-running sessions keep their history.
         for ev in JsonlTail::new(dir.join("events.1.jsonl")).read_new() {
@@ -517,55 +534,76 @@ impl App {
         }
     }
 
-    /// Opens the `c` picker with the rules chosen last time ticked.
+    /// Opens the `c` picker with the prompts chosen last time ticked.
     fn open_rules_picker(&mut self) {
-        self.rules_picker = Some(RulesPicker { selection: crate::settings::rules(), cursor: 0 });
+        let library = crate::rules::library();
+        let saved = crate::settings::rules();
+        let ticked = library.iter().map(|r| saved.contains(&r.key)).collect();
+        self.rules_picker = Some(RulesPicker { library, ticked, cursor: 0, mode: None });
     }
 
     fn on_picker_key(&mut self, code: KeyCode) {
+        use crate::rules::Mode;
         let Some(picker) = self.rules_picker.as_mut() else { return };
-        let last = crate::rules::RULES.len() - 1;
+        if let Some(mode) = picker.mode {
+            let other = if mode == Mode::Session { Mode::Team } else { Mode::Session };
+            match code {
+                KeyCode::Esc => picker.mode = None,
+                KeyCode::Char('q' | 'c') => self.rules_picker = None,
+                KeyCode::Down | KeyCode::Up | KeyCode::Char('j' | 'k') | KeyCode::Tab => picker.mode = Some(other),
+                KeyCode::Char('1') => picker.mode = Some(Mode::Session),
+                KeyCode::Char('2') => picker.mode = Some(Mode::Team),
+                KeyCode::Enter => {
+                    let keys: Vec<String> = picker.chosen().iter().map(|r| r.key.clone()).collect();
+                    let library = std::mem::take(&mut picker.library);
+                    self.rules_picker = None;
+                    let chosen = crate::rules::known(&library, &keys);
+                    if self.copy_launch_command(&chosen, mode) {
+                        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+                        if let Err(e) = crate::settings::set_rules(&keys).and_then(|()| crate::settings::set_launch_mode(mode)) {
+                            self.error = Some(format!("couldn't save the chosen prompts: {e:#}"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        let last = picker.library.len().saturating_sub(1);
         match code {
             KeyCode::Esc | KeyCode::Char('q' | 'c') => self.rules_picker = None,
             KeyCode::Down | KeyCode::Char('j') => picker.cursor = (picker.cursor + 1).min(last),
             KeyCode::Up | KeyCode::Char('k') => picker.cursor = picker.cursor.saturating_sub(1),
-            KeyCode::Char(' ' | 'x') => picker.selection.toggle(picker.cursor),
-            KeyCode::Char(d @ '1'..='9') => picker.selection.toggle(d as usize - '1' as usize),
-            KeyCode::Enter if picker.selection.is_empty() => self.error = Some("tick at least one with space ".into()),
-            KeyCode::Enter => {
-                let sel = picker.selection;
-                self.rules_picker = None;
-                if self.copy_launch_command(sel)
-                    && let Err(e) = crate::settings::set_rules(sel)
-                {
-                    self.error = Some(format!("couldn't save the chosen rules: {e:#}"));
-                }
-            }
+            KeyCode::Char(' ' | 'x') => picker.toggle(picker.cursor),
+            KeyCode::Char(d @ '1'..='9') => picker.toggle(d as usize - '1' as usize),
+            KeyCode::Enter if picker.chosen().is_empty() => self.error = Some("tick at least one with space ".into()),
+            KeyCode::Enter => picker.mode = Some(crate::settings::launch_mode()),
             _ => {}
         }
     }
 
-    /// Copies the command that starts a session with the rules in `sel`, refreshing their file first.
-    /// False when the file couldn't be written, so nothing was copied.
-    fn copy_launch_command(&mut self, sel: crate::rules::Selection) -> bool {
-        let path = match crate::rules::ensure(sel) {
+    /// Copies the command that starts `mode` with the prompts in `chosen`, writing their files first.
+    /// False when a file couldn't be written, so nothing was copied.
+    fn copy_launch_command(&mut self, chosen: &[&crate::rules::Rule], mode: crate::rules::Mode) -> bool {
+        let path = match crate::rules::ensure(chosen, mode) {
             Ok(path) => path,
             Err(e) => {
-                self.error = Some(format!("couldn't write the rules file: {e:#}"));
+                self.error = Some(format!("{e:#} "));
                 return false;
             }
         };
         let command = crate::rules::launch_command(&path);
         let headline = match crate::clipboard::copy(&command) {
             crate::clipboard::Copied::Native(_) => {
-                self.info = Some(format!("copied: claude with {} · it applies to new conversations ", sel.titles()));
+                let lead = if mode == crate::rules::Mode::Team { " as a team lead" } else { "" };
+                self.info = Some(format!("copied: claude{lead} with {} · it applies to new conversations ", crate::rules::titles(chosen)));
                 return true;
             }
             crate::clipboard::Copied::Terminal => "Sent to your terminal's clipboard, if it allows that. To copy it by hand:",
             crate::clipboard::Copied::Failed => "Couldn't reach a clipboard. Copy this command by hand:",
         };
         let path = crate::rules::quote_arg(&path.to_string_lossy());
-        let cli = format!("marsad rules {}", sel.keys().join(" "));
+        let cli = crate::rules::cli_command(chosen, mode);
         self.copy_note = Some(CopyNote { headline, command, path, cli });
         true
     }

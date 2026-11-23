@@ -42,30 +42,40 @@ pub fn set_alerts(on: bool) -> anyhow::Result<()> {
     set_at(&path(), "alerts", json!(on))
 }
 
-fn rules_at(path: &Path) -> crate::rules::Selection {
+fn rules_at(path: &Path) -> Vec<String> {
     let keys: Vec<String> = load_at(path)
         .get("rules")
         .and_then(Value::as_array)
         .map(|keys| keys.iter().filter_map(Value::as_str).map(String::from).collect())
         .unwrap_or_default();
-    // Keys this version doesn't know are dropped rather than failing the whole choice.
-    match crate::rules::Selection::parse_known(&keys) {
-        sel if sel.is_empty() => crate::rules::Selection::COORDINATION,
-        sel => sel,
-    }
+    if keys.is_empty() { vec![crate::rules::COORDINATION.into()] } else { keys }
 }
 
-/// The rules `c` last copied a command for (coordination until one is chosen).
-pub fn rules() -> crate::rules::Selection {
+/// The prompt keys `c` last copied a command for (coordination until one is chosen). Keys no
+/// longer in the library are dropped when they are resolved.
+pub fn rules() -> Vec<String> {
     rules_at(&path())
 }
 
-pub fn set_rules(sel: crate::rules::Selection) -> anyhow::Result<()> {
-    set_at(&path(), "rules", json!(sel.keys()))
+pub fn set_rules(keys: &[&str]) -> anyhow::Result<()> {
+    set_at(&path(), "rules", json!(keys))
+}
+
+fn launch_mode_at(path: &Path) -> crate::rules::Mode {
+    load_at(path).get("launch_mode").and_then(Value::as_str).and_then(crate::rules::Mode::parse).unwrap_or_default()
+}
+
+/// Whether `c` last copied a command for a normal session or an agent team.
+pub fn launch_mode() -> crate::rules::Mode {
+    launch_mode_at(&path())
+}
+
+pub fn set_launch_mode(mode: crate::rules::Mode) -> anyhow::Result<()> {
+    set_at(&path(), "launch_mode", json!(mode.key()))
 }
 
 /// Preferences an export carries; anything else in the file stays on this machine.
-const PORTABLE: &[&str] = &["retention_days", "alerts", "context_warning_pct", "rules"];
+const PORTABLE: &[&str] = &["retention_days", "alerts", "context_warning_pct", "rules", "launch_mode"];
 
 /// Where versions before 0.4 kept the retention.
 fn legacy_retention_path() -> PathBuf {
@@ -184,17 +194,19 @@ mod tests {
     }
 
     #[test]
-    fn rules_default_to_coordination_and_drop_unknown_keys() {
-        use crate::rules::Selection;
+    fn rules_default_to_coordination_and_mode_to_session() {
+        use crate::rules::Mode;
         let (file, _) = temp("rules");
-        assert_eq!(rules_at(&file), Selection::COORDINATION, "never chosen");
-        let both = Selection::parse(&["coordination", "output-hygiene"]).unwrap();
-        set_at(&file, "rules", json!(both.keys())).unwrap();
-        assert_eq!(rules_at(&file), both);
-        set_at(&file, "rules", json!(["output-hygiene", "retired"])).unwrap();
-        assert_eq!(rules_at(&file).keys(), ["output-hygiene"]);
+        assert_eq!(rules_at(&file), ["coordination"], "never chosen");
+        assert_eq!(launch_mode_at(&file), Mode::Session);
+        set_at(&file, "rules", json!(["output-hygiene", "mine"])).unwrap();
+        assert_eq!(rules_at(&file), ["output-hygiene", "mine"]);
         set_at(&file, "rules", json!([])).unwrap();
-        assert_eq!(rules_at(&file), Selection::COORDINATION, "an empty choice falls back");
+        assert_eq!(rules_at(&file), ["coordination"], "an empty choice falls back");
+        set_at(&file, "launch_mode", json!("team")).unwrap();
+        assert_eq!(launch_mode_at(&file), Mode::Team);
+        set_at(&file, "launch_mode", json!("retired")).unwrap();
+        assert_eq!(launch_mode_at(&file), Mode::Session);
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 

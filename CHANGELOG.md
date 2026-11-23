@@ -3,6 +3,13 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.9.0 - 2026-11-23
+
+- `c` lists your own prompts too: add `.md` files to `~/.claude/marsad/prompts/`
+- After ticking prompts, choose a normal session or an agent team
+- Agent team: the lead passes the prompts on to every teammate it spawns; coordination stays with the lead
+- `marsad rules <names…> --team` prints the team-lead command
+
 ## 0.8.1 - 2026-10-28
 
 - The badge art is square in any terminal font, sized from the terminal's cell shape
