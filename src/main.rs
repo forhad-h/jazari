@@ -20,6 +20,7 @@ mod model;
 mod pin;
 mod portable;
 mod prompt_gen;
+mod pressure;
 mod prompt_view;
 mod report;
 mod risk;

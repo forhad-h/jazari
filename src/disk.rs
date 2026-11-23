@@ -318,19 +318,41 @@ pub fn hook() -> Option<String> {
     let raw: Value = serde_json::from_str(&input).ok()?;
     let event = raw["hook_event_name"].as_str()?;
     let id = raw["session_id"].as_str().filter(|id| !id.is_empty() && !id.contains(['/', '\\', '.']))?;
-    let verdict = disk_verdict(&raw, event, id);
-    respond(event, verdict, |note| crate::risk::hook(&raw, id, note)).map(|v| v.to_string())
+    let mut verdict = disk_verdict(&raw, event, id);
+    let mut refuse = None;
+    if !matches!(verdict, Some(Verdict::Halt { .. })) {
+        let (note, no) = crate::pressure::hook(&raw, event, id);
+        verdict = with_note(verdict, note);
+        refuse = no;
+    }
+    respond(event, verdict, refuse, |note| crate::risk::hook(&raw, id, note)).map(|v| v.to_string())
 }
 
-/// The output for one hook call: a disk halt wins, then a command check finding (which carries
-/// any disk note along), then the disk note.
-fn respond(event: &str, verdict: Option<Verdict>, risk: impl FnOnce(Option<&str>) -> Option<Value>) -> Option<Value> {
+/// Adds `note` to a note verdict, or makes one; a halt stays as it is.
+fn with_note(verdict: Option<Verdict>, note: Option<String>) -> Option<Verdict> {
+    match (verdict, note) {
+        (Some(Verdict::Note(a)), Some(b)) => Some(Verdict::Note(format!("{a}\n\n{b}"))),
+        (None, Some(b)) => Some(Verdict::Note(b)),
+        (v, _) => v,
+    }
+}
+
+/// The output for one hook call: a disk halt wins, then a command check finding, then a refusal
+/// of heavy work under pressure (each carrying any note along), then the note.
+fn respond(event: &str, verdict: Option<Verdict>, refuse: Option<String>, risk: impl FnOnce(Option<&str>) -> Option<Value>) -> Option<Value> {
     if event == "PreToolUse" && !matches!(verdict, Some(Verdict::Halt { .. })) {
         let note = match &verdict {
             Some(Verdict::Note(text)) => Some(text.as_str()),
             _ => None,
         };
         if let Some(out) = risk(note) {
+            return Some(out);
+        }
+        if let Some(reason) = refuse {
+            let mut out = json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason } });
+            if let Some(n) = note {
+                out["hookSpecificOutput"]["additionalContext"] = json!(n);
+            }
             return Some(out);
         }
     }
@@ -662,16 +684,22 @@ mod tests {
     fn a_disk_halt_wins_over_a_command_check_finding() {
         let ask = |_: Option<&str>| Some(json!({ "hookSpecificOutput": { "permissionDecision": "ask" } }));
         let halt = Verdict::Halt { user: "u".into(), claude: "c".into() };
-        let out = respond("PreToolUse", Some(halt), ask).unwrap();
+        let out = respond("PreToolUse", Some(halt), Some("busy".into()), ask).unwrap();
         assert_eq!((out["continue"].clone(), out["hookSpecificOutput"]["permissionDecision"].clone()), (json!(false), json!("deny")));
         // Below the halt, the finding is the answer and gets the disk note.
-        let out = respond("PreToolUse", Some(Verdict::Note("disk 91%".into())), |note| Some(json!({ "note": note }))).unwrap();
+        let out = respond("PreToolUse", Some(Verdict::Note("disk 91%".into())), Some("busy".into()), |note| Some(json!({ "note": note }))).unwrap();
         assert_eq!(out["note"], "disk 91%");
         // No finding: the disk note; prompts are never checked.
-        let out = respond("PreToolUse", Some(Verdict::Note("n".into())), |_| None).unwrap();
+        let out = respond("PreToolUse", Some(Verdict::Note("n".into())), None, |_| None).unwrap();
         assert_eq!(out["hookSpecificOutput"]["additionalContext"], "n");
-        assert_eq!(respond("UserPromptSubmit", None, ask), None);
-        assert_eq!(respond("PreToolUse", None, |_| None), None);
+        assert_eq!(respond("UserPromptSubmit", None, None, ask), None);
+        assert_eq!(respond("PreToolUse", None, None, |_| None), None);
+        // Heavy work under pressure is refused, keeping the note, but the session goes on.
+        let out = respond("PreToolUse", with_note(None, Some("busy machine".into())), Some("wait".into()), |_| None).unwrap();
+        let o = &out["hookSpecificOutput"];
+        assert_eq!((o["permissionDecision"].clone(), o["permissionDecisionReason"].clone(), o["additionalContext"].clone()), (json!("deny"), json!("wait"), json!("busy machine")));
+        assert!(out.get("continue").is_none());
+        assert_eq!(respond("UserPromptSubmit", None, Some("wait".into()), |_| None), None, "prompts are never refused");
     }
 
     #[test]

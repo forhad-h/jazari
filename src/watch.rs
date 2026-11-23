@@ -77,6 +77,8 @@ pub struct Env {
     pub curl: Curl,
     /// Starts a cleanup of rebuildable data at this level.
     pub clean: Box<dyn FnMut(Level)>,
+    /// Memory and CPU pressure now, with a description for the notification.
+    pub pressure: Box<dyn FnMut() -> Option<(crate::pressure::Level, String)>>,
     /// The largest items `marsad clean` could remove (tiers A and B), largest first.
     pub suggest: Box<dyn FnMut() -> Vec<(String, u64)>>,
     /// Whether this pid is still a process that looks like Claude Code.
@@ -95,6 +97,8 @@ pub struct Env {
 #[derive(Default)]
 pub struct Watcher {
     announced: Level,
+    /// The memory and CPU level last announced; back to normal re-arms it.
+    pressure_announced: crate::pressure::Level,
     /// Pids interrupted during the current emergency crossing.
     interrupted: HashSet<u32>,
     idle_since: Option<f64>,
@@ -140,6 +144,20 @@ impl Watcher {
                 self.interrupt(env, &hit, &reading);
             }
             keep_ballast(env, level, &t, &settings);
+        }
+        if let Some((level, what)) = (env.pressure)() {
+            use crate::pressure::Level as P;
+            if level == P::Ok {
+                self.pressure_announced = P::Ok;
+            } else if level > self.pressure_announced {
+                self.pressure_announced = level;
+                let body = if level == P::Critical {
+                    format!("{what}. Sessions are refused heavy work until it eases.")
+                } else {
+                    format!("{what}. Sessions are told to hold off heavy work.")
+                };
+                (env.alert)(&format!("marsad · machine {}", level.key()), &body);
+            }
         }
         if sessions.is_empty() {
             let since = *self.idle_since.get_or_insert(now);
@@ -414,6 +432,10 @@ impl Env {
                 let _ = crate::alerts::detached("curl", &args);
             }),
             clean: Box::new(crate::clean::maybe_start),
+            pressure: Box::new(|| {
+                let load = crate::pressure::Load::read()?;
+                Some((crate::pressure::Limits::load().level(&load), load.describe()))
+            }),
             suggest: Box::new(|| {
                 let items = crate::clean::plan(&crate::clean::Env::real());
                 let mut out: Vec<(String, u64)> = items.into_iter().filter(|i| matches!(i.tier, crate::clean::Tier::A | crate::clean::Tier::B)).map(|i| (i.what, i.bytes)).collect();
@@ -483,6 +505,8 @@ mod tests {
         sessions: Rc<RefCell<Vec<Live>>>,
         settings: Rc<RefCell<Settings>>,
         seen: Rc<RefCell<Seen>>,
+        /// Pressure readings still to come, last first.
+        pressure: Rc<RefCell<Vec<(crate::pressure::Level, String)>>>,
     }
 
     fn fake(ballast: PathBuf) -> (Fake, Env) {
@@ -492,7 +516,9 @@ mod tests {
             sessions: Rc::new(RefCell::new(Vec::new())),
             settings: Rc::new(RefCell::new(Settings::default())),
             seen: Rc::new(RefCell::new(Seen::default())),
+            pressure: Rc::new(RefCell::new(Vec::new())),
         };
+        let p = f.pressure.clone();
         let names = |pid: u32| match pid {
             100 => Some("claude"),
             200 => Some("node"),
@@ -511,6 +537,7 @@ mod tests {
             alert: Box::new(move |title, _| s1.borrow_mut().alerts.push(title.to_string())),
             curl: Box::new(move |args| s2.borrow_mut().curls.push(args.to_vec())),
             clean: Box::new(move |l| s3.borrow_mut().cleans.push(l)),
+            pressure: Box::new(move || p.borrow_mut().pop()),
             suggest: Box::new(|| vec![("Docker build cache".into(), 30_000_000_000), ("npm cache".into(), 7_200_000_000)]),
             is_claude: Box::new(move |pid, since| since >= 0.0 && names(pid).is_some_and(|n| looks_like_claude(n, None))),
             interrupt: Box::new(move |pid| {
@@ -742,5 +769,21 @@ mod tests {
         let (_, body) = alert_text(Level::Warning, &r, &free);
         assert!(body.ends_with("Can be freed: Docker build cache 30.0 GB, npm cache 7.2 GB; open marsad, key D."), "{body}");
         assert!(!alert_text(Level::Notice, &r, &[]).1.contains("freed"));
+    }
+
+    #[test]
+    fn memory_and_cpu_pressure_is_announced_once_per_rise() {
+        use crate::pressure::Level as P;
+        let dir = temp("pressure");
+        let (f, mut env) = fake(dir.join("ballast"));
+        let mut w = Watcher::default();
+        let readings = [P::Strained, P::Strained, P::Critical, P::Critical, P::Ok, P::Strained];
+        f.pressure.borrow_mut().extend(readings.iter().rev().map(|l| (*l, "memory 96% used".to_string())));
+        for _ in readings {
+            w.tick(&mut env);
+        }
+        let alerts = f.seen.borrow().alerts.clone();
+        assert_eq!(alerts, ["marsad · machine strained", "marsad · machine critical", "marsad · machine strained"]);
+        std::fs::remove_dir_all(dir).ok();
     }
 }
