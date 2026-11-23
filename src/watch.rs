@@ -416,7 +416,7 @@ impl Env {
             clean: Box::new(crate::clean::maybe_start),
             suggest: Box::new(|| {
                 let items = crate::clean::plan(&crate::clean::Env::real());
-                let mut out: Vec<(String, u64)> = items.into_iter().filter(|i| i.tier != crate::clean::Tier::C).map(|i| (i.what, i.bytes)).collect();
+                let mut out: Vec<(String, u64)> = items.into_iter().filter(|i| matches!(i.tier, crate::clean::Tier::A | crate::clean::Tier::B)).map(|i| (i.what, i.bytes)).collect();
                 out.sort_by_key(|i| std::cmp::Reverse(i.1));
                 out
             }),

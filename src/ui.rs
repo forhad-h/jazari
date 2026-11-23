@@ -452,6 +452,7 @@ fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: 
         (Tier::A, "A · rebuilt automatically, holds no data", Color::Green),
         (Tier::B, "B · rebuilt, but slow to get back", Color::Yellow),
         (Tier::C, "C · holds data: one at a time, after you check it", Color::Red),
+        (Tier::Info, "Report only · freed by the app or tool that owns it", Color::DarkGray),
     ];
     let mut lines = Vec::new();
     let mut selected_line = 0;
