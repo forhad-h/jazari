@@ -41,6 +41,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     // A new prompt, a resume or the end of the session closes a stop by marsad's guard.
     if matches!(event, "UserPromptSubmit" | "SessionStart" | "SessionEnd") && ev.get("agent_id").is_none() {
         session.halted = None;
+        session.flag = None;
     }
 
     let summary = s("summary").unwrap_or("");
@@ -137,6 +138,11 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
             session.set_status(Status::Ended, ts);
             session.detail = s("reason").unwrap_or("").to_string();
         }
+        crate::risk::FLAGGED_EVENT => {
+            let decision = if s("decision") == Some("block") { "refused" } else { "asked" };
+            let who = if ev.get("agent_id").is_some() { "a subagent's call " } else { "" };
+            session.flag = Some(format!("{who}{decision} ({}): {}", s("rule").unwrap_or("?"), s("reason").unwrap_or("")));
+        }
         crate::disk::HALTED_EVENT => {
             let why = match s("reason") {
                 Some("disk") | None => "disk almost full",
@@ -206,6 +212,15 @@ mod tests {
         assert!(s.detail.ends_with(&format!("claude --resume {}", s.id)), "{}", s.detail);
         let resumed = run(&[tool, halt, json!({"hook_event_name": "SessionStart", "source": "resume"})]);
         assert_eq!((resumed.status, resumed.halted), (Status::Idle, None));
+    }
+
+    #[test]
+    fn a_command_check_finding_stays_until_the_next_prompt() {
+        let flagged = json!({"hook_event_name": crate::risk::FLAGGED_EVENT, "decision": "ask", "rule": "download-exec", "reason": "piping into `bash`"});
+        let s = run(&[flagged.clone(), json!({"hook_event_name": "PreToolUse", "tool_name": "Bash"})]);
+        assert_eq!(s.flag.as_deref(), Some("asked (download-exec): piping into `bash`"));
+        let s = run(&[flagged, json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"})]);
+        assert_eq!(s.flag, None);
     }
 
     #[test]

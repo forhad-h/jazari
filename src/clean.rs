@@ -833,10 +833,43 @@ fn auto() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------- daily scan ----------
+
+/// The plan is measured on its own at most this often when the dashboard opens.
+const DAILY: Duration = Duration::from_secs(86_400);
+/// Smaller totals aren't worth a note.
+const HINT_BYTES: u64 = 1_000_000_000;
+
+/// Once a day, measures the plan on a thread and reports what tiers A and B could free, when it
+/// is worth a note. None when the last scan was under a day ago.
+pub fn daily_scan() -> Option<std::sync::mpsc::Receiver<u64>> {
+    let stamp = crate::claude_data_dir().join("clean-scan.stamp");
+    let due = std::fs::metadata(&stamp).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_none_or(|age| age >= DAILY);
+    if !due || std::fs::create_dir_all(crate::claude_data_dir()).is_err() || std::fs::write(&stamp, b"").is_err() {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let total = removable(&plan(&Env::real()));
+        if total >= HINT_BYTES {
+            let _ = tx.send(total);
+        }
+    });
+    Some(rx)
+}
+
+/// What tiers A and B hold together: what can go without looking inside.
+fn removable(items: &[Item]) -> u64 {
+    items.iter().filter(|i| i.tier != Tier::C).map(|i| i.bytes).sum()
+}
+
 // ---------- marsad clean ----------
 
 #[derive(Args)]
 pub struct CleanArgs {
+    /// Show the plan without running anything (what `marsad clean` does on its own).
+    #[arg(long, conflicts_with_all = ["run", "tier_a", "judge", "auto_clean"])]
+    plan: bool,
     /// Run these items (ids from the plan); tier C is never run.
     #[arg(long, num_args = 1..)]
     run: Vec<String>,
@@ -999,6 +1032,12 @@ mod tests {
                 _ => None,
             }),
         }
+    }
+
+    #[test]
+    fn the_daily_note_counts_only_what_can_go_without_looking_inside() {
+        let item = |tier, bytes| Item { id: String::new(), tier, what: String::new(), bytes, action: Action::None, note: String::new() };
+        assert_eq!(removable(&[item(Tier::A, 3), item(Tier::B, 4), item(Tier::C, 100)]), 7);
     }
 
     #[test]

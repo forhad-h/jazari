@@ -77,6 +77,8 @@ pub struct Env {
     pub curl: Curl,
     /// Starts a cleanup of rebuildable data at this level.
     pub clean: Box<dyn FnMut(Level)>,
+    /// The largest items `marsad clean` could remove (tiers A and B), largest first.
+    pub suggest: Box<dyn FnMut() -> Vec<(String, u64)>>,
     /// Whether this pid is still a process that looks like Claude Code.
     /// Whether the pid is still a Claude Code process that started by the given time, so a reused
     /// pid never gets the signal.
@@ -117,7 +119,9 @@ impl Watcher {
             let (announce, announced) = t.step(&reading, self.announced);
             self.announced = announced;
             if let Some(l) = announce {
-                let (title, body) = alert_text(l, &reading);
+                // From the warning level, name what can be freed, so the note says what to do.
+                let free = if l >= Level::Warning { (env.suggest)() } else { Vec::new() };
+                let (title, body) = alert_text(l, &reading, &free);
                 (env.alert)(&title, &body);
                 if l >= Level::Warning {
                     for args in phone_requests(&settings, l, &reading) {
@@ -161,14 +165,20 @@ impl Watcher {
     }
 }
 
-fn alert_text(level: Level, r: &Reading) -> (String, String) {
+fn alert_text(level: Level, r: &Reading, free: &[(String, u64)]) -> (String, String) {
     let what = match level {
         Level::Notice => "",
-        Level::Warning => " Sessions are told to wrap up; `marsad clean` frees rebuildable data.",
+        Level::Warning => " Sessions are told to wrap up.",
         Level::Critical => " Sessions stop before their next tool call until space is freed.",
         _ => " Running sessions are being interrupted so the machine doesn't hang.",
     };
-    (format!("marsad · disk {}", level.key()), format!("The disk is {}.{what}", crate::disk::fmt_reading(r)))
+    let free = if free.is_empty() {
+        String::new()
+    } else {
+        let top: Vec<String> = free.iter().take(2).map(|(what, n)| format!("{what} {}", crate::clean::fmt_bytes(*n))).collect();
+        format!(" Can be freed: {}; open marsad, key D.", top.join(", "))
+    };
+    (format!("marsad · disk {}", level.key()), format!("The disk is {}.{what}{free}", crate::disk::fmt_reading(r)))
 }
 
 // ---------- phone notifications ----------
@@ -404,6 +414,12 @@ impl Env {
                 let _ = crate::alerts::detached("curl", &args);
             }),
             clean: Box::new(crate::clean::maybe_start),
+            suggest: Box::new(|| {
+                let items = crate::clean::plan(&crate::clean::Env::real());
+                let mut out: Vec<(String, u64)> = items.into_iter().filter(|i| i.tier != crate::clean::Tier::C).map(|i| (i.what, i.bytes)).collect();
+                out.sort_by_key(|i| std::cmp::Reverse(i.1));
+                out
+            }),
             is_claude: Box::new(|pid, since| process(pid).is_some_and(|(name, exe, started)| still_the_session(&name, exe.as_deref(), started, since))),
             interrupt: Box::new(sigint),
             halted: Box::new(crate::disk::log_halt),
@@ -495,6 +511,7 @@ mod tests {
             alert: Box::new(move |title, _| s1.borrow_mut().alerts.push(title.to_string())),
             curl: Box::new(move |args| s2.borrow_mut().curls.push(args.to_vec())),
             clean: Box::new(move |l| s3.borrow_mut().cleans.push(l)),
+            suggest: Box::new(|| vec![("Docker build cache".into(), 30_000_000_000), ("npm cache".into(), 7_200_000_000)]),
             is_claude: Box::new(move |pid, since| since >= 0.0 && names(pid).is_some_and(|n| looks_like_claude(n, None))),
             interrupt: Box::new(move |pid| {
                 s4.borrow_mut().interrupts.push(pid);
@@ -716,5 +733,14 @@ mod tests {
         assert_eq!(ids, ["usb"]);
         let home = Reading { system: true, ..usb };
         assert_eq!(on_full_volume(&sessions, &home, &t, &measure).len(), 2, "a full home volume stops every session");
+    }
+
+    #[test]
+    fn a_warning_names_the_largest_things_to_free() {
+        let r = pct(91.0);
+        let free = vec![("Docker build cache".to_string(), 30_000_000_000), ("npm cache".to_string(), 7_200_000_000), ("Yarn cache".to_string(), 1)];
+        let (_, body) = alert_text(Level::Warning, &r, &free);
+        assert!(body.ends_with("Can be freed: Docker build cache 30.0 GB, npm cache 7.2 GB; open marsad, key D."), "{body}");
+        assert!(!alert_text(Level::Notice, &r, &[]).1.contains("freed"));
     }
 }

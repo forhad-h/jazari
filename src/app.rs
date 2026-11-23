@@ -163,6 +163,8 @@ pub struct App {
     pub announcement: Option<Announcement>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
+    /// Bytes the daily cleanup scan found removable, reported once by its thread.
+    clean_hint_rx: Option<std::sync::mpsc::Receiver<u64>>,
     log: JsonlTail,
     readers: HashMap<PathBuf, TranscriptReader>,
     sys: System,
@@ -490,6 +492,7 @@ impl App {
             announcement: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
+            clean_hint_rx: crate::clean::daily_scan(),
             log: JsonlTail::new(dir.join("events.jsonl")),
             readers: HashMap::new(),
             sys: System::new(),
@@ -891,6 +894,12 @@ impl App {
         }
         if let Some(clean) = self.clean.as_mut() {
             clean.tick();
+        }
+        if let Some(Ok(bytes)) = self.clean_hint_rx.as_ref().map(|rx| rx.try_recv()) {
+            self.clean_hint_rx = None;
+            if self.info.is_none() && self.error.is_none() {
+                self.info = Some(format!("{} can be freed · press D ", crate::clean::fmt_bytes(bytes)));
+            }
         }
         if let Ok(notice) = self.update_rx.try_recv() {
             self.update = Some(notice);
