@@ -94,9 +94,14 @@ binary outside a `bin` directory) can't update themselves; reinstall them the sa
 
 ### Context and usage limits
 
-The **CONTEXT LEFT** column and the details pane show how many tokens remain before
-auto-compact, colored green → yellow (60%) → red (85%). The header shows your 5-hour and 7-day
-usage limits with the local time each resets, such as `↻7:20pm` (claude.ai Pro/Max only).
+The **CONTEXT LEFT** column shows how many tokens remain before auto-compact, colored green →
+yellow (60%) → red (85%). The header shows the selected session's context (`ctx`) beside your
+5-hour and 7-day usage limits, with the local time each resets, such as `↻7:20pm` (claude.ai
+Pro/Max only).
+
+Below the list, the left panel shows the selected session's id and model, plus any command check
+finding or waiting message. Press `enter` for the rest: what it is doing now, the full context
+gauge, tokens, permission mode, folder and skills, above its history.
 
 These exact figures come from Claude Code's status line feed, so `marsad install` sets
 `statusLine` to `marsad statusline`, which prints a compact `ctx 42% · 412k left · 5h 23% · 7d 41%`.
@@ -186,8 +191,8 @@ marsad system                # disk, memory, swap, CPU and load, with what to be
 marsad system --format json  # `ok` and `concerns` for a session deciding whether to start heavy work
 ```
 
-The dashboard's second header row shows the same disk, memory (with swap) and CPU meters, colored
-by how close each is to trouble.
+The dashboard's bottom-right **System** panel shows the same disk, memory (with swap) and CPU
+meters, colored by how close each is to trouble, and what marsad itself uses.
 
 ### Background disk watcher
 

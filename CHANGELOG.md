@@ -13,6 +13,11 @@ GitHub release. Keep each bullet to one short line.
 - The same interrupt can't fire twice within 30 seconds
 - `marsad disk --guard off` also stops the watcher's emergency interrupts
 - `MARSAD_DRY_RUN=1` shows what any action would do without doing it
+- The panel below the session list splits in two: the session's id and model, and a System panel
+- Disk, memory and CPU meters move from the header into the System panel
+- The selected session's context shows in the header beside the 5h and 7d limits
+- The session's current step, tokens, mode, folder and skills move to its history view
+
 ## 0.13.0 - 2026-11-23
 
 - Run `marsad install` again after updating: it adds the new guard, message and handoff hooks

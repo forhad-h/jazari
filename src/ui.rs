@@ -166,7 +166,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let visible = app.visible();
     let note_height = if app.copy_note.is_some() { 4 } else { 0 };
     let [header, body, copy_note, footer] = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(note_height),
         Constraint::Length(1),
@@ -331,16 +331,6 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
-    let [area, meters] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
-    if let Some(snap) = &app.system {
-        let left = Line::from(system_spans(snap, meters.width));
-        let own = Line::from(own_spans(snap));
-        // marsad's own share goes on the right when it fits beside the meters.
-        if left.width() + own.width() + 2 <= meters.width as usize {
-            f.render_widget(Paragraph::new(own).alignment(Alignment::Right), meters);
-        }
-        f.render_widget(Paragraph::new(left), meters);
-    }
     let waiting = visible.iter().filter(|s| s.status.needs_user()).count();
     let active = visible.iter().filter(|s| s.status == Status::Active).count();
     let mut left = vec![
@@ -351,9 +341,19 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     if waiting > 0 {
         left.push(Span::styled(format!(" · {waiting} need you"), Style::new().fg(Color::Yellow).bold()));
     }
-    f.render_widget(Paragraph::new(Line::from(left)), area);
+    let left = Line::from(left);
+    let room = (area.width as usize).saturating_sub(left.width() + 2);
+    f.render_widget(Paragraph::new(left), area);
 
     let mut right = Vec::new();
+    // The selected session's context, next to the account limits.
+    if let Some(ctx) = app.selected_session().and_then(|s| s.context(app.compact_window)) {
+        right.push(Span::raw("ctx "));
+        right.extend(context_spans(&ctx, 6, false));
+        right.push(Span::styled(format!(" {} left", fmt_tokens(ctx.left())), Style::new().dark_gray()));
+        right.push(Span::styled("  ·  ", Style::new().dark_gray()));
+    }
+    let ctx_left = right.len().checked_sub(2);
     if let Some((five, seven)) = app.rate_limits() {
         for (label, w) in [("5h", five), ("7d", seven)] {
             if let Some(w) = w {
@@ -372,76 +372,98 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
         Span::styled(crate::model::fmt_count(all_time.max(0) as u64), Style::new().bold()),
         Span::raw(" "),
     ]);
-    f.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), area);
+    // On a narrow terminal the context keeps its gauge and drops the tokens left.
+    let mut right = Line::from(right);
+    if let Some(i) = ctx_left.filter(|_| right.width() > room) {
+        right.spans.remove(i);
+    }
+    f.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
 }
 
-/// Disk, memory and CPU meters, each colored by how close it is to trouble. Narrow terminals
-/// drop the bars and the details first.
-fn system_spans(s: &crate::system::Snapshot, width: u16) -> Vec<Span<'static>> {
+/// Disk, memory and CPU meters, one per line, each colored by how close it is to trouble.
+/// Narrow panels get shorter bars and drop swap unless it is heavy.
+fn system_lines(s: &crate::system::Snapshot, width: u16) -> Vec<Line<'static>> {
     use crate::disk::Level as Disk;
-    let wide = width >= 140;
-    let bar_w = if wide { 8 } else { 4 };
-    let dim = |t: String| Span::styled(t, Style::new().dark_gray());
-    let gap = || dim(if wide { "   " } else { "  " }.into());
-    let meter = |label: &str, ratio: f64, color: Color| {
+    let wide = width >= 60;
+    let bar_w = if wide { 10 } else { 6 };
+    let meter = |name: &'static str, ratio: f64, color: Color| {
         let style = Style::new().fg(color);
         vec![
-            Span::raw(format!(" {label} ")),
+            label(name),
             Span::styled(bar(ratio, bar_w), style),
-            Span::styled(format!(" {:.0}%", ratio * 100.0), style.bold()),
+            Span::styled(format!(" {:>3.0}%", ratio * 100.0), style.bold()),
+            Span::raw("  "),
         ]
     };
     let gib = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
-    let mut spans = Vec::new();
+    let mut lines = Vec::new();
     if let Some((level, r)) = &s.disk {
         let color = match level {
             Disk::Ok => Color::Green,
             Disk::Notice | Disk::Warning => Color::Yellow,
             Disk::Critical | Disk::Emergency => Color::Red,
         };
-        spans.extend(meter("disk", r.used_pct() / 100.0, color));
-        spans.push(Span::raw(format!(" {:.1} GB free", r.free_gb())));
+        let mut spans = meter("disk", r.used_pct() / 100.0, color);
+        spans.push(Span::raw(format!("{:.1} GB free", r.free_gb())));
         if *level >= Disk::Warning {
             spans.push(Span::styled(format!(" · {}", level.key()), Style::new().fg(color).bold()));
         }
-        spans.push(gap());
+        lines.push(Line::from(spans));
     }
     let mem = s.mem_used_ratio();
-    spans.extend(meter("mem", mem, ratio_color(mem)));
-    spans.push(Span::raw(format!(" {:.1} GiB free", gib(s.mem_available))));
+    let mut spans = meter("memory", mem, ratio_color(mem));
+    spans.push(Span::raw(format!("{:.1} GiB free", gib(s.mem_available))));
     if wide || s.swap_used > s.mem_total / 4 {
         let heavy = s.swap_used as f64 > s.mem_total as f64 * 0.5;
         let style = if heavy { Style::new().fg(Color::Red) } else { Style::new().dark_gray() };
         spans.push(Span::styled(format!(" · swap {:.1} GiB", gib(s.swap_used)), style));
     }
-    spans.push(gap());
-    match s.cpu_pct {
+    lines.push(Line::from(spans));
+    let mut spans = match s.cpu_pct {
         Some(cpu) => {
             let r = cpu as f64 / 100.0;
-            spans.extend(meter("cpu", r, ratio_color(r)));
+            meter("cpu", r, ratio_color(r))
         }
-        None => spans.push(Span::raw(" cpu …")),
-    }
+        None => vec![label("cpu"), dim("…  ")],
+    };
     if s.load[0] > 0.0 {
         let busy = s.cores > 0 && s.load[0] > s.cores as f64 * 2.0;
         let style = if busy { Style::new().fg(Color::Red) } else { Style::new().dark_gray() };
-        spans.push(Span::styled(format!(" · load {:.1}", s.load[0]), style));
+        spans.push(Span::styled(format!("load {:.1}", s.load[0]), style));
     }
-    spans
+    lines.push(Line::from(spans));
+    lines
 }
 
 /// What marsad itself uses: its CPU, memory and data folder.
-fn own_spans(s: &crate::system::Snapshot) -> Vec<Span<'static>> {
-    let dim = |t: String| Span::styled(t, Style::new().dark_gray());
-    let mut text = String::from("marsad");
+fn own_line(s: &crate::system::Snapshot) -> Line<'static> {
+    let mut text = String::new();
     if let Some(cpu) = s.own_cpu {
-        text.push_str(&format!(" cpu {cpu:.1}%"));
+        text.push_str(&format!("cpu {cpu:.1}% · "));
     }
-    text.push_str(&format!(" · mem {:.0} MB", s.own_mem as f64 / 1e6));
+    text.push_str(&format!("mem {:.0} MB", s.own_mem as f64 / 1e6));
     if let Some(n) = s.own_data {
         text.push_str(&format!(" · data {}", crate::clean::fmt_bytes(n)));
     }
-    vec![dim(text), Span::raw(" ")]
+    Line::from(vec![label("marsad"), dim(text)])
+}
+
+/// The bottom-right panel: the machine's disk, memory and CPU, then marsad's own share.
+fn draw_system(f: &mut Frame, area: Rect, snap: Option<&crate::system::Snapshot>) {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().dark_gray())
+        .title(Line::from(" System ").bold())
+        .title_bottom(Line::from(vec![dim(" D "), Span::raw("disk cleanup ")]).alignment(Alignment::Right));
+    let lines = match snap {
+        Some(s) => {
+            let mut lines = system_lines(s, block.inner(area).width);
+            lines.push(own_line(s));
+            lines
+        }
+        None => vec![Line::from(dim("reading…"))],
+    };
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: Option<&crate::system::Snapshot>, tick: u64) {
@@ -534,19 +556,23 @@ fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: 
 
 fn draw_list(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let selected = app.selected_session();
-    let details_height = match selected {
-        Some(s) => 6 + u16::from(s.flag.is_some()) + u16::from(s.said.is_some() || s.waiting > 0 || s.stop_requested),
-        None => 0,
-    };
-    let [table, details] =
-        Layout::vertical([Constraint::Min(4), Constraint::Length(details_height)]).areas(area);
+    // Session info on the left, the machine on the right; the taller side sets the height.
+    let session_rows = selected.map_or(0, |s| 2 + u16::from(s.flag.is_some()) + u16::from(s.said.is_some() || s.waiting > 0 || s.stop_requested));
+    let system_rows = app.system.as_ref().map_or(1, |s| 3 + u16::from(s.disk.is_some()));
+    let [table, bottom] =
+        Layout::vertical([Constraint::Min(4), Constraint::Length(2 + session_rows.max(system_rows))]).areas(area);
     if visible.is_empty() {
         draw_empty(f, table, app);
     } else {
         draw_table(f, table, app, visible);
     }
-    if let Some(s) = selected {
-        draw_details(f, details, s, app);
+    match selected {
+        Some(s) => {
+            let [details, system] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(bottom);
+            draw_details(f, details, s);
+            draw_system(f, system, app.system.as_ref());
+        }
+        None => draw_system(f, bottom, app.system.as_ref()),
     }
 }
 
@@ -1501,8 +1527,26 @@ fn context_line(s: &Session, app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
-    let sep = || dim("   ·   ");
+fn draw_details(f: &mut Frame, area: Rect, s: &Session) {
+    let id = vec![label("id"), Span::styled(s.id.clone(), Style::new().fg(Color::Yellow)), dim("  y copies it")];
+    let model = s.snapshot.as_ref().and_then(|x| x.model.clone()).or(s.model.clone());
+    let model = vec![label("model"), model.map_or_else(|| dim("not known yet"), Span::raw)];
+    let mut lines = vec![Line::from(id), Line::from(model)];
+    lines.extend(flag_line(s));
+    lines.extend(channel_line(s));
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().dark_gray())
+        .title(session_heading(s))
+        .title_bottom(
+            Line::from(vec![dim(" enter "), Span::raw("history "), dim(" tab "), Span::raw("subagents ")]).alignment(Alignment::Right),
+        );
+    // Each line keeps to one row; a long one is cut rather than pushing the others out.
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// What the session is doing now, cut to `width`.
+fn now_line(s: &Session, width: usize) -> Line<'static> {
     let now = if !s.detail.is_empty() {
         Span::raw(s.detail.clone())
     } else {
@@ -1512,71 +1556,35 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session, app: &App) {
             _ => "working",
         })
     };
-    let width = area.width.saturating_sub(12) as usize;
-    let now = Span::styled(crate::hook::truncate(&now.content, width), now.style);
+    Line::from(vec![label("now"), Span::styled(crate::hook::truncate(&now.content, width.saturating_sub(10)), now.style)])
+}
 
-    let mut usage = vec![label("context")];
-    match s.context(app.compact_window) {
-        Some(ctx) => {
-            usage.extend(context_spans(&ctx, 10, false));
-            usage.push(Span::raw(format!("  {} left", fmt_tokens(ctx.left()))));
-        }
-        None => usage.push(dim("no API calls yet")),
-    }
-    usage.extend([sep(), Span::styled("tokens ", Style::new().fg(ACCENT)), Span::styled(fmt_tokens(s.total_tokens().total()), Style::new().bold())]);
+/// Model, permission mode and folder, then the skills the session ran.
+fn session_lines(s: &Session) -> Vec<Line<'static>> {
+    let sep = || dim("   ·   ");
+    let mut about = vec![label("session")];
     let model = s.snapshot.as_ref().and_then(|x| x.model.clone()).or(s.model.clone());
     if let Some(m) = model {
-        usage.extend([sep(), dim("model "), Span::raw(m)]);
+        about.extend([dim("model "), Span::raw(m), sep()]);
     }
     if let Some(m) = s.permission_mode.as_ref() {
-        usage.extend([sep(), dim("mode "), Span::raw(m.clone())]);
+        about.extend([dim("mode "), Span::raw(m.clone()), sep()]);
     }
-
-    let id = vec![label("id"), Span::styled(s.id.clone(), Style::new().fg(Color::Yellow)), dim("  y copies it"), sep(), Span::raw(short_path(&s.cwd))];
-
-    // Agents grouped by type and the skills run, on one line.
-    let mut work = vec![label("agents"), Span::raw("main "), Span::styled(fmt_tokens(s.stats.tokens.total()), Style::new().bold())];
-    let mut by_type: std::collections::BTreeMap<&str, (usize, usize, u64)> = Default::default();
-    for a in s.subagents.values() {
-        let e = by_type.entry(a.agent_type.as_str()).or_default();
-        e.0 += 1;
-        e.1 += usize::from(a.running);
-        e.2 += a.stats.tokens.total();
-    }
-    for (agent_type, (count, running, tokens)) in by_type {
-        let (mark, mark_style) = if running > 0 {
-            (format!("{} {running} running", SPINNER[(app.tick / 2 % 4) as usize]), Style::new().fg(Color::Green))
-        } else {
-            ("✓".to_string(), Style::new().dark_gray())
-        };
-        let count = if count > 1 { format!(" ×{count}") } else { String::new() };
-        work.extend([dim(" · "), Span::raw(format!("{agent_type}{count} ")), Span::styled(format!("{mark} "), mark_style), Span::raw(fmt_tokens(tokens))]);
-    }
+    about.push(Span::raw(short_path(&s.cwd)));
+    let mut lines = vec![Line::from(about)];
     let mut skills_list: Vec<_> = s.all_skills().into_iter().collect();
     skills_list.sort_by(|a, b| b.1.tokens.total().cmp(&a.1.tokens.total()).then(b.1.calls.cmp(&a.1.calls)));
     if !skills_list.is_empty() {
-        work.extend([sep(), Span::styled("skills ", Style::new().fg(ACCENT))]);
+        let mut skills = vec![label("skills")];
         for (i, (name, st)) in skills_list.iter().enumerate() {
             if i > 0 {
-                work.push(dim(", "));
+                skills.push(dim(", "));
             }
-            work.extend([Span::styled(short_skill(name).to_string(), Style::new().fg(Color::Magenta)), dim(format!(" ×{}", st.calls))]);
+            skills.extend([Span::styled(short_skill(name).to_string(), Style::new().fg(Color::Magenta)), dim(format!(" ×{}", st.calls))]);
         }
+        lines.push(Line::from(skills));
     }
-
-    let mut lines = vec![Line::from(vec![label("now"), now]), Line::from(usage), Line::from(id), Line::from(work)];
-    lines.extend(flag_line(s));
-    lines.extend(channel_line(s));
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().dark_gray())
-        .title(session_heading(s))
-        .title_bottom(
-            Line::from(vec![dim(" enter "), Span::raw("history "), dim(" tab "), Span::raw("subagents "), dim(" y "), Span::raw("copy id ")])
-                .alignment(Alignment::Right),
-        );
-    // Each line keeps to one row; a long one is cut rather than pushing the others out.
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    lines
 }
 
 /// What the session last posted with `marsad say`, and what marsad has waiting for it.
@@ -1750,8 +1758,13 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
     let all = s.timeline();
     let events = app.history(s);
     let total = s.total_tokens();
-    let [summary, list, detail] =
-        Layout::vertical([Constraint::Length(5), Constraint::Min(6), Constraint::Percentage(40)]).areas(area);
+    let about = session_lines(s);
+    let [summary, list, detail] = Layout::vertical([
+        Constraint::Length(6 + about.len() as u16),
+        Constraint::Min(6),
+        Constraint::Percentage(40),
+    ])
+    .areas(area);
 
     let mut tokens = vec![label("tokens")];
     tokens.extend(usage_spans(&total));
@@ -1769,7 +1782,10 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
         .title(session_heading(s));
-    f.render_widget(Paragraph::new(vec![context_line(s, app), Line::from(tokens), Line::from(counts)]).block(block), summary);
+    let mut lines = vec![now_line(s, summary.width.saturating_sub(2) as usize), context_line(s, app), Line::from(tokens)];
+    lines.extend(about);
+    lines.push(Line::from(counts));
+    f.render_widget(Paragraph::new(lines).block(block), summary);
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
