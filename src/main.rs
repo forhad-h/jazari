@@ -17,6 +17,7 @@ mod jsonl;
 mod live;
 mod migrate;
 mod model;
+mod pin;
 mod portable;
 mod prompt_gen;
 mod prompt_view;

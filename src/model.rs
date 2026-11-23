@@ -247,18 +247,18 @@ pub fn fmt_count(n: u64) -> String {
     }
 }
 
-/// Local wall-clock time a rate-limit window resets: `16:30` today,
-/// `Tue 09:00` within the week, `Oct 21 09:00` beyond.
+/// Local wall-clock time a rate-limit window resets, on a 12-hour clock: `4:30pm` today,
+/// `Tue 9:00am` within the week, `Oct 21 9:00am` beyond.
 pub fn fmt_reset(ts: f64) -> String {
     use chrono::{Local, TimeZone};
     let Some(t) = Local.timestamp_opt(ts as i64, 0).single() else { return "—".into() };
     let days = (t.date_naive() - Local::now().date_naive()).num_days();
+    let clock = t.format("%-I:%M%P");
     match days {
-        ..=0 => t.format("%H:%M"),
-        1..7 => t.format("%a %H:%M"),
-        _ => t.format("%b %d %H:%M"),
+        ..=0 => clock.to_string(),
+        1..7 => format!("{} {clock}", t.format("%a")),
+        _ => format!("{} {clock}", t.format("%b %-d")),
     }
-    .to_string()
 }
 
 /// The user's auto-compact window, from `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or the
@@ -495,6 +495,15 @@ impl Session {
             .unwrap_or_else(|| self.id.chars().take(8).collect())
     }
 
+    /// The session's name: its title from Claude Code, else the start of its id.
+    pub fn name(&self) -> String {
+        self.title
+            .clone()
+            .or_else(|| self.stats.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| format!("session {}", self.id.chars().take(8).collect::<String>()))
+    }
+
     /// Main agent plus all subagents.
     pub fn total_tokens(&self) -> TokenUsage {
         let mut t = self.stats.tokens;
@@ -657,6 +666,18 @@ mod tests {
         assert_eq!(fmt_count(999_960_000), "1B", "no 1000M");
         assert_eq!(fmt_count(999_960_000_000), "1T", "no 1000B");
         assert_eq!(fmt_count(999_900), "999.9k");
+    }
+
+    #[test]
+    fn reset_times_use_a_12_hour_clock() {
+        use chrono::{Local, TimeZone};
+        let today = Local::now().date_naive();
+        let at = |days: i64, h: u32, m: u32| Local.from_local_datetime(&(today + chrono::Days::new(days as u64)).and_hms_opt(h, m, 0).unwrap()).unwrap().timestamp() as f64;
+        assert_eq!(fmt_reset(at(0, 16, 30)), "4:30pm");
+        assert_eq!(fmt_reset(at(0, 0, 5)), "12:05am");
+        let tue = Local.timestamp_opt(at(2, 9, 0) as i64, 0).unwrap().format("%a").to_string();
+        assert_eq!(fmt_reset(at(2, 9, 0)), format!("{tue} 9:00am"));
+        assert!(fmt_reset(at(20, 12, 0)).ends_with(" 12:00pm"));
     }
 
     #[test]
