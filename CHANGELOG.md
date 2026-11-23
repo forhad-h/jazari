@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.12.0 - 2026-11-23
 
 - Every edit, rename and delete of your prompts keeps a version; `v` in the `c` picker lists and restores them
 - `u` in the `c` picker brings back the prompt just deleted
