@@ -214,7 +214,7 @@ fn trim_num(n: f64) -> String {
     if n.fract() == 0.0 { format!("{n:.0}") } else { format!("{n:.1}") }
 }
 
-fn fmt_reading(r: &Reading) -> String {
+pub(crate) fn fmt_reading(r: &Reading) -> String {
     format!("{:.0}% full, {:.1} GB free", r.used_pct(), r.free_gb())
 }
 
@@ -319,20 +319,24 @@ pub fn hook() -> Option<String> {
     }
     let verdict = verdict?;
     if matches!(verdict, Verdict::Halt { .. }) {
-        // Lets the dashboard show why the session stopped and how to resume it.
-        let ev = json!({
-            "ts": crate::now(),
-            "session_id": id,
-            "hook_event_name": HALTED_EVENT,
-            "reason": "disk",
-            "message": fmt_reading(&reading),
-        });
-        if let Ok(mut line) = serde_json::to_vec(&ev) {
-            line.push(b'\n');
-            let _ = crate::hook::append(&crate::claude_data_dir(), &line);
-        }
+        log_halt(id, &reading);
     }
     Some(verdict.to_json(event).to_string())
+}
+
+/// Logs that a session was stopped for disk space, so the dashboard shows why and how to resume it.
+pub(crate) fn log_halt(session: &str, reading: &Reading) {
+    let ev = json!({
+        "ts": crate::now(),
+        "session_id": session,
+        "hook_event_name": HALTED_EVENT,
+        "reason": "disk",
+        "message": fmt_reading(reading),
+    });
+    if let Ok(mut line) = serde_json::to_vec(&ev) {
+        line.push(b'\n');
+        let _ = crate::hook::append(&crate::claude_data_dir(), &line);
+    }
 }
 
 /// A Bash call that runs only marsad's disk, system or clean command, with nothing chained to it.
@@ -398,6 +402,7 @@ pub fn run(a: DiskArgs) -> anyhow::Result<()> {
         }
     }
     let level = volumes.iter().map(|(_, r)| t.level(r)).max().unwrap_or_default();
+    let watch = crate::watch::status();
 
     match a.format {
         Format::Json => {
@@ -418,6 +423,10 @@ pub fn run(a: DiskArgs) -> anyhow::Result<()> {
                     "level": t.level(r).key(),
                 })).collect::<Vec<_>>(),
                 "thresholds": limits,
+                "watcher": { "running": watch.pid.is_some(), "pid": watch.pid },
+                "ballast_gb": (watch.settings.ballast > 0).then(|| watch.settings.ballast as f64 / GB),
+                "ballast_on_disk_bytes": watch.ballast_on_disk,
+                "phone": { "ntfy": watch.settings.ntfy.is_some(), "webhook": watch.settings.webhook.is_some() },
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
@@ -441,14 +450,41 @@ pub fn run(a: DiskArgs) -> anyhow::Result<()> {
                     Level::Warning => "warning: sessions are told to wrap up",
                     Level::Critical if cfg.guard => "critical: sessions stop before their next tool call",
                     Level::Critical => "critical (guard off: sessions are only warned)",
-                    _ => "emergency",
+                    _ => "emergency: running sessions are interrupted",
                 };
                 println!("  {} at {}  {what}", l.key(), fmt_limit(lim));
             }
             println!("{}", guard_label(cfg.guard));
+            for line in watch_lines(&watch) {
+                println!("{line}");
+            }
         }
     }
     Ok(())
+}
+
+/// The watcher, the ballast and phone notifications, for `marsad disk`.
+fn watch_lines(w: &crate::watch::Status) -> Vec<String> {
+    let mut out = vec![match w.pid {
+        Some(pid) => format!("Watcher: running (pid {pid}), checking every 20 s."),
+        None => "Watcher: not running; the next Claude Code session starts it.".into(),
+    }];
+    let s = &w.settings;
+    if s.ballast > 0 {
+        let now = match w.ballast_on_disk {
+            Some(b) if b == s.ballast => "in place".to_string(),
+            Some(b) => format!("{:.1} GB on disk", b as f64 / GB),
+            None => "not on disk now".into(),
+        };
+        out.push(format!("Ballast: {} GB ({now}), deleted at the emergency level.", trim_num(s.ballast as f64 / GB)));
+    }
+    let phone: Vec<&str> = [(s.ntfy.is_some(), "ntfy"), (s.webhook.is_some(), "webhook")].into_iter().filter(|(on, _)| *on).map(|(_, n)| n).collect();
+    out.push(if phone.is_empty() {
+        "Phone notifications: off (set disk.ntfy or disk.webhook in settings.json).".into()
+    } else {
+        format!("Phone notifications: {} from the warning level.", phone.join(" and "))
+    });
+    out
 }
 
 fn guard_label(on: bool) -> String {
