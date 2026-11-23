@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.14.0 - 2026-11-23
 
 - Every action marsad takes (messages, stops, interrupts, cleanups, settings, updates) goes through one gate
 - `marsad actions` lists what marsad did, refused or held, and who asked
