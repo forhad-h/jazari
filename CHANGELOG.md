@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.14.1 - 2026-11-24
 
 - Hints, units and other secondary text use a lighter gray that is easier to read
 - Panel borders are darker than text, so the frame no longer competes with what it holds
