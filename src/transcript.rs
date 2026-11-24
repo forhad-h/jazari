@@ -223,7 +223,8 @@ impl TranscriptReader {
                 self.launches.insert(id.to_string(), skill);
                 let s = |k: &str| input[k].as_str().unwrap_or_default().to_string();
                 let agent_type = Some(s("subagent_type")).filter(|t| !t.is_empty()).unwrap_or_else(|| "agent".into());
-                let kind = EventKind::Agent { agent_type, description: s("description"), tool_use_id: id.to_string(), result: None };
+                let model = Some(s("model")).filter(|m| !m.is_empty());
+                let kind = EventKind::Agent { agent_type, description: s("description"), tool_use_id: id.to_string(), model, result: None };
                 let i = self.push(kind, e);
                 self.pending.entry(id.to_string()).or_default().push(i);
             }
@@ -741,7 +742,7 @@ mod tests {
         let r = reader_for(&[
             r#"{"type":"user","timestamp":"2026-10-11T10:00:00Z","message":{"content":"add dark mode"}}"#,
             r#"{"type":"assistant","message":{"id":"m1","stop_reason":"tool_use","usage":{"output_tokens":3},"content":[{"type":"text","text":"Let me look."}]}}"#,
-            r#"{"type":"assistant","message":{"id":"m1","stop_reason":"tool_use","usage":{"output_tokens":3},"content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"subagent_type":"Explore","description":"Map styles"}}]}}"#,
+            r#"{"type":"assistant","message":{"id":"m1","stop_reason":"tool_use","usage":{"output_tokens":3},"content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"subagent_type":"Explore","description":"Map styles","model":"haiku"}}]}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"Styles live in theme.css"}]}]}}"#,
             r#"{"type":"assistant","message":{"id":"m2","stop_reason":"tool_use","usage":{"output_tokens":2},"content":[{"type":"tool_use","id":"t2","name":"AskUserQuestion","input":{"questions":[{"question":"Which default?"}]}}]}}"#,
             r#"{"type":"user","toolUseResult":{"answers":{"Which default?":"Dark"}},"message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"answered"}]}}"#,
@@ -759,6 +760,7 @@ mod tests {
                     agent_type: "Explore".into(),
                     description: "Map styles".into(),
                     tool_use_id: "t1".into(),
+                    model: Some("haiku".into()),
                     result: Some("Styles live in theme.css".into()),
                 },
                 EventKind::Question { question: "Which default?".into(), answer: Some("Dark".into()) },

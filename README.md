@@ -427,7 +427,7 @@ oldest first:
 | prompt | what you typed (including `/commands` and `!` shell commands), and the tokens of the turn it started |
 | reply | Claude's reply that ended the turn |
 | skill | the skill, whether Claude called it (`tool`) or you typed it (`/cmd`), turns, output and ≈ tokens in its window |
-| agent | the subagent's type and task, running or done, its tokens, and its final report |
+| agent | the subagent's type and task, running or done, the model it ran on (or the model the launch asked for, until it replies), its tokens, and its final report |
 | question | each AskUserQuestion question and your answer (or the note you left when declining) |
 
 Skills and questions from subagents are included, marked with the subagent's type. The pane

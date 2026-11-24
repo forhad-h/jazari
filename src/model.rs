@@ -131,8 +131,9 @@ pub enum EventKind {
     Prompt(String),
     /// A skill invocation; index into `TranscriptStats::runs`.
     Skill(usize),
-    /// A subagent launch, with its final report once it has returned.
-    Agent { agent_type: String, description: String, tool_use_id: String, result: Option<String> },
+    /// A subagent launch, with its final report once it has returned. `model` is the
+    /// override the launch asked for (`sonnet`, `opus`, ...), if any.
+    Agent { agent_type: String, description: String, tool_use_id: String, model: Option<String>, result: Option<String> },
     /// One AskUserQuestion question, with the user's answer once given.
     Question { question: String, answer: Option<String> },
     /// Claude's reply that ended a turn.

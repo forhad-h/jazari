@@ -1772,7 +1772,7 @@ fn event_summary(e: &TimelineEntry, s: &Session, tick: u64) -> Line<'static> {
             ]),
             None => Line::from(""),
         },
-        EventKind::Agent { agent_type, description, tool_use_id, result } => Line::from(vec![
+        EventKind::Agent { agent_type, description, tool_use_id, result, .. } => Line::from(vec![
             Span::styled(format!("{agent_type} "), Style::new().fg(ACCENT)),
             Span::raw(format!("{description}  ")),
             agent_state(s, tool_use_id, result, tick),
@@ -1826,10 +1826,18 @@ fn event_detail(e: &TimelineEntry, s: &Session, app: &App) -> Vec<Line<'static>>
                 lines.push(Line::from(dim("≈ tokens of the turns run inside the skill's window")));
             }
         }
-        EventKind::Agent { agent_type, description, tool_use_id, result } => {
+        EventKind::Agent { agent_type, description, tool_use_id, model, result } => {
             lines.push(Line::from(vec![label("agent"), Span::styled(agent_type.clone(), Style::new().fg(ACCENT).bold()), Span::raw("  "), agent_state(s, tool_use_id, result, app.tick)]));
             lines.push(Line::from(vec![label("task"), Span::raw(description.clone())]));
-            if let Some(a) = s.subagent_for(tool_use_id) {
+            let agent = s.subagent_for(tool_use_id);
+            // The subagent's own transcript names the model it ran on; until it has
+            // replied, the launch's override is all there is.
+            match (agent.and_then(|a| a.stats.model.clone()), model) {
+                (Some(m), _) => lines.push(Line::from(vec![label("model"), Span::raw(m)])),
+                (None, Some(m)) => lines.push(Line::from(vec![label("model"), Span::raw(m.clone()), dim("  requested")])),
+                (None, None) => {}
+            }
+            if let Some(a) = agent {
                 let mut tokens = vec![label("tokens")];
                 tokens.extend(usage_spans(&a.stats.tokens));
                 lines.push(Line::from(tokens));
