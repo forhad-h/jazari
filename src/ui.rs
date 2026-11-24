@@ -673,7 +673,7 @@ fn draw_control(f: &mut Frame, area: Rect, c: &crate::app::Control) {
     let [_, rect, _] = Layout::vertical([Constraint::Fill(1), Constraint::Length(4), Constraint::Fill(1)]).areas(rect);
     f.render_widget(Clear, rect);
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(Color::Yellow)).title(Line::from(title).bold());
-    let lines = vec![Line::from(what), Line::from(Span::styled("y does it, any other key keeps it running", Style::new().fg(MUTED)))];
+    let lines = vec![Line::from(what), hint(&[("y", " does it, any other key keeps it running")])];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), rect);
 }
 
@@ -710,7 +710,7 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
                 footer.extend(chosen.body.lines().take(8).map(|l| Line::from(dim(format!("  │ {}", crate::rules::shorten(l, 72))))));
             }
             footer.push(Line::from(""));
-            footer.push(Line::from(dim("enter makes it the prompt again; the current text is kept as a version")));
+            footer.push(hint(&[("enter", " makes it the prompt again; the current text is kept as a version")]));
             (lines, footer, " Prompt versions ", 2 + v.cursor * 2)
         }
         (None, None) => {
@@ -726,12 +726,19 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
             let footer = match picker.deleting.and_then(|i| picker.library.get(i)) {
                 Some(rule) => vec![
                     Line::from(""),
-                    Line::from(Span::styled(format!("Delete {}? y deletes its file, any other key keeps it.", rule.title), Style::new().fg(Color::Yellow).bold())),
+                    Line::from({
+                        let warn = Style::new().fg(Color::Yellow).bold();
+                        vec![
+                            Span::styled(format!("Delete {}? ", rule.title), warn),
+                            "y".bold(),
+                            Span::styled(" deletes its file, any other key keeps it.", warn),
+                        ]
+                    }),
                 ],
                 None => vec![
                     Line::from(""),
-                    Line::from(dim("n writes a new prompt with Claude · e edits yours or copies a built-in · d deletes yours")),
-                    Line::from(dim("v lists a prompt's earlier versions to restore · u brings back the one just deleted")),
+                    hint(&[("n", " writes a new prompt with Claude · "), ("e", " edits yours or copies a built-in · "), ("d", " deletes yours")]),
+                    hint(&[("v", " lists a prompt's earlier versions to restore · "), ("u", " brings back the one just deleted")]),
                     Line::from(dim(format!("Your prompts are .md files in {}", home_relative(&crate::rules::prompts_dir())))),
                 ],
             };
@@ -885,12 +892,14 @@ fn draw_prompt_idea(
         };
         Span::styled(format!("[ {text} ]"), style)
     };
-    let row = Line::from(vec![
+    let mut row = vec![
         button("Write prompt", field == Field::Submit, true),
         Span::raw("  "),
         button("Cancel", field == Field::Cancel, false),
-        dim("   tab moves here · enter presses"),
-    ]);
+        Span::raw("   "),
+    ];
+    row.extend(hint(&[("tab", " moves here · "), ("enter", " presses")]).spans);
+    let row = Line::from(row);
     f.render_widget(Paragraph::new(row), buttons);
     f.render_widget(Paragraph::new(status), status_area);
 }
@@ -1233,7 +1242,7 @@ fn draw_share_preview(f: &mut Frame, area: Rect, share: &ShareView, post: &str, 
             chars.get(cursor + 1..).map_or(String::new(), |r| r.iter().collect()),
         );
         let lines = vec![
-            Line::from(dim("Edit the line · enter keeps it, esc discards it")),
+            hint(&[("", "Edit the line · "), ("enter", " keeps it, "), ("esc", " discards it")]),
             Line::from(vec![Span::styled("› ", Style::new().fg(ACCENT).bold()), Span::raw(before), Span::styled(at, Style::new().add_modifier(Modifier::REVERSED)), Span::raw(after)]),
         ];
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), edit);
@@ -1544,6 +1553,18 @@ fn usage_spans(u: &TokenUsage) -> Vec<Span<'static>> {
 
 fn label(t: &'static str) -> Span<'static> {
     Span::styled(format!("{t:<9}"), Style::new().fg(ACCENT))
+}
+
+/// A line of key hints styled like the footer: each key bold, what it does muted.
+fn hint(parts: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (key, text) in parts {
+        if !key.is_empty() {
+            spans.push(key.to_string().bold());
+        }
+        spans.push(dim(text.to_string()));
+    }
+    Line::from(spans)
 }
 
 fn dim(t: impl Into<String>) -> Span<'static> {
@@ -2288,6 +2309,12 @@ mod tests {
         assert_eq!(text(&rows), ["  name ", "task ", "text"]);
         assert_eq!(rows[0].spans[1], "name".bold());
         assert!(rows.iter().all(|r| r.width() <= 8));
+    }
+
+    #[test]
+    fn hint_keys_are_bold_and_their_text_muted() {
+        let line = hint(&[("", "Edit the line · "), ("enter", " keeps it")]);
+        assert_eq!(line.spans, vec![dim("Edit the line · "), "enter".bold(), dim(" keeps it")]);
     }
 }
 
