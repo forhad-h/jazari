@@ -456,10 +456,15 @@ fn system_lines(s: &crate::system::Snapshot, width: u16) -> Vec<Line<'static>> {
         }
         None => vec![label("cpu"), dim("…  ")],
     };
-    if s.load[0] > 0.0 {
-        let busy = s.cores > 0 && s.load[0] > s.cores as f64 * 2.0;
-        let style = if busy { Style::new().fg(Color::Red) } else { Style::new().fg(MUTED) };
-        spans.push(Span::styled(format!("load {:.1}", s.load[0]), style));
+    // Load is only worth the space when processes queue at more than twice the core count.
+    if s.cores > 0 && s.load[0] > s.cores as f64 * 2.0 {
+        let mut text = format!("load {:.1}", s.load[0]);
+        let per_core = format!(" · {:.1}× cores", s.load[0] / s.cores as f64);
+        let used: usize = spans.iter().map(|x| x.width()).sum();
+        if used + text.chars().count() + per_core.chars().count() <= width as usize {
+            text.push_str(&per_core);
+        }
+        spans.push(Span::styled(text, Style::new().fg(Color::Red)));
     }
     lines.push(Line::from(spans));
     let mem = s.mem_used_ratio();
