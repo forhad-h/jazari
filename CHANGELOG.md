@@ -3,6 +3,10 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- A subagent's history details show the model it ran on
+
 ## 0.14.7 - 2026-11-24
 
 - The System panel's CPU line shows how many cores are idle, such as `9.4 of 10 cores idle`
