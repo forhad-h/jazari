@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.14.3 - 2026-11-24
 
 - The System panel shows swap on its own line, with how much is used of the total
 
