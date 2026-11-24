@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.14.4 - 2026-11-24
 
 - On macOS, the System panel and `marsad system` show free disk space as Finder does
 - The System panel and `marsad system` list CPU, memory, swap, then disk
