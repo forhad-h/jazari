@@ -3,6 +3,10 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- Memory on macOS is counted the way Activity Monitor does, so the meter and the memory guard no longer read several GiB too free
+
 ## 0.14.0 - 2026-11-24
 
 - Every action marsad takes (messages, stops, interrupts, cleanups, settings, updates) goes through one gate
