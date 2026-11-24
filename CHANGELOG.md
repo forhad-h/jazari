@@ -5,6 +5,9 @@ GitHub release. Keep each bullet to one short line.
 
 ## Unreleased
 
+- On macOS, the System panel and `marsad system` show free disk space as Finder does
+- The System panel and `marsad system` list CPU, memory, swap, then disk
+- `marsad system` measures CPU over one second, so a single spike no longer skews it
 - Key hints inside windows show the key bold and what it does muted, like the footer
 
 ## 0.14.3 - 2026-11-24

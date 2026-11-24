@@ -413,7 +413,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     f.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
 }
 
-/// Disk, memory and CPU meters, one per line, each colored by how close it is to trouble.
+/// CPU, memory, swap and disk meters, one per line, each colored by how close it is to trouble.
 /// Swap gets its own line when the machine has any. Narrow panels get shorter bars.
 fn system_lines(s: &crate::system::Snapshot, width: u16) -> Vec<Line<'static>> {
     use crate::disk::Level as Disk;
@@ -430,32 +430,6 @@ fn system_lines(s: &crate::system::Snapshot, width: u16) -> Vec<Line<'static>> {
     };
     let gib = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
     let mut lines = Vec::new();
-    if let Some((level, r)) = &s.disk {
-        let color = match level {
-            Disk::Ok => Color::Green,
-            Disk::Notice | Disk::Warning => Color::Yellow,
-            Disk::Critical | Disk::Emergency => Color::Red,
-        };
-        let mut spans = meter("disk", r.used_pct() / 100.0, color);
-        spans.push(Span::raw(format!("{:.1} GB free", r.free_gb())));
-        if *level >= Disk::Warning {
-            spans.push(Span::styled(format!(" · {}", level.key()), Style::new().fg(color).bold()));
-        }
-        lines.push(Line::from(spans));
-    }
-    let mem = s.mem_used_ratio();
-    let mut spans = meter("memory", mem, ratio_color(mem));
-    spans.push(Span::raw(format!("{:.1} GiB free", gib(s.mem_available))));
-    lines.push(Line::from(spans));
-    if s.swap_total > 0 {
-        // macOS grows swap on demand, so a full bar alone means little: the color comes from
-        // swap in use against RAM, the same measure as the swap concern.
-        let vs_ram = if s.mem_total > 0 { s.swap_used as f64 / s.mem_total as f64 } else { 0.0 };
-        let color = if vs_ram > 0.5 { Color::Red } else if vs_ram > 0.25 { Color::Yellow } else { Color::Green };
-        let mut spans = meter("swap", s.swap_used as f64 / s.swap_total as f64, color);
-        spans.push(Span::raw(format!("{:.1} of {:.1} GiB used", gib(s.swap_used), gib(s.swap_total))));
-        lines.push(Line::from(spans));
-    }
     let mut spans = match s.cpu_pct {
         Some(cpu) => {
             let r = cpu as f64 / 100.0;
@@ -469,6 +443,32 @@ fn system_lines(s: &crate::system::Snapshot, width: u16) -> Vec<Line<'static>> {
         spans.push(Span::styled(format!("load {:.1}", s.load[0]), style));
     }
     lines.push(Line::from(spans));
+    let mem = s.mem_used_ratio();
+    let mut spans = meter("memory", mem, ratio_color(mem));
+    spans.push(Span::raw(format!("{:.1} GiB free", gib(s.mem_available))));
+    lines.push(Line::from(spans));
+    if s.swap_total > 0 {
+        // macOS grows swap on demand, so a full bar alone means little: the color comes from
+        // swap in use against RAM, the same measure as the swap concern.
+        let vs_ram = if s.mem_total > 0 { s.swap_used as f64 / s.mem_total as f64 } else { 0.0 };
+        let color = if vs_ram > 0.5 { Color::Red } else if vs_ram > 0.25 { Color::Yellow } else { Color::Green };
+        let mut spans = meter("swap", s.swap_used as f64 / s.swap_total as f64, color);
+        spans.push(Span::raw(format!("{:.1} of {:.1} GiB used", gib(s.swap_used), gib(s.swap_total))));
+        lines.push(Line::from(spans));
+    }
+    if let Some((level, r)) = &s.disk {
+        let color = match level {
+            Disk::Ok => Color::Green,
+            Disk::Notice | Disk::Warning => Color::Yellow,
+            Disk::Critical | Disk::Emergency => Color::Red,
+        };
+        let mut spans = meter("disk", r.used_pct() / 100.0, color);
+        spans.push(Span::raw(format!("{:.1} GB free", r.free_gb())));
+        if *level >= Disk::Warning {
+            spans.push(Span::styled(format!(" · {}", level.key()), Style::new().fg(color).bold()));
+        }
+        lines.push(Line::from(spans));
+    }
     lines
 }
 
@@ -485,7 +485,7 @@ fn own_line(s: &crate::system::Snapshot) -> Line<'static> {
     Line::from(vec![label("marsad"), dim(text)])
 }
 
-/// The bottom-right panel: the machine's disk, memory and CPU, then marsad's own share.
+/// The bottom-right panel: the machine's CPU, memory, swap and disk, then marsad's own share.
 fn draw_system(f: &mut Frame, area: Rect, snap: Option<&crate::system::Snapshot>) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)

@@ -12,10 +12,10 @@ doing, which ones are waiting on you, which skills they ran, and how many tokens
 │ Dark mode settings              +2 web            ▰▰▱▱▱ 552.6k   12s  414.8k       ACTIVE ◐ │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ Dark mode settings · web ───────────────────╮╭ System ──────────────────────────────────────╮
-│now      › add dark mode to the settings page││disk     ▰▰▰▰▰▱▱▱▱▱  55%  110.9 GB free       │
+│now      › add dark mode to the settings page││cpu      ▰▱▱▱▱▱▱▱▱▱  10%  load 3.2            │
 │id       1fe612e4-0c3b-4d5e-9a7f-2b8c6d1e0f93││memory   ▰▰▰▰▰▱▱▱▱▱  51%  7.8 GiB free        │
 │model    claude-opus-5-5                     ││swap     ▰▰▱▱▱▱▱▱▱▱  20%  0.4 of 2.0 GiB used │
-│                                             ││cpu      ▰▱▱▱▱▱▱▱▱▱  10%  load 3.2            │
+│                                             ││disk     ▰▰▰▰▰▱▱▱▱▱  55%  110.9 GB free       │
 │                                             ││marsad   cpu 0.4% · mem 38 MB · data 12 MB    │
 ╰─────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
 ```
@@ -165,7 +165,8 @@ A full disk can hang the machine: swap can't grow and Claude Code can't write it
 `install` registers `marsad guard --hook` as a synchronous `PreToolUse` and `UserPromptSubmit` hook
 (about 7 ms), so every tool call of every running session checks free space first, whether or not
 the dashboard is open. It measures the volume that holds your home folder and the session's folder,
-and counts only space a process can write (not APFS purgeable space).
+and counts only space a process can write (not APFS purgeable space). The System panel and
+`marsad system` show free space the way Finder does, purgeable space included.
 
 | Level | Default | What happens |
 |---|---|---|
@@ -191,7 +192,7 @@ marsad system                # disk, memory, swap, CPU and load, with what to be
 marsad system --format json  # `ok` and `concerns` for a session deciding whether to start heavy work
 ```
 
-The dashboard's bottom-right **System** panel shows the same disk, memory, swap and CPU
+The dashboard's bottom-right **System** panel shows the same CPU, memory, swap and disk
 meters, colored by how close each is to trouble, and what marsad itself uses. Swap turns
 yellow once it passes a quarter of RAM and red past half, however full its own bar is.
 
