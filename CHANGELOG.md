@@ -3,6 +3,15 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- Hints, units and other secondary text use a lighter gray that is easier to read
+- Panel borders are darker than text, so the frame no longer competes with what it holds
+- On a narrow terminal the header keeps the context left and drops reset times and totals first
+- The footer keeps the most-used keys and quit on a narrow terminal, with … where keys were left out
+- Token totals of a billion or more read like `15.9B`, matching the header
+- Memory on macOS is counted the way Activity Monitor does, so the meter and the memory guard no longer read several GiB too free
+
 ## 0.14.0 - 2026-11-24
 
 - Every action marsad takes (messages, stops, interrupts, cleanups, settings, updates) goes through one gate

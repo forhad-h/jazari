@@ -50,7 +50,7 @@ impl Load {
         let mem_total = sys.total_memory();
         (mem_total > 0).then(|| Load {
             mem_total,
-            mem_available: sys.available_memory(),
+            mem_available: crate::system::available_memory(&sys),
             swap_used: sys.used_swap(),
             load1: sysinfo::System::load_average().one,
             cores: std::thread::available_parallelism().map_or(1, |n| n.get()),

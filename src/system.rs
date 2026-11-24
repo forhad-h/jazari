@@ -99,7 +99,7 @@ impl Sampler {
         Snapshot {
             disk: crate::disk::worst(paths, t, crate::disk::measure),
             mem_total: self.sys.total_memory(),
-            mem_available: self.sys.available_memory(),
+            mem_available: available_memory(&self.sys),
             swap_total: self.sys.total_swap(),
             swap_used: self.sys.used_swap(),
             cpu_pct: cpu,
@@ -110,6 +110,39 @@ impl Sampler {
             own_data: self.data.map(|(_, n)| n),
         }
     }
+}
+
+/// Memory still free for new work, counted the way Activity Monitor does on macOS: everything
+/// except app memory, wired memory and the pages the compressor holds, so cached files count as
+/// free. sysinfo's own figure also counts active and compressed pages as free, which on a busy
+/// Mac reads several GiB higher than Activity Monitor.
+pub fn available_memory(sys: &System) -> u64 {
+    #[cfg(target_os = "macos")]
+    if let Some(used) = mac_used_memory() {
+        return sys.total_memory().saturating_sub(used);
+    }
+    sys.available_memory()
+}
+
+/// Activity Monitor's "Memory Used": app memory (anonymous pages less purgeable ones), wired
+/// memory and the compressor's pages. None if the kernel won't answer.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+fn mac_used_memory() -> Option<u64> {
+    use std::sync::OnceLock;
+    // One send right to the host port, kept for the life of the process.
+    static HOST: OnceLock<libc::mach_port_t> = OnceLock::new();
+    let host = *HOST.get_or_init(|| unsafe { libc::mach_host_self() });
+    let mut s: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    let r = unsafe { libc::host_statistics64(host, libc::HOST_VM_INFO64, (&raw mut s).cast(), &mut count) };
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if r != libc::KERN_SUCCESS || page <= 0 {
+        return None;
+    }
+    let app = u64::from(s.internal_page_count).saturating_sub(u64::from(s.purgeable_count));
+    let pages = app + u64::from(s.wire_count) + u64::from(s.compressor_page_count);
+    Some(pages * page as u64)
 }
 
 /// The home folder and the given session folders: the places whose volume matters.

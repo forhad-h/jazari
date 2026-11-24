@@ -59,6 +59,11 @@ fn color(c: Color) -> Option<String> {
         Color::LightMagenta => "#e09cf0",
         Color::LightCyan => "#7fd3dc",
         Color::White => "#ffffff",
+        // The 24-step gray ramp at the end of the 256-color palette.
+        Color::Indexed(n @ 232..=255) => {
+            let v = 8 + 10 * (n - 232);
+            return Some(format!("#{v:02x}{v:02x}{v:02x}"));
+        }
         Color::Indexed(_) => FOREGROUND,
     };
     Some(hex.to_string())
