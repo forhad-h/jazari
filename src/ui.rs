@@ -456,15 +456,26 @@ fn system_lines(s: &crate::system::Snapshot, width: u16) -> Vec<Line<'static>> {
         }
         None => vec![label("cpu"), dim("…  ")],
     };
-    // Load is only worth the space when processes queue at more than twice the core count.
+    // Idle cores, the CPU's "free". Load replaces it once processes queue at more than twice the
+    // core count, since the queue matters more than idle capacity then.
+    let room = (width as usize).saturating_sub(spans.iter().map(|x| x.width()).sum());
+    let fits = |t: &str| t.chars().count() <= room;
     if s.cores > 0 && s.load[0] > s.cores as f64 * 2.0 {
         let mut text = format!("load {:.1}", s.load[0]);
-        let per_core = format!(" · {:.1}× cores", s.load[0] / s.cores as f64);
-        let used: usize = spans.iter().map(|x| x.width()).sum();
-        if used + text.chars().count() + per_core.chars().count() <= width as usize {
-            text.push_str(&per_core);
+        let per_core = format!("{text} · {:.1}× cores", s.load[0] / s.cores as f64);
+        if fits(&per_core) {
+            text = per_core;
         }
         spans.push(Span::styled(text, Style::new().fg(Color::Red)));
+    } else if let (Some(cpu), true) = (s.cpu_pct, s.cores > 0) {
+        let idle = s.cores as f64 * (1.0 - (cpu as f64 / 100.0).clamp(0.0, 1.0));
+        let long = format!("{idle:.1} of {} cores idle", s.cores);
+        let short = format!("{idle:.1} cores idle");
+        if fits(&long) {
+            spans.push(Span::raw(long));
+        } else if fits(&short) {
+            spans.push(Span::raw(short));
+        }
     }
     lines.push(Line::from(spans));
     let mem = s.mem_used_ratio();
