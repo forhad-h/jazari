@@ -97,7 +97,11 @@ impl Sampler {
         }
         let load = System::load_average();
         Snapshot {
-            disk: crate::disk::worst(paths, t, crate::disk::measure),
+            // The fullest volume by statfs (cheap), then that one as Finder shows it.
+            disk: crate::disk::worst(paths, t, crate::disk::measure).map(|(_, r)| {
+                let r = crate::disk::as_finder_shows(r);
+                (t.level(&r), r)
+            }),
             mem_total: self.sys.total_memory(),
             mem_available: available_memory(&self.sys),
             swap_total: self.sys.total_swap(),
@@ -197,7 +201,8 @@ pub fn run(a: SystemArgs) -> anyhow::Result<()> {
     let paths = watched_paths(sessions.into_values().map(|s| s.cwd));
     let mut sampler = Sampler::default();
     sampler.sample(std::iter::empty(), &cfg.thresholds);
-    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL.max(std::time::Duration::from_millis(250)));
+    // A one-second window, like `top -s 1`: shorter ones swing with every spike.
+    std::thread::sleep(std::time::Duration::from_secs(1));
     let snap = sampler.sample(paths.iter().map(PathBuf::as_path), &cfg.thresholds);
     let concerns = snap.concerns(&cfg.thresholds);
     let round = |x: f64| (x * 10.0).round() / 10.0;
@@ -234,6 +239,21 @@ pub fn run(a: SystemArgs) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
         _ => {
+            println!(
+                "CPU     {} · load {:.1} {:.1} {:.1} on {} cores",
+                snap.cpu_pct.map_or("unknown".into(), |c| format!("{c:.0}% busy")),
+                snap.load[0],
+                snap.load[1],
+                snap.load[2],
+                snap.cores
+            );
+            println!(
+                "Memory  {:.0}% used, {:.1} GiB available of {:.1} GiB · swap {:.1} GiB used",
+                snap.mem_used_ratio() * 100.0,
+                snap.mem_available as f64 / GIB,
+                snap.mem_total as f64 / GIB,
+                snap.swap_used as f64 / GIB
+            );
             match &snap.disk {
                 Some((level, r)) => println!(
                     "Disk    {:.0}% full, {:.1} GB free of {:.1} GB · {}",
@@ -244,21 +264,6 @@ pub fn run(a: SystemArgs) -> anyhow::Result<()> {
                 ),
                 None => println!("Disk    unknown"),
             }
-            println!(
-                "Memory  {:.0}% used, {:.1} GiB available of {:.1} GiB · swap {:.1} GiB used",
-                snap.mem_used_ratio() * 100.0,
-                snap.mem_available as f64 / GIB,
-                snap.mem_total as f64 / GIB,
-                snap.swap_used as f64 / GIB
-            );
-            println!(
-                "CPU     {} · load {:.1} {:.1} {:.1} on {} cores",
-                snap.cpu_pct.map_or("unknown".into(), |c| format!("{c:.0}% busy")),
-                snap.load[0],
-                snap.load[1],
-                snap.load[2],
-                snap.cores
-            );
             if let Some(n) = snap.own_data {
                 println!("marsad  data folder {}", crate::clean::fmt_bytes(n));
             }

@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 const GB: f64 = 1_000_000_000.0;
 
 /// Space on one volume, in bytes. `available` is what an ordinary process can still write
-/// (`f_bavail`), which leaves out the blocks reserved for root and APFS purgeable space.
+/// (`f_bavail`), which leaves out the blocks reserved for root and APFS purgeable space; see
+/// [`as_finder_shows`] for the figure people see in Finder.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reading {
     /// The path that was measured.
@@ -49,6 +50,55 @@ pub fn measure(path: &Path) -> Option<Reading> {
     }
     let block = u64::from(s.f_bsize);
     reading(path, s.f_blocks.saturating_mul(block), s.f_bavail.saturating_mul(block))
+}
+
+/// The reading as Finder and System Settings show it: on macOS, free space also counts the
+/// purgeable space the system frees on demand. For display only: the call takes about 5 ms, too
+/// slow for the guard hook, and the guard stays on the stricter statfs figure. Never below
+/// statfs, so a volume where the call misbehaves can't read as fuller.
+pub fn as_finder_shows(r: Reading) -> Reading {
+    #[cfg(target_os = "macos")]
+    if let Some(a) = important_available(&r.path) {
+        return Reading { available: a.max(r.available), ..r };
+    }
+    r
+}
+
+/// Free space as Finder reports it (`NSURLVolumeAvailableCapacityForImportantUsageKey`): statfs's
+/// figure plus the purgeable space (caches, local snapshots) macOS removes when a write needs it.
+#[cfg(target_os = "macos")]
+fn important_available(path: &Path) -> Option<u64> {
+    use std::ffi::c_void;
+    use std::os::unix::ffi::OsStrExt;
+    type CFTypeRef = *const c_void;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFURLVolumeAvailableCapacityForImportantUsageKey: CFTypeRef;
+        fn CFURLCreateFromFileSystemRepresentation(alloc: CFTypeRef, buf: *const u8, len: isize, is_dir: u8) -> CFTypeRef;
+        fn CFURLCopyResourcePropertyForKey(url: CFTypeRef, key: CFTypeRef, value: *mut CFTypeRef, error: *mut CFTypeRef) -> u8;
+        fn CFNumberGetValue(number: CFTypeRef, kind: isize, value: *mut c_void) -> u8;
+        fn CFRelease(cf: CFTypeRef);
+    }
+    const SINT64: isize = 4; // kCFNumberSInt64Type
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: CoreFoundation calls on a URL this function creates and releases; `value` is only
+    // read as a CFNumber when the copy succeeded, and released after.
+    unsafe {
+        let url = CFURLCreateFromFileSystemRepresentation(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize, 1);
+        if url.is_null() {
+            return None;
+        }
+        let mut value: CFTypeRef = std::ptr::null();
+        let ok = CFURLCopyResourcePropertyForKey(url, kCFURLVolumeAvailableCapacityForImportantUsageKey, &mut value, std::ptr::null_mut());
+        CFRelease(url);
+        if ok == 0 || value.is_null() {
+            return None;
+        }
+        let mut n: i64 = 0;
+        let got = CFNumberGetValue(value, SINT64, (&raw mut n).cast());
+        CFRelease(value);
+        (got != 0 && n > 0).then_some(n as u64)
+    }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -579,6 +629,21 @@ fn guard_label(on: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finder_free_space_is_readable_and_never_below_statfs() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir();
+        let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).unwrap();
+        let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::statfs(c.as_ptr(), &mut s) }, 0);
+        let bavail = s.f_bavail * u64::from(s.f_bsize);
+        assert!(important_available(&dir).is_some(), "Finder's figure is readable on the temp volume");
+        let r = as_finder_shows(measure(&dir).unwrap());
+        // Space can be freed between the two reads; allow a little slack.
+        assert!(r.available + 100_000_000 >= bavail, "{} < {bavail}", r.available);
+    }
 
     /// A 228 GB disk with `free` GB available.
     fn disk(free: f64) -> Reading {

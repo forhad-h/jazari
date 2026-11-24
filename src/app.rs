@@ -1041,7 +1041,8 @@ impl App {
         }
     }
 
-    /// Statfs, memory counters and CPU ticks: a fraction of a millisecond, so it stays on this thread.
+    /// Statfs, memory counters, CPU ticks and one Finder free-space call (about 5 ms): cheap enough
+    /// to stay on this thread.
     fn sample_system(&mut self) {
         let cwds = self.sessions.values().filter(|s| s.status != Status::Ended).map(|s| s.cwd.clone());
         let paths = crate::system::watched_paths(cwds);
