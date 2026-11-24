@@ -18,8 +18,13 @@ use ratatui::widgets::{
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 const ACCENT: Color = Color::Cyan;
 /// Secondary text (hints, units, details): a fixed mid gray, lighter than the terminal's own
-/// dark gray, which many themes draw too faint to read.
-const MUTED: Color = Color::Indexed(246);
+/// dark gray, which many themes draw too faint to read. It stays above 4.5:1 on the background and
+/// on the selected row, even on a warm "reading mode" display.
+const MUTED: Color = Color::Indexed(247);
+/// Panel borders: darker than text, so the frame recedes behind what it holds.
+const FRAME: Style = Style::new().fg(Color::Indexed(240));
+/// Titles draw over the border, so they set their own color instead of taking the frame's.
+const TITLE: Style = Style::new().fg(Color::Reset);
 
 const HIGHLIGHT: Style = Style::new().bg(Color::Indexed(236)).add_modifier(Modifier::BOLD);
 
@@ -306,11 +311,6 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else if let Some(c) = &app.control {
         draw_control(f, body, c);
     }
-    let mut spans = vec![Span::raw(" ")];
-    for (k, label) in keys {
-        spans.push(k.to_string().bold());
-        spans.push(format!(" {label}  ").fg(MUTED));
-    }
     let note = app.footer_note().map(|n| match n {
         FooterNote::Error(e) => (format!("{e} "), Color::Red),
         FooterNote::Info(i) => (i.to_string(), Color::Green),
@@ -330,7 +330,33 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         None => footer,
     };
-    f.render_widget(Paragraph::new(Line::from(spans)), footer);
+    f.render_widget(Paragraph::new(key_hints(&keys, footer.width as usize)), footer);
+}
+
+/// The footer's `key label` pairs, in order of importance, cut to `width`. The last pair (quit or
+/// back) always stays, and `…` marks where pairs were left out.
+fn key_hints(keys: &[(&str, String)], width: usize) -> Line<'static> {
+    let pair = |(k, label): &(&str, String)| [k.to_string().bold(), format!(" {label}  ").fg(MUTED)];
+    let pair_width = |p: &(&str, String)| p.0.chars().count() + p.1.chars().count() + 3;
+    let total = 1 + keys.iter().map(pair_width).sum::<usize>();
+    let mut spans = vec![Span::raw(" ")];
+    if total <= width {
+        spans.extend(keys.iter().flat_map(pair));
+        return Line::from(spans);
+    }
+    let Some((last, rest)) = keys.split_last() else { return Line::default() };
+    let mut room = width.saturating_sub(1 + pair_width(last) + 3);
+    for p in rest {
+        let w = pair_width(p);
+        if w > room {
+            break;
+        }
+        room -= w;
+        spans.extend(pair(p));
+    }
+    spans.push("…  ".fg(MUTED));
+    spans.extend(pair(last));
+    Line::from(spans)
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
@@ -348,38 +374,53 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let room = (area.width as usize).saturating_sub(left.width() + 2);
     f.render_widget(Paragraph::new(left), area);
 
-    let mut right = Vec::new();
-    // The selected session's context, next to the account limits.
-    if let Some(ctx) = app.selected_session().and_then(|s| s.context(app.compact_window)) {
-        right.push(Span::raw("ctx "));
-        right.extend(context_spans(&ctx, 6, false));
-        right.push(Span::styled(format!(" {} left", fmt_tokens(ctx.left())), Style::new().fg(MUTED)));
-        right.push(Span::styled("  ·  ", Style::new().fg(MUTED)));
-    }
-    let ctx_left = right.len().checked_sub(2);
-    if let Some((five, seven)) = app.rate_limits() {
-        for (label, w) in [("5h", five), ("7d", seven)] {
-            if let Some(w) = w {
-                right.extend(rate_spans(label, w));
-                right.push(Span::styled("  ·  ", Style::new().fg(MUTED)));
+    let ctx = app.selected_session().and_then(|s| s.context(app.compact_window));
+    let limits = app.rate_limits();
+    let (today, all_time) = app.counter.totals();
+    // Most detail first; a narrow terminal drops the reset times, then the all-time and today
+    // totals, then the tokens left, and keeps the context gauge and the limits to the end.
+    let build = |drop: u8| {
+        let sep = || Span::styled("  ·  ", Style::new().fg(MUTED));
+        let mut right = Vec::new();
+        // The selected session's context, next to the account limits.
+        if let Some(ctx) = &ctx {
+            right.push(Span::raw("ctx "));
+            right.extend(context_spans(ctx, 6, false));
+            if drop < 4 {
+                right.push(Span::raw(format!(" {}", fmt_tokens(ctx.left()))));
+                right.push(Span::styled(" left", Style::new().fg(MUTED)));
+            }
+            right.push(sep());
+        }
+        if let Some((five, seven)) = limits {
+            for (label, w) in [("5h", five), ("7d", seven)] {
+                if let Some(mut w) = w {
+                    if drop >= 1 {
+                        w.resets_at = None;
+                    }
+                    right.extend(rate_spans(label, w));
+                    right.push(sep());
+                }
             }
         }
-    }
-    let (today, all_time) = app.counter.totals();
-    let tokens = |n: i64| Span::styled(fmt_tokens(n.max(0) as u64), Style::new().bold());
-    right.extend([
-        Span::raw("today "),
-        tokens(today),
-        Span::styled(" · ", Style::new().fg(MUTED)),
-        Span::raw("all-time "),
-        Span::styled(crate::model::fmt_count(all_time.max(0) as u64), Style::new().bold()),
-        Span::raw(" "),
-    ]);
-    // On a narrow terminal the context keeps its gauge and drops the tokens left.
-    let mut right = Line::from(right);
-    if let Some(i) = ctx_left.filter(|_| right.width() > room) {
-        right.spans.remove(i);
-    }
+        let tokens = |n: i64| Span::styled(fmt_tokens(n.max(0) as u64), Style::new().bold());
+        if drop < 3 {
+            right.extend([Span::raw("today "), tokens(today)]);
+        }
+        if drop < 2 {
+            right.extend([
+                Span::styled(" · ", Style::new().fg(MUTED)),
+                Span::raw("all-time "),
+                Span::styled(crate::model::fmt_count(all_time.max(0) as u64), Style::new().bold()),
+            ]);
+        }
+        if drop >= 3 {
+            right.pop();
+        }
+        right.push(Span::raw(" "));
+        Line::from(right)
+    };
+    let right = (0..=4).map(build).find(|l| l.width() <= room).unwrap_or_else(|| build(4));
     f.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
 }
 
@@ -455,9 +496,8 @@ fn own_line(s: &crate::system::Snapshot) -> Line<'static> {
 fn draw_system(f: &mut Frame, area: Rect, snap: Option<&crate::system::Snapshot>) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
-        .title(Line::from(" System ").bold())
-        .title_bottom(Line::from(vec![dim(" D "), Span::raw("disk cleanup ")]).alignment(Alignment::Right));
+        .border_style(FRAME).title_style(TITLE)
+        .title(Line::from(" System ").bold());
     let lines = match snap {
         Some(s) => {
             let mut lines = system_lines(s, block.inner(area).width);
@@ -482,7 +522,7 @@ fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: 
     }
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
+        .border_style(FRAME).title_style(TITLE)
         .title(Line::from(title))
         .title(Line::from(right).alignment(Alignment::Right));
     let inner = block.inner(area);
@@ -599,7 +639,7 @@ fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
             Line::from(vec!["Run ".fg(MUTED), "marsad install".fg(ACCENT).bold(), ", then restart your Claude Code sessions.".fg(MUTED)]),
         ]
     };
-    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(MUTED));
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(FRAME).title_style(TITLE);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let height = msg.len() as u16;
@@ -971,7 +1011,7 @@ fn draw_prompt_review(
         let rows = (side.len() as u16).min(area.height / 2);
         Layout::vertical([Constraint::Fill(1), Constraint::Length(rows)]).spacing(1).areas(area)
     };
-    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(MUTED)).title(format!(" {key}.md "));
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(FRAME).title_style(TITLE).title(format!(" {key}.md "));
     let inner = block.inner(draft_area).inner(Margin { horizontal: 1, vertical: 0 });
     f.render_widget(block, draft_area);
     let rows: Vec<Line> = markdown_lines(&draft.body).into_iter().flat_map(|l| wrap_line(l, inner.width as usize)).collect();
@@ -1022,7 +1062,7 @@ pub fn cell_aspect(size: Option<ratatui::backend::WindowSize>) -> f64 {
 /// when there is room for it; the art is dropped first so the rows never clip. `cell_aspect` is a
 /// cell's height over its width, so the art comes out square.
 pub(crate) fn draw_badges(f: &mut Frame, area: Rect, badges: Option<&Badges>, cell_aspect: f64) {
-    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(MUTED)).title(" Badges ");
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(FRAME).title_style(TITLE).title(" Badges ");
     let inner = block.inner(area);
     f.render_widget(block, area);
     let Some(b) = badges else {
@@ -1226,7 +1266,7 @@ fn draw_board(f: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_default();
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
+        .border_style(FRAME).title_style(TITLE)
         .title(Line::from(format!(" Board · {repo} ")).fg(ACCENT));
     let inner = block.inner(area).inner(Margin::new(1, 0));
     f.render_widget(block, area);
@@ -1490,7 +1530,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     .style(Style::new().fg(MUTED));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
+        .border_style(FRAME).title_style(TITLE)
         .title(Line::from(" Sessions ").fg(ACCENT));
     let table = styled_table(rows, &widths, block).header(header);
     let mut state = TableState::default().with_selected(app.selected_index());
@@ -1532,7 +1572,7 @@ fn context_line(s: &Session, app: &App) -> Line<'static> {
 
 fn draw_details(f: &mut Frame, area: Rect, s: &Session) {
     let now = now_line(s, area.width.saturating_sub(2) as usize);
-    let id = vec![label("id"), Span::styled(s.id.clone(), Style::new().fg(Color::Yellow)), dim("  y copies it")];
+    let id = vec![label("id"), Span::styled(s.id.clone(), Style::new().fg(Color::Yellow))];
     let model = s.snapshot.as_ref().and_then(|x| x.model.clone()).or(s.model.clone());
     let model = vec![label("model"), model.map_or_else(|| dim("not known yet"), Span::raw)];
     let mut lines = vec![now, Line::from(id), Line::from(model)];
@@ -1540,11 +1580,8 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session) {
     lines.extend(channel_line(s));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
-        .title(session_heading(s))
-        .title_bottom(
-            Line::from(vec![dim(" enter "), Span::raw("details "), dim(" tab "), Span::raw("subagents ")]).alignment(Alignment::Right),
-        );
+        .border_style(FRAME).title_style(TITLE)
+        .title(session_heading(s));
     // Each line keeps to one row; a long one is cut rather than pushing the others out.
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
@@ -1803,7 +1840,7 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
     }
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
+        .border_style(FRAME).title_style(TITLE)
         .title(session_heading(s))
         .title(Line::from(" Details ").fg(ACCENT).alignment(Alignment::Right));
     let mut lines = vec![now_line(s, summary.width.saturating_sub(2) as usize), context_line(s, app), Line::from(tokens)];
@@ -1813,10 +1850,10 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
+        .border_style(FRAME).title_style(TITLE)
         .title(Line::from(" History ").fg(ACCENT))
         .title(Line::from(dim(format!(" showing {} · {} events ", app.history_filter.label(), events.len()))).alignment(Alignment::Right));
-    let detail_block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(MUTED));
+    let detail_block = Block::bordered().border_type(BorderType::Rounded).border_style(FRAME).title_style(TITLE);
     if events.is_empty() {
         let msg = if all.is_empty() { "Nothing in this session yet." } else { "No events of this kind. Press f to change the filter." };
         f.render_widget(Paragraph::new(dim(msg)).alignment(Alignment::Center).block(block), list);
@@ -1882,8 +1919,8 @@ const AGENT_WIDTHS: [Constraint; 10] = [
     Constraint::Length(3),
     Constraint::Length(12),
     Constraint::Length(16),
-    Constraint::Fill(2),
-    Constraint::Length(18),
+    Constraint::Fill(3),
+    Constraint::Fill(1),
     Constraint::Fill(1),
     Constraint::Length(9),
     Constraint::Length(7),
@@ -1951,7 +1988,7 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &App, s: &Session) {
     count.extend([dim("   "), Span::raw(fmt_tokens(in_agents)), dim(format!(" tokens ({share:.0}% of session)"))]);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
+        .border_style(FRAME).title_style(TITLE)
         .title(session_heading(s));
     f.render_widget(Paragraph::new(vec![context_line(s, app), Line::from(tokens), Line::from(count)]).block(block), summary);
 
@@ -1962,7 +1999,7 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &App, s: &Session) {
             Cell::from(dim(format!("{:>3}", 0))),
             Cell::from(Span::raw(fmt_local(s.stats.started.as_deref()))),
             Cell::from(Span::styled(MAIN_AGENT, Style::new().bold())),
-            Cell::from(dim(s.title.clone().or_else(|| s.stats.title.clone()).unwrap_or_default())),
+            Cell::from(Span::raw(s.title.clone().or_else(|| s.stats.title.clone()).unwrap_or_default())),
             Cell::from(dim("—")),
             Cell::from(Span::styled(skill_names(&s.stats), Style::new().fg(Color::Magenta))),
             Cell::from(Span::styled(format!("{} {}", s.status.as_str(), status_glyph(s.status, app.tick)), main_style)),
@@ -1997,7 +2034,7 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &App, s: &Session) {
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
+        .border_style(FRAME).title_style(TITLE)
         .title(Line::from(" Subagents ").fg(ACCENT))
         .title(Line::from(dim(" context left = tokens before each agent's auto-compact ")).alignment(Alignment::Right));
     let len = rows.len();
@@ -2006,11 +2043,12 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &App, s: &Session) {
 }
 
 fn pane_block(title: &'static str, focused: bool) -> Block<'static> {
-    let border = if focused { Style::new().fg(ACCENT) } else { Style::new().fg(MUTED) };
-    let title_style = if focused { Style::new().fg(ACCENT).bold() } else { Style::new() };
+    let border = if focused { Style::new().fg(ACCENT) } else { FRAME };
+    let title_style = if focused { Style::new().fg(ACCENT).bold() } else { TITLE };
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(border)
+        .title_style(TITLE)
         .title(Line::from(Span::styled(format!(" {title} "), title_style)))
 }
 
@@ -2048,7 +2086,7 @@ fn draw_summary(f: &mut Frame, area: Rect, u: &Usage) {
     }
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
+        .border_style(FRAME).title_style(TITLE)
         .title(Line::from(Span::styled(format!(" Usage · {} ", u.period_label()), Style::new().fg(ACCENT).bold())));
     let block = match &u.lifetime.since {
         Some(since) => block.title(
@@ -2121,8 +2159,8 @@ fn draw_usage(f: &mut Frame, area: Rect, u: &Usage) {
     let max_s = u.sessions.first().map(|s| s.total).unwrap_or(0);
     let rows = u.sessions.iter().map(|s| {
         Row::new(vec![
-            Cell::from(Span::styled(s.project.clone(), Style::new().bold())),
-            Cell::from(dim(s.title.clone())),
+            Cell::from(Span::styled(s.project.clone(), Style::new().fg(ACCENT))),
+            Cell::from(Span::raw(s.title.clone())),
             Cell::from(Span::raw(s.model.trim_start_matches("claude-").to_string())),
             right_cell(s.turns.to_string()),
             right_cell(if s.skill_runs > 0 { s.skill_runs.to_string() } else { String::new() }),
@@ -2207,12 +2245,12 @@ fn draw_drill(f: &mut Frame, area: Rect, u: &Usage) {
     if !s.title.is_empty() {
         heading.push(dim(format!("· {} ", s.title)));
     }
-    let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(MUTED)).title(Line::from(heading));
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(FRAME).title_style(TITLE).title(Line::from(heading));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), summary);
 
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(MUTED))
+        .border_style(FRAME).title_style(TITLE)
         .title(Line::from(" Skill runs ").fg(ACCENT));
     if d.runs.is_empty() {
         f.render_widget(Paragraph::new(dim("No skills invoked in this session.")).alignment(Alignment::Center).block(block), list);

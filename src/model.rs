@@ -232,12 +232,14 @@ impl Level {
     }
 }
 
-/// Compact token count: `950`, `12.3k`, `1.2M`.
+/// Compact token count: `950`, `12.3k`, `1.2M`, `15.9B`. Each unit starts where the one below
+/// would round up to `1000.0`, so 999.96k reads `1.0M`.
 pub fn fmt_tokens(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),
-        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
-        _ => format!("{:.1}M", n as f64 / 1e6),
+        1_000..999_950 => format!("{:.1}k", n as f64 / 1e3),
+        999_950..999_950_000 => format!("{:.1}M", n as f64 / 1e6),
+        _ => format!("{:.1}B", n as f64 / 1e9),
     }
 }
 
@@ -679,6 +681,8 @@ mod tests {
     fn counts_switch_to_billions_and_trillions() {
         assert_eq!(fmt_count(0), "0");
         assert_eq!(fmt_count(11_300_000), "11.3M");
+        assert_eq!(fmt_tokens(15_876_300_000), "15.9B");
+        assert_eq!(fmt_tokens(999_960), "1.0M");
         assert_eq!(fmt_count(344_000_000), "344M");
         assert_eq!(fmt_count(2_000), "2k");
         assert_eq!(fmt_count(10_050_000), "10.1M");

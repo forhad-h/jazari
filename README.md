@@ -16,7 +16,7 @@ doing, which ones are waiting on you, which skills they ran, and how many tokens
 │id       1fe612e4-0c3b-4d5e-9a7f-2b8c6d1e0f93││memory   ▰▰▰▰▰▱▱▱▱▱  51%  7.8 GiB free        │
 │model    claude-opus-5-5                     ││cpu      ▰▱▱▱▱▱▱▱▱▱  10%  load 3.2            │
 │                                             ││marsad   cpu 0.4% · mem 38 MB · data 12 MB    │
-╰────────────── enter details  tab subagents ─╯╰──────────────────────────────────────────────╯
+╰─────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
 ```
 
 ## Install
