@@ -1,7 +1,7 @@
 use crate::app::{App, FooterNote, HistoryFilter, View};
 use crate::update::Notice;
 use crate::usage::{Pane, Usage};
-use crate::model::{ContextInfo, DAY_FMT, EventKind, Level, fmt_tokens, MAIN_AGENT, RateWindow, Session, SortKey, Status, TimelineEntry, TokenUsage, Via};
+use crate::model::{ContextInfo, DAY_FMT, EventKind, Level, fmt_tokens, MAIN_AGENT, Session, SortKey, Status, TimelineEntry, TokenUsage, Via};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -161,26 +161,24 @@ fn context_spans(ctx: &ContextInfo, width: usize, long: bool) -> Vec<Span<'stati
     spans
 }
 
-fn rate_spans(label: &str, w: RateWindow) -> Vec<Span<'static>> {
-    let style = Style::new().fg(ratio_color(w.used_pct / 100.0));
-    let mut spans = vec![Span::raw(format!("{label} ")), Span::styled(format!("{:.0}%", w.used_pct), style.bold())];
-    if let Some(reset) = w.resets_at {
-        spans.push(Span::styled(format!(" ↻{}", crate::model::fmt_reset(reset)), Style::new().fg(MUTED)));
-    }
-    spans
-}
-
 pub fn draw(f: &mut Frame, app: &App) {
     let visible = app.visible();
     let note_height = if app.copy_note.is_some() { 4 } else { 0 };
-    let [header, body, copy_note, footer] = Layout::vertical([
+    let status = status_row(app);
+    let [header, body, copy_note, status_area, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(note_height),
+        Constraint::Length(u16::from(status.is_some())),
         Constraint::Length(1),
     ])
     .areas(f.area());
     draw_header(f, header, app, &visible);
+    if let Some(build) = status {
+        // Reset times go first when the row doesn't fit.
+        let line = Some(build(true)).filter(|l| l.width() <= status_area.width as usize).unwrap_or_else(|| build(false));
+        f.render_widget(Paragraph::new(line), status_area);
+    }
 
     let keys: Vec<(&str, String)> = match (app.view, app.selected_session()) {
         (View::Usage, _) if app.usage.drill.is_some() => {
@@ -374,27 +372,12 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let room = (area.width as usize).saturating_sub(left.width() + 2);
     f.render_widget(Paragraph::new(left), area);
 
-    let limits = app.rate_limits();
     let (today, all_time) = app.counter.totals();
-    // Most detail first; a narrow terminal drops the all-time total, then today's, and keeps the
-    // limits and their reset times to the end. Context left is in the session list.
+    // A narrow terminal drops the all-time total, then today's.
     let build = |drop: u8| {
-        let sep = || Span::styled("  ·  ", Style::new().fg(MUTED));
         let mut right = Vec::new();
-        if let Some((five, seven)) = limits {
-            for (label, w) in [("5h", five), ("7d", seven)] {
-                if let Some(mut w) = w {
-                    if drop >= 3 {
-                        w.resets_at = None;
-                    }
-                    right.extend(rate_spans(label, w));
-                    right.push(sep());
-                }
-            }
-        }
-        let tokens = |n: i64| Span::styled(fmt_tokens(n.max(0) as u64), Style::new().bold());
         if drop < 2 {
-            right.extend([Span::raw("today "), tokens(today)]);
+            right.extend([Span::raw("today "), Span::styled(fmt_tokens(today.max(0) as u64), Style::new().bold())]);
         }
         if drop < 1 {
             right.extend([
@@ -403,14 +386,50 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
                 Span::styled(crate::model::fmt_count(all_time.max(0) as u64), Style::new().bold()),
             ]);
         }
-        if drop >= 2 {
-            right.pop();
-        }
         right.push(Span::raw(" "));
         Line::from(right)
     };
-    let right = (0..=3).map(build).find(|l| l.width() <= room).unwrap_or_else(|| build(3));
+    let right = (0..=2).map(build).find(|l| l.width() <= room).unwrap_or_else(|| build(2));
     f.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
+}
+
+/// The row above the footer, laid out like Claude Code's own status line: the selected session's
+/// context, then the 5-hour and 7-day limits. None when there is nothing to show. The builder
+/// takes whether to include reset times.
+fn status_row(app: &App) -> Option<impl Fn(bool) -> Line<'static>> {
+    let ctx = app.selected_session().and_then(|s| s.context(app.compact_window));
+    let limits = app.rate_limits();
+    if ctx.is_none() && limits.is_none() {
+        return None;
+    }
+    Some(move |resets: bool| {
+        let mut parts: Vec<Vec<Span<'static>>> = Vec::new();
+        if let Some(ctx) = &ctx {
+            let r = ctx.used_ratio();
+            let approx = if ctx.estimated { "≈" } else { "" };
+            parts.push(vec![
+                Span::styled(format!("ctx {approx}{:.0}%", r * 100.0), Style::new().fg(ratio_color(r)).bold()),
+                dim(format!(" · {} left", fmt_tokens(ctx.left()))),
+            ]);
+        }
+        for (label, w) in limits.into_iter().flat_map(|(five, seven)| [("5h", five), ("7d", seven)]) {
+            if let Some(w) = w {
+                let mut spans = vec![Span::styled(format!("{label} {:.0}%", w.used_pct), Style::new().fg(ratio_color(w.used_pct / 100.0)).bold())];
+                if let Some(t) = w.resets_at.filter(|_| resets) {
+                    spans.push(dim(format!(" ↻{}", crate::model::fmt_reset(t))));
+                }
+                parts.push(spans);
+            }
+        }
+        let mut spans = vec![Span::raw(" ")];
+        for (i, part) in parts.into_iter().enumerate() {
+            if i > 0 {
+                spans.push(dim(" · "));
+            }
+            spans.extend(part);
+        }
+        Line::from(spans)
+    })
 }
 
 /// CPU, memory, swap and disk meters, one per line, each colored by how close it is to trouble.
