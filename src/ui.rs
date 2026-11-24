@@ -214,7 +214,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             vec![
                 ("↑↓", "scroll".into()),
                 ("g/G", "top/bottom".into()),
-                ("tab", "history".into()),
+                ("tab", "details".into()),
                 ("y", "copy id".into()),
                 ("b", "board".into()),
                 ("esc", "back".into()),
@@ -236,7 +236,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             let ended = if app.show_ended { "hide ended" } else { "show ended" };
             vec![
                 ("↑↓", "select".into()),
-                ("enter", "history".into()),
+                ("enter", "details".into()),
                 ("tab", "subagents".into()),
                 ("y", "copy id".into()),
                 ("u", "usage".into()),
@@ -557,7 +557,7 @@ fn draw_clean(f: &mut Frame, area: Rect, v: &crate::clean_view::CleanView, sys: 
 fn draw_list(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let selected = app.selected_session();
     // Session info on the left, the machine on the right; the taller side sets the height.
-    let session_rows = selected.map_or(0, |s| 2 + u16::from(s.flag.is_some()) + u16::from(s.said.is_some() || s.waiting > 0 || s.stop_requested));
+    let session_rows = selected.map_or(0, |s| 3 + u16::from(s.flag.is_some()) + u16::from(s.said.is_some() || s.waiting > 0 || s.stop_requested));
     let system_rows = app.system.as_ref().map_or(1, |s| 3 + u16::from(s.disk.is_some()));
     let [table, bottom] =
         Layout::vertical([Constraint::Min(4), Constraint::Length(2 + session_rows.max(system_rows))]).areas(area);
@@ -1528,10 +1528,11 @@ fn context_line(s: &Session, app: &App) -> Line<'static> {
 }
 
 fn draw_details(f: &mut Frame, area: Rect, s: &Session) {
+    let now = now_line(s, area.width.saturating_sub(2) as usize);
     let id = vec![label("id"), Span::styled(s.id.clone(), Style::new().fg(Color::Yellow)), dim("  y copies it")];
     let model = s.snapshot.as_ref().and_then(|x| x.model.clone()).or(s.model.clone());
     let model = vec![label("model"), model.map_or_else(|| dim("not known yet"), Span::raw)];
-    let mut lines = vec![Line::from(id), Line::from(model)];
+    let mut lines = vec![now, Line::from(id), Line::from(model)];
     lines.extend(flag_line(s));
     lines.extend(channel_line(s));
     let block = Block::bordered()
@@ -1539,7 +1540,7 @@ fn draw_details(f: &mut Frame, area: Rect, s: &Session) {
         .border_style(Style::new().dark_gray())
         .title(session_heading(s))
         .title_bottom(
-            Line::from(vec![dim(" enter "), Span::raw("history "), dim(" tab "), Span::raw("subagents ")]).alignment(Alignment::Right),
+            Line::from(vec![dim(" enter "), Span::raw("details "), dim(" tab "), Span::raw("subagents ")]).alignment(Alignment::Right),
         );
     // Each line keeps to one row; a long one is cut rather than pushing the others out.
     f.render_widget(Paragraph::new(lines).block(block), area);
@@ -1559,8 +1560,8 @@ fn now_line(s: &Session, width: usize) -> Line<'static> {
     Line::from(vec![label("now"), Span::styled(crate::hook::truncate(&now.content, width.saturating_sub(10)), now.style)])
 }
 
-/// Model, permission mode and folder, then the skills the session ran.
-fn session_lines(s: &Session) -> Vec<Line<'static>> {
+/// Model, permission mode and folder, then the agents by type and the skills the session ran.
+fn session_lines(s: &Session, tick: u64) -> Vec<Line<'static>> {
     let sep = || dim("   ·   ");
     let mut about = vec![label("session")];
     let model = s.snapshot.as_ref().and_then(|x| x.model.clone()).or(s.model.clone());
@@ -1572,6 +1573,24 @@ fn session_lines(s: &Session) -> Vec<Line<'static>> {
     }
     about.push(Span::raw(short_path(&s.cwd)));
     let mut lines = vec![Line::from(about)];
+    let mut agents = vec![label("agents"), Span::raw("main "), Span::styled(fmt_tokens(s.stats.tokens.total()), Style::new().bold())];
+    let mut by_type: std::collections::BTreeMap<&str, (usize, usize, u64)> = Default::default();
+    for a in s.subagents.values() {
+        let e = by_type.entry(a.agent_type.as_str()).or_default();
+        e.0 += 1;
+        e.1 += usize::from(a.running);
+        e.2 += a.stats.tokens.total();
+    }
+    for (agent_type, (count, running, tokens)) in by_type {
+        let (mark, mark_style) = if running > 0 {
+            (format!("{} {running} running", SPINNER[(tick / 2 % 4) as usize]), Style::new().fg(Color::Green))
+        } else {
+            ("✓".to_string(), Style::new().dark_gray())
+        };
+        let count = if count > 1 { format!(" ×{count}") } else { String::new() };
+        agents.extend([dim(" · "), Span::raw(format!("{agent_type}{count} ")), Span::styled(format!("{mark} "), mark_style), Span::raw(fmt_tokens(tokens))]);
+    }
+    lines.push(Line::from(agents));
     let mut skills_list: Vec<_> = s.all_skills().into_iter().collect();
     skills_list.sort_by(|a, b| b.1.tokens.total().cmp(&a.1.tokens.total()).then(b.1.calls.cmp(&a.1.calls)));
     if !skills_list.is_empty() {
@@ -1752,13 +1771,14 @@ fn event_detail(e: &TimelineEntry, s: &Session, app: &App) -> Vec<Line<'static>>
     lines
 }
 
-/// Full-screen, scrollable history of a session: prompts, replies, skills, subagents,
-/// and questions with their answers, with the selected event in full underneath.
+/// Full-screen details of a session: what it is doing, its context, tokens, agents and skills,
+/// then a scrollable history of prompts, replies, skills, subagents and questions with their
+/// answers, with the selected event in full underneath.
 fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
     let all = s.timeline();
     let events = app.history(s);
     let total = s.total_tokens();
-    let about = session_lines(s);
+    let about = session_lines(s, app.tick);
     let [summary, list, detail] = Layout::vertical([
         Constraint::Length(6 + about.len() as u16),
         Constraint::Min(6),
@@ -1781,7 +1801,8 @@ fn draw_history(f: &mut Frame, area: Rect, app: &App, s: &Session) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().dark_gray())
-        .title(session_heading(s));
+        .title(session_heading(s))
+        .title(Line::from(" Details ").fg(ACCENT).alignment(Alignment::Right));
     let mut lines = vec![now_line(s, summary.width.saturating_sub(2) as usize), context_line(s, app), Line::from(tokens)];
     lines.extend(about);
     lines.push(Line::from(counts));

@@ -4,19 +4,19 @@ A live terminal dashboard for every Claude Code session on your machine: what ea
 doing, which ones are waiting on you, which skills they ran, and how many tokens they used.
 
 ```
- marsad   3 sessions · 1 active · 2 need you                    today 2.4M · all-time 133.5M 
+ marsad   3 sessions · 1 active · 2 need you      ctx ▰▰▱▱▱▱ 552.6k left  ·  5h 23%  ·  7d 41% 
 ╭ Sessions ───────────────────────────────────────────────────────────────────────────────────╮
 │ SESSION                            PROJECT        CONTEXT LEFT  TIME  TOKENS         STATUS │
 │ Fix the flaky login test           marsad         ▰▱▱▱▱ 801.0k   37s    2.0M      APPROVE ● │
 │ Pick a database for reports        notes          ▰▱▱▱▱ 920.4k   37s    8.1k     QUESTION ? │
 │ Dark mode settings              +2 web            ▰▰▱▱▱ 552.6k   12s  414.8k       ACTIVE ◐ │
 ╰─────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ Dark mode settings · web ───────────────────────────────────────────────────────────────────╮
-│now      › add dark mode to the settings page                                                │
-│context  ▰▰▰▰▱▱▱▱▱▱ 43%  552.6k left   ·   tokens 414.8k   ·   model claude-opus-5-5         │
-│id       1fe612e4-0c3b-4d5e-9a7f-2b8c6d1e0f93  y copies it   ·   ~/Projects/web              │
-│agents   main 312.1k · Explore ✓ 15.8k · general-purpose ◐ 1 running 41.3k                   │
-╰─────────────────────────────────────────────── enter history  tab subagents  y copy id ─────╯
+╭ Dark mode settings · web ───────────────────╮╭ System ──────────────────────────────────────╮
+│now      › add dark mode to the settings page││disk     ▰▰▰▰▰▱▱▱▱▱  55%  110.9 GB free       │
+│id       1fe612e4-0c3b-4d5e-9a7f-2b8c6d1e0f93││memory   ▰▰▰▰▰▱▱▱▱▱  51%  7.8 GiB free        │
+│model    claude-opus-5-5                     ││cpu      ▰▱▱▱▱▱▱▱▱▱  10%  load 3.2            │
+│                                             ││marsad   cpu 0.4% · mem 38 MB · data 12 MB    │
+╰────────────── enter details  tab subagents ─╯╰──────────────────────────────────────────────╯
 ```
 
 ## Install
@@ -50,9 +50,9 @@ marsad actions     # what marsad did, refused or held, and who asked
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session history · `tab` subagents · `y` copy the session id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
-In session history and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
-In session history also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
+Keys: `↑↓`/`jk` select · `enter` session details · `tab` subagents · `y` copy the session id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+In session details and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
+In session details also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 History lists the newest events first. By default sessions that are working or waiting on you sit on top and the rest keep their place, so rows don't jump around as sessions run.
 
 ### Window on top
@@ -99,9 +99,9 @@ yellow (60%) → red (85%). The header shows the selected session's context (`ct
 5-hour and 7-day usage limits, with the local time each resets, such as `↻7:20pm` (claude.ai
 Pro/Max only).
 
-Below the list, the left panel shows the selected session's id and model, plus any command check
-finding or waiting message. Press `enter` for the rest: what it is doing now, the full context
-gauge, tokens, permission mode, folder and skills, above its history.
+Below the list, the left panel shows what the selected session is doing now, its id and model,
+plus any command check finding or waiting message. Press `enter` for its details: the full
+context gauge, tokens, permission mode, folder, agents and skills, above its history.
 
 These exact figures come from Claude Code's status line feed, so `marsad install` sets
 `statusLine` to `marsad statusline`, which prints a compact `ctx 42% · 412k left · 5h 23% · 7d 41%`.
@@ -407,9 +407,11 @@ removes caches, changes settings and updates itself. Every one of those goes thr
 `marsad disk --guard off` now also stops the background watcher from interrupting sessions at the
 emergency level, as it says; it only warns.
 
-### Session history
+### Session details
 
-`enter` on a session opens a scrollable timeline of what happened in it, oldest first:
+`enter` on a session opens its details: what it is doing now, context, tokens, model, permission
+mode, folder, agents by type and skills, above a scrollable timeline of what happened in it,
+oldest first:
 
 | Event | Shows |
 |---|---|
