@@ -256,7 +256,7 @@ impl Paint {
     fn new() -> Self {
         use std::io::IsTerminal;
         if std::io::stdout().is_terminal() {
-            Self { yellow: "\x1b[33m", green: "\x1b[32m", bold: "\x1b[1m", dim: "\x1b[2m", reset: "\x1b[0m" }
+            Self { yellow: "\x1b[33m", green: "\x1b[32m", bold: "\x1b[1m", dim: "\x1b[38;5;246m", reset: "\x1b[0m" }
         } else {
             Self { yellow: "", green: "", bold: "", dim: "", reset: "" }
         }

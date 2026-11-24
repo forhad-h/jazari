@@ -124,7 +124,8 @@ fn run_original(cmd: &str, input: &str) -> Option<Vec<u8>> {
 }
 
 fn default_line(snap: &StatusSnapshot) -> String {
-    const DIM: &str = "\x1b[2m";
+    // A mid gray (256-color 246) rather than faint, which many themes draw too dim to read.
+    const DIM: &str = "\x1b[38;5;246m";
     const RESET: &str = "\x1b[0m";
     let color = |ratio: f64| match Level::of(ratio) {
         Level::Critical => "\x1b[31m",
