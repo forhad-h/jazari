@@ -374,28 +374,17 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let room = (area.width as usize).saturating_sub(left.width() + 2);
     f.render_widget(Paragraph::new(left), area);
 
-    let ctx = app.selected_session().and_then(|s| s.context(app.compact_window));
     let limits = app.rate_limits();
     let (today, all_time) = app.counter.totals();
-    // Most detail first; a narrow terminal drops the reset times, then the all-time and today
-    // totals, then the tokens left, and keeps the context gauge and the limits to the end.
+    // Most detail first; a narrow terminal drops the all-time total, then today's, and keeps the
+    // limits and their reset times to the end. Context left is in the session list.
     let build = |drop: u8| {
         let sep = || Span::styled("  ·  ", Style::new().fg(MUTED));
         let mut right = Vec::new();
-        // The selected session's context, next to the account limits.
-        if let Some(ctx) = &ctx {
-            right.push(Span::raw("ctx "));
-            right.extend(context_spans(ctx, 6, false));
-            if drop < 4 {
-                right.push(Span::raw(format!(" {}", fmt_tokens(ctx.left()))));
-                right.push(Span::styled(" left", Style::new().fg(MUTED)));
-            }
-            right.push(sep());
-        }
         if let Some((five, seven)) = limits {
             for (label, w) in [("5h", five), ("7d", seven)] {
                 if let Some(mut w) = w {
-                    if drop >= 1 {
+                    if drop >= 3 {
                         w.resets_at = None;
                     }
                     right.extend(rate_spans(label, w));
@@ -404,23 +393,23 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
             }
         }
         let tokens = |n: i64| Span::styled(fmt_tokens(n.max(0) as u64), Style::new().bold());
-        if drop < 3 {
+        if drop < 2 {
             right.extend([Span::raw("today "), tokens(today)]);
         }
-        if drop < 2 {
+        if drop < 1 {
             right.extend([
                 Span::styled(" · ", Style::new().fg(MUTED)),
                 Span::raw("all-time "),
                 Span::styled(crate::model::fmt_count(all_time.max(0) as u64), Style::new().bold()),
             ]);
         }
-        if drop >= 3 {
+        if drop >= 2 {
             right.pop();
         }
         right.push(Span::raw(" "));
         Line::from(right)
     };
-    let right = (0..=4).map(build).find(|l| l.width() <= room).unwrap_or_else(|| build(4));
+    let right = (0..=3).map(build).find(|l| l.width() <= room).unwrap_or_else(|| build(3));
     f.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
 }
 
