@@ -4,7 +4,7 @@ A live terminal dashboard for every Claude Code session on your machine: what ea
 doing, which ones are waiting on you, which skills they ran, and how many tokens they used.
 
 ```
- marsad   3 sessions · 1 active · 2 need you         5h 23% ↻7:20pm  ·  7d 41% ↻Sat 9:00am 
+ marsad   3 sessions · 1 active · 2 need you                      today 23.0M · all-time 16.1B 
 ╭ Sessions ───────────────────────────────────────────────────────────────────────────────────╮
 │ SESSION                            PROJECT        CONTEXT LEFT  TIME  TOKENS         STATUS │
 │ Fix the flaky login test           marsad         ▰▱▱▱▱ 801.0k   37s    2.0M      APPROVE ● │
@@ -18,6 +18,8 @@ doing, which ones are waiting on you, which skills they ran, and how many tokens
 │                                             ││disk     ▰▰▰▰▰▱▱▱▱▱  55%  110.9 GB free       │
 │                                             ││marsad   cpu 0.4% · mem 38 MB · data 12 MB    │
 ╰─────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
+ ctx 45% · 552.6k left · 5h 23% ↻7:20pm · 7d 41% ↻Sat 9:00am
+ ↑↓ select  enter details  tab subagents  y copy id  u usage  t/x message/stop  …  q quit
 ```
 
 ## Install
@@ -96,8 +98,10 @@ binary outside a `bin` directory) can't update themselves; reinstall them the sa
 ### Context and usage limits
 
 The **CONTEXT LEFT** column shows how many tokens remain before auto-compact, colored green →
-yellow (60%) → red (85%). The header shows your 5-hour and 7-day usage limits, with the local
-time each resets, such as `↻7:20pm` (claude.ai Pro/Max only).
+yellow (60%) → red (85%). The row above the footer reads like Claude Code's own status line: the
+selected session's context used and left, then your 5-hour and 7-day usage limits with the local
+time each resets, such as `↻7:20pm` (claude.ai Pro/Max only). The header keeps today's and
+all-time token totals.
 
 Below the list, the left panel shows what the selected session is doing now, its id and model,
 plus any command check finding or waiting message. Press `enter` for its details: the full

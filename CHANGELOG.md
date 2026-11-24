@@ -3,6 +3,10 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- A row above the footer shows the selected session's context and the 5h and 7d limits, like Claude Code's status line
+
 ## 0.14.4 - 2026-11-24
 
 - On macOS, the System panel and `marsad system` show free disk space as Finder does
