@@ -5,6 +5,7 @@ GitHub release. Keep each bullet to one short line.
 
 ## Unreleased
 
+- Hints, units and other secondary text use a lighter gray that is easier to read
 - Memory on macOS is counted the way Activity Monitor does, so the meter and the memory guard no longer read several GiB too free
 
 ## 0.14.0 - 2026-11-24
