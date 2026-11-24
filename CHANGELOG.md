@@ -3,6 +3,10 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- The header shows when the 5h and 7d limits reset again, and no longer repeats context left
+
 ## 0.14.1 - 2026-11-24
 
 - Hints, units and other secondary text use a lighter gray that is easier to read
