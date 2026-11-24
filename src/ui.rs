@@ -414,7 +414,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
 }
 
 /// Disk, memory and CPU meters, one per line, each colored by how close it is to trouble.
-/// Narrow panels get shorter bars and drop swap unless it is heavy.
+/// Swap gets its own line when the machine has any. Narrow panels get shorter bars.
 fn system_lines(s: &crate::system::Snapshot, width: u16) -> Vec<Line<'static>> {
     use crate::disk::Level as Disk;
     let wide = width >= 60;
@@ -446,12 +446,16 @@ fn system_lines(s: &crate::system::Snapshot, width: u16) -> Vec<Line<'static>> {
     let mem = s.mem_used_ratio();
     let mut spans = meter("memory", mem, ratio_color(mem));
     spans.push(Span::raw(format!("{:.1} GiB free", gib(s.mem_available))));
-    if wide || s.swap_used > s.mem_total / 4 {
-        let heavy = s.swap_used as f64 > s.mem_total as f64 * 0.5;
-        let style = if heavy { Style::new().fg(Color::Red) } else { Style::new().fg(MUTED) };
-        spans.push(Span::styled(format!(" · swap {:.1} GiB", gib(s.swap_used)), style));
-    }
     lines.push(Line::from(spans));
+    if s.swap_total > 0 {
+        // macOS grows swap on demand, so a full bar alone means little: the color comes from
+        // swap in use against RAM, the same measure as the swap concern.
+        let vs_ram = if s.mem_total > 0 { s.swap_used as f64 / s.mem_total as f64 } else { 0.0 };
+        let color = if vs_ram > 0.5 { Color::Red } else if vs_ram > 0.25 { Color::Yellow } else { Color::Green };
+        let mut spans = meter("swap", s.swap_used as f64 / s.swap_total as f64, color);
+        spans.push(Span::raw(format!("{:.1} of {:.1} GiB used", gib(s.swap_used), gib(s.swap_total))));
+        lines.push(Line::from(spans));
+    }
     let mut spans = match s.cpu_pct {
         Some(cpu) => {
             let r = cpu as f64 / 100.0;
@@ -590,7 +594,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let selected = app.selected_session();
     // Session info on the left, the machine on the right; the taller side sets the height.
     let session_rows = selected.map_or(0, |s| 3 + u16::from(s.flag.is_some()) + u16::from(s.said.is_some() || s.waiting > 0 || s.stop_requested));
-    let system_rows = app.system.as_ref().map_or(1, |s| 3 + u16::from(s.disk.is_some()));
+    let system_rows = app.system.as_ref().map_or(1, |s| 3 + u16::from(s.disk.is_some()) + u16::from(s.swap_total > 0));
     let [table, bottom] =
         Layout::vertical([Constraint::Min(4), Constraint::Length(2 + session_rows.max(system_rows))]).areas(area);
     if visible.is_empty() {
