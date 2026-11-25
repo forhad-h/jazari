@@ -54,6 +54,7 @@ marsad actions     # what marsad did, refused or held, and who asked
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
 Keys: `↑↓`/`jk` select · `enter` session details · `tab` subagents · `y` copy the session id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+The mouse wheel works like `↑↓` in every list and pane; to select text with the mouse, hold `Shift` (`Option` in macOS Terminal and iTerm2) while you drag.
 In session details and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session details also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 History lists the newest events first. By default sessions that are working or waiting on you sit on top and the rest keep their place, so rows don't jump around as sessions run.
