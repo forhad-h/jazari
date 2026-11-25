@@ -283,15 +283,14 @@ pub fn draw(f: &mut Frame, app: &App) {
                     ("↑↓", "move".into()),
                     (picker_digits.as_str(), "tick".into()),
                     ("enter", "next".into()),
-                    ("n", "new prompt".into()),
-                    ("s", "new skill".into()),
+                    ("n", if picker.library.get(picker.cursor).is_some_and(|r| r.kind == crate::rules::Kind::Skill) { "new skill" } else { "new prompt" }.into()),
                     ("e", "edit".into()),
                     ("d", "delete".into()),
                     ("v", "versions".into()),
                     ("esc", "cancel".into()),
                 ];
                 if picker.restorable.is_some() {
-                    keys.insert(8, ("u", "undo delete".into()));
+                    keys.insert(7, ("u", "undo delete".into()));
                 }
                 keys
             }
@@ -751,20 +750,42 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
             (lines, footer, if noun == "skill" { " Skill versions " } else { " Prompt versions " }, 2 + v.cursor * 2)
         }
         (None, None) => {
-            let mut lines = vec![Line::from(dim("Copy the command that starts Claude Code with:")), Line::from("")];
+            let mut lines = vec![
+                Line::from(dim("Copy the command that starts Claude Code with:")),
+                Line::from(""),
+                Line::from(vec![Span::styled("Prompts", Style::new().bold()), dim(" · rules added to the session's system prompt")]),
+            ];
             // The skills follow the prompts under a heading of their own.
             let first_skill = picker.library.iter().position(|r| r.kind == crate::rules::Kind::Skill);
+            // Summaries wrap instead of being cut, so each one can be read in full.
+            let text_width = (area.width as usize).saturating_sub(16).clamp(30, 100);
+            let mut cursor_line = 0;
             for (i, rule) in picker.library.iter().enumerate() {
                 if Some(i) == first_skill {
                     lines.push(Line::from(""));
-                    lines.push(Line::from(vec![Span::styled("Skills", Style::new().bold()), dim(" · the session must load and follow each ticked one")]));
+                    lines.push(Line::from(vec![Span::styled("Skills", Style::new().bold()), dim(" · step-by-step guides the session must load and follow")]));
                 }
                 let tick = if picker.ticked[i] { "[x]" } else { "[ ]" };
                 let digit = if i < 9 { format!("{}", i + 1) } else { " ".into() };
                 // Every prompt says whose it is: built into marsad, or the user's own file.
                 let tag = if rule.own { Span::styled("  [yours]", Style::new().fg(Color::Green)) } else { Span::styled("  [built-in]", Style::new().fg(MUTED)) };
                 lines.push(row(i == picker.cursor, format!("{digit} {tick} "), rule.title.clone(), Some(tag)));
-                lines.push(Line::from(dim(format!("        {}", rule.summary))));
+                // The highlighted skill shows its whole description: when Claude loads it, and when not.
+                let (_, description) = crate::skills::front(rule.body());
+                let summary = if i == picker.cursor && rule.kind == crate::rules::Kind::Skill && !description.trim().is_empty() {
+                    description.split_whitespace().collect::<Vec<_>>().join(" ")
+                } else {
+                    rule.summary.clone()
+                };
+                for l in wrap_line(Line::from(dim(summary)), text_width) {
+                    let mut spans = vec![Span::raw("        ")];
+                    spans.extend(l.spans);
+                    lines.push(Line::from(spans));
+                }
+                if i == picker.cursor {
+                    // The scroll keeps two lines from here in view: so here is the entry's end less one.
+                    cursor_line = lines.len().saturating_sub(2);
+                }
             }
             let footer = match picker.deleting.and_then(|i| picker.library.get(i)) {
                 Some(rule) => vec![
@@ -780,18 +801,15 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
                 ],
                 None => vec![
                     Line::from(""),
-                    hint(&[("n", " writes a new prompt with Claude · "), ("s", " a new skill · "), ("e", " edits yours or copies a built-in · "), ("d", " deletes yours")]),
-                    hint(&[("v", " lists earlier versions to restore · "), ("u", " brings back the one just deleted")]),
-                    Line::from(dim(format!(
-                        "Your prompts are .md files in {}; your skills are folders in {}",
-                        home_relative(&crate::rules::prompts_dir()),
-                        home_relative(&crate::skills::skills_dir())
-                    ))),
-                    Line::from(dim(format!("A ticked skill is installed to {} unless a copy is there already", home_relative(&crate::skills::claude_skills_dir())))),
+                    hint(&[("n", " writes a new one with Claude, in the highlighted group · "), ("e", " edits yours or copies a built-in")]),
+                    hint(&[("d", " deletes yours · "), ("v", " lists earlier versions to restore · "), ("u", " brings back the one just deleted")]),
+                    Line::from(""),
+                    Line::from(dim(format!("Your prompts: {} (one .md file each)", home_relative(&crate::rules::prompts_dir())))),
+                    Line::from(dim(format!("Your skills: {} (one folder each)", home_relative(&crate::skills::skills_dir())))),
+                    Line::from(dim(format!("A ticked skill is installed to {} when it is missing there", home_relative(&crate::skills::claude_skills_dir())))),
                 ],
             };
-            let heading = if first_skill.is_some_and(|f| picker.cursor >= f) { 2 } else { 0 };
-            (lines, footer, " Launch command ", 2 + picker.cursor * 2 + heading)
+            (lines, footer, " Launch command ", cursor_line)
         }
         (Some(mode), _) => {
             let mut lines = vec![Line::from(dim(format!("Start {} as:", crate::rules::titles(&picker.chosen())))), Line::from("")];
@@ -804,7 +822,9 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
         }
     };
     let body_len = lines.len();
-    lines.extend(footer);
+    // Footer lines wrap to the window, so a narrow terminal or a long path cuts nothing off.
+    let room = area.width.saturating_sub(4) as usize;
+    lines.extend(footer.into_iter().flat_map(|l| wrap_line(l, room)));
     let w = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 4;
     let (w, h) = (w.min(area.width), (lines.len() as u16 + 2).min(area.height));
     let [_, rect, _] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(w), Constraint::Fill(1)]).areas(area);
@@ -2422,7 +2442,3 @@ mod tests {
         assert_eq!(line.spans, vec![dim("Edit the line · "), "enter".bold(), dim(" keeps it")]);
     }
 }
-
-
-
-

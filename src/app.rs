@@ -740,8 +740,11 @@ impl App {
         let highlighted = picker.library.get(picker.cursor);
         match code {
             KeyCode::Esc | KeyCode::Char('q' | 'c') => self.rules_picker = None,
-            KeyCode::Char('n') => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real(crate::rules::Kind::Prompt))),
-            KeyCode::Char('s') => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real(crate::rules::Kind::Skill))),
+            // A new entry of the highlighted group: a prompt among the prompts, a skill among the skills.
+            KeyCode::Char('n') => {
+                let kind = highlighted.map(|r| r.kind).unwrap_or_default();
+                self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real(kind)));
+            }
             KeyCode::Char('e') => {
                 match highlighted.map(|rule| (rule, crate::rules::copy_problem(rule))) {
                     Some((_, Some(why))) => self.error = Some(format!("{why} ")),

@@ -230,9 +230,17 @@ pub fn rules(skills: &[Skill]) -> Vec<Rule> {
         .iter()
         .map(|s| {
             let title = if s.name.trim().is_empty() { s.key.clone() } else { s.name.trim().to_string() };
-            Rule::new(s.key.clone(), title, crate::rules::shorten(s.description.trim(), 80), s.skill_md().to_string(), s.own, Kind::Skill)
+            Rule::new(s.key.clone(), title, first_sentence(&s.description), s.skill_md().to_string(), s.own, Kind::Skill)
         })
         .collect()
+}
+
+/// The first sentence of a description: what the skill does, in full, for a list. The rest says
+/// when Claude loads it.
+pub fn first_sentence(description: &str) -> String {
+    let text = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let end = text.char_indices().find(|&(i, c)| matches!(c, '.' | '!' | '?') && text[i + 1..].starts_with(' ')).map(|(i, _)| i + 1);
+    end.map_or(text.clone(), |i| text[..i].to_string())
 }
 
 /// The section of a launch file that makes a session use `chosen` skills.
@@ -708,6 +716,15 @@ mod tests {
         assert!(!ee.skill_md().contains("Bengali"), "written for every reader");
         let section = launch_section(&rules(&lib).iter().collect::<Vec<_>>());
         assert!(section.contains("must use these skills") && section.contains("- **easy-english**: Write technical English"));
+    }
+
+    #[test]
+    fn a_list_shows_the_first_sentence_in_full() {
+        assert_eq!(first_sentence("Does one thing. Load it  before you commit."), "Does one thing.");
+        assert_eq!(first_sentence("No full stop here"), "No full stop here");
+        assert_eq!(first_sentence("Uses v1.2 files. Then more."), "Uses v1.2 files.");
+        let lib = rules(&library_in(Path::new("/nonexistent")));
+        assert!(lib[0].summary.ends_with("whatever their first language."), "{}", lib[0].summary);
     }
 
     #[test]
