@@ -6,7 +6,7 @@ function run(argv) {
   const app = $.NSApplication.sharedApplication;
   app.setActivationPolicy(1);
   app.finishLaunching;
-  const W = 380, H = 120;
+  const W = 420, H = 120;
   const vis = $.NSScreen.mainScreen.visibleFrame;
   const rect = $.NSMakeRect(vis.origin.x + vis.size.width - W - 16, vis.origin.y + vis.size.height - H - 16, W, H);
   // Titled, closable, resizable, utility and non-activating, so clicking it leaves focus where it was.
@@ -19,7 +19,36 @@ function run(argv) {
   win.releasedWhenClosed = false;
   const label = $.NSTextField.alloc.initWithFrame($.NSMakeRect(10, 6, W - 20, H - 12));
   label.editable = false; label.selectable = false; label.bordered = false; label.drawsBackground = false;
-  label.font = $.NSFont.monospacedSystemFontOfSizeWeight(11, 0);
+  const font = $.NSFont.monospacedSystemFontOfSizeWeight(11, 0);
+  const bold = $.NSFont.monospacedSystemFontOfSizeWeight(11, 0.4);
+  label.font = font;
+  // Each session row ends with its status, colored as on the dashboard.
+  const colors = {
+    APPROVE: [$.NSColor.systemYellowColor, bold],
+    QUESTION: [$.NSColor.systemPurpleColor, bold],
+    ERROR: [$.NSColor.systemRedColor, bold],
+    ACTIVE: [$.NSColor.systemGreenColor, font],
+    IDLE: [$.NSColor.systemBlueColor, font],
+  };
+  const styled = (body) => {
+    const out = $.NSMutableAttributedString.new;
+    out.mutableString.setString(body);
+    const all = $.NSMakeRange(0, body.length);
+    out.addAttributeValueRange($.NSFontAttributeName, font, all);
+    out.addAttributeValueRange($.NSForegroundColorAttributeName, $.NSColor.labelColor, all);
+    let at = 0;
+    for (const line of body.split('\n')) {
+      const m = line.match(/([A-Z]+) \S+$/);
+      const c = m && colors[m[1]];
+      if (c) {
+        const range = $.NSMakeRange(at + m.index, line.length - m.index);
+        out.addAttributeValueRange($.NSForegroundColorAttributeName, c[0], range);
+        out.addAttributeValueRange($.NSFontAttributeName, c[1], range);
+      }
+      at += line.length + 1;
+    }
+    return out;
+  };
   label.autoresizingMask = 2 | 16;
   label.lineBreakMode = 4;
   win.contentView.addSubview(label);
@@ -36,7 +65,7 @@ function run(argv) {
       last = text;
       const lines = text.replace(/\n+$/, '').split('\n');
       win.title = lines[0] || 'marsad';
-      label.stringValue = lines.slice(1).join('\n');
+      label.attributedStringValue = styled(lines.slice(1).join('\n'));
       const f = win.frame;
       const h = Math.max(60, (lines.length - 1) * 15 + 40);
       win.setFrameDisplay($.NSMakeRect(f.origin.x, f.origin.y + f.size.height - h, f.size.width, h), true);
