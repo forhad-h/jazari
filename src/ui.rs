@@ -1028,19 +1028,49 @@ fn draw_prompt_review(
     if !draft.questions.is_empty() && line.is_none() {
         side.push(Line::from(dim("Press a question's number to answer it; the answer revises the draft.")));
     }
-    if let Some((purpose, text)) = line {
-        let prompt = match purpose {
-            LineFor::Feedback => "What should change?".to_string(),
-            LineFor::Answer(i) => format!("Your answer to question {}:", i + 1),
-            LineFor::Key => "New name (lowercase letters, digits, hyphens):".to_string(),
-        };
+    if line.is_none() {
         side.push(Line::from(""));
-        side.push(Line::from(Span::styled(prompt, Style::new().bold())));
+        side.push(Line::from(dim("Press r to ask Claude for a change in your own words.")));
+    }
+    let key_line = line.filter(|(purpose, _)| !purpose.multiline());
+    if let Some((_, text)) = key_line {
+        side.push(Line::from(""));
+        side.push(Line::from(Span::styled("New name (lowercase letters, digits, hyphens):", Style::new().bold())));
         let mut input = vec![Span::styled("› ", Style::new().fg(ACCENT).bold())];
         input.extend(cursor_lines(text, true).into_iter().flat_map(|l| l.spans));
         side.push(Line::from(input));
     }
     side.extend(status.into_iter().flat_map(|l| [Line::from(""), l]));
+    // Feedback and answers get a box of their own across the bottom, like a chat input.
+    let area = match line.filter(|(purpose, _)| purpose.multiline()) {
+        Some((purpose, text)) => {
+            let label = match purpose {
+                LineFor::Answer(i) => {
+                    let question = draft.questions.get(i).map(|q| q.trim().to_string()).unwrap_or_default();
+                    Line::from(vec![Span::styled(format!("Your answer to question {}: ", i + 1), Style::new().fg(ACCENT).bold()), Span::raw(question)])
+                }
+                _ => Line::from(vec![
+                    Span::styled("Ask Claude to change this prompt", Style::new().fg(ACCENT).bold()),
+                    dim(format!("  {} rewrites the draft from what you write here; you review it before it is saved.", view.model())),
+                ]),
+            };
+            let label = wrap_line(label, area.width as usize);
+            let box_width = area.width.saturating_sub(2) as usize;
+            let rows: Vec<Line> = cursor_lines(text, true).into_iter().flat_map(|l| wrap_line(l, box_width)).collect();
+            let height = (rows.len() as u16).clamp(2, 6) + 2;
+            let [rest, _, label_area, box_area] =
+                Layout::vertical([Constraint::Fill(1), Constraint::Length(1), Constraint::Length(label.len() as u16), Constraint::Length(height)]).areas(area);
+            f.render_widget(Paragraph::new(label), label_area);
+            let block = Block::bordered().border_type(BorderType::Rounded).border_style(Style::new().fg(ACCENT));
+            let inner = block.inner(box_area);
+            f.render_widget(block, box_area);
+            // Typing happens at the end, so a long request shows its last rows.
+            let scroll = (rows.len() as u16).saturating_sub(inner.height);
+            f.render_widget(Paragraph::new(rows).scroll((scroll, 0)), inner);
+            rest
+        }
+        None => area,
+    };
     let side: Vec<Line> = side.into_iter().flat_map(|l| wrap_line(l, w)).collect();
     let [draft_area, side_area] = if wide {
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(side_width)]).spacing(2).areas(area)
@@ -1054,9 +1084,9 @@ fn draw_prompt_review(
     let rows: Vec<Line> = markdown_lines(&draft.body).into_iter().flat_map(|l| wrap_line(l, inner.width as usize)).collect();
     view.max_scroll.set((rows.len() as u16).saturating_sub(inner.height));
     f.render_widget(Paragraph::new(rows).scroll((view.scroll.min(view.max_scroll.get()), 0)), inner);
-    // The input line is last, so a long side panel keeps it in view.
+    // The name input is last, so a long side panel keeps it in view.
     let scroll = (side.len() as u16).saturating_sub(side_area.height);
-    f.render_widget(Paragraph::new(side).scroll((if line.is_some() { scroll } else { 0 }, 0)), side_area);
+    f.render_widget(Paragraph::new(side).scroll((if key_line.is_some() { scroll } else { 0 }, 0)), side_area);
 }
 
 fn rgb(c: crate::badge_art::Rgb) -> Color {
