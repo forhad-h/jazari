@@ -3,6 +3,10 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.20.1 - 2026-11-25
+
+- `marsad scrollback` is removed: terminals keep showing their scrollbar even after the scrollback is erased
+
 ## 0.20.0 - 2026-11-25
 
 - `marsad scrollback on` erases the terminal's earlier output when the dashboard opens, so its scrollbar has nothing to show
