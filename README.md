@@ -47,7 +47,6 @@ marsad install --no-statusline   # hooks only; context size is then estimated fr
 marsad             # open the dashboard
 marsad uninstall   # removes only marsad's hooks, skill and generated prompt files (your own prompts stay)
 marsad update      # install the latest version (shows current → latest and what's new)
-marsad scrollback on   # erase the terminal's scrollback each time the dashboard opens (off by default)
 marsad pause --for 2h   # hold what marsad does on its own; `marsad resume` turns it back on
 marsad actions     # what marsad did, refused or held, and who asked
 ```
@@ -55,7 +54,7 @@ marsad actions     # what marsad did, refused or held, and who asked
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
 Keys: `↑↓`/`jk` select · `enter` session details · `tab` subagents · `y` copy the session id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts and skills, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new prompt or skill, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
-The mouse wheel works like `↑↓` in every list and pane; to select text with the mouse, hold `Shift` (`Option` in macOS Terminal and iTerm2) while you drag. The terminal's own scrollbar still measures the output from before marsad opened; `marsad scrollback on` erases that output when the dashboard opens, so the bar has nothing left to show. The erased output can't be brought back, and `marsad scrollback off` turns this off.
+The mouse wheel works like `↑↓` in every list and pane; to select text with the mouse, hold `Shift` (`Option` in macOS Terminal and iTerm2) while you drag.
 In session details and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session details also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
 History lists the newest events first. By default sessions that are working or waiting on you sit on top and the rest keep their place, so rows don't jump around as sessions run.

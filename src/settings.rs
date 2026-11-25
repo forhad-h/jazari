@@ -62,19 +62,6 @@ pub fn set_alerts(on: bool) -> anyhow::Result<()> {
     save("alerts", json!(on))
 }
 
-fn clear_scrollback_at(path: &Path) -> bool {
-    load_at(path).get("clear_scrollback").and_then(Value::as_bool).unwrap_or(false)
-}
-
-/// Whether the dashboard erases the terminal's scrollback when it opens (off unless turned on).
-pub fn clear_scrollback() -> bool {
-    clear_scrollback_at(&path())
-}
-
-pub fn set_clear_scrollback(on: bool) -> anyhow::Result<()> {
-    save("clear_scrollback", json!(on))
-}
-
 fn rules_at(path: &Path) -> Vec<String> {
     let keys: Vec<String> = load_at(path)
         .get("rules")
@@ -216,19 +203,6 @@ pub fn merge_missing(incoming: &Map<String, Value>) -> anyhow::Result<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn clear_scrollback_defaults_off_and_round_trips() {
-        let dir = std::env::temp_dir().join(format!("marsad-settings-scrollback-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let file = dir.join("settings.json");
-        assert!(!clear_scrollback_at(&file), "missing file means off");
-        set_at(&file, "clear_scrollback", json!(true)).unwrap();
-        assert!(clear_scrollback_at(&file));
-        set_at(&file, "clear_scrollback", json!(false)).unwrap();
-        assert!(!clear_scrollback_at(&file));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn alerts_default_on_round_trip_and_keep_other_keys() {
