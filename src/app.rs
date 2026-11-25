@@ -72,6 +72,8 @@ pub enum View {
     Usage,
     /// The shared AGENT-BOARD.md of the selected session's repo.
     Board,
+    /// Caches, build output and Docker data that can be removed (`D`).
+    Clean,
 }
 
 /// Which events the history shows; `f` cycles through them.
@@ -161,11 +163,39 @@ pub struct App {
     pub announcement: Option<Announcement>,
     alerts: crate::alerts::Detector,
     update_rx: std::sync::mpsc::Receiver<crate::update::Notice>,
+    /// Bytes the daily cleanup scan found removable, reported once by its thread.
+    clean_hint_rx: Option<std::sync::mpsc::Receiver<u64>>,
     log: JsonlTail,
     readers: HashMap<PathBuf, TranscriptReader>,
     sys: System,
     last_slow_refresh: Instant,
     pub counter: Counter,
+    /// Disk, memory and CPU for the header meters, sampled once a second.
+    pub system: Option<crate::system::Snapshot>,
+    /// A message being typed to a session (`t`), drawn over the list while open.
+    pub compose: Option<Compose>,
+    /// A stop (`x`) or interrupt (`X`) of a session waiting for `y`.
+    pub control: Option<Control>,
+    /// The cleanup view's state while it is open.
+    pub clean: Option<crate::clean_view::CleanView>,
+    sampler: crate::system::Sampler,
+    /// The always-on-top window while it is open (`P`).
+    pub pin: Option<crate::pin::Pin>,
+}
+
+/// A message being typed to one session.
+pub struct Compose {
+    pub session: String,
+    pub name: String,
+    pub text: String,
+}
+
+/// Stopping or interrupting one session, once confirmed.
+pub struct Control {
+    pub session: String,
+    pub name: String,
+    /// SIGINT now, rather than a stop before the next tool call.
+    pub interrupt: bool,
 }
 
 /// Shown above the footer when `c` couldn't put the launch command on a clipboard it can confirm.
@@ -184,10 +214,22 @@ pub struct RulesPicker {
     pub ticked: Vec<bool>,
     /// The highlighted prompt.
     pub cursor: usize,
-    /// The highlighted mode once the prompts are chosen; None while ticking them.
-    pub mode: Option<crate::rules::Mode>,
+    /// The highlighted choice once the prompts are chosen; None while ticking them.
+    pub mode: Option<crate::rules::Choice>,
     /// The prompt waiting for `y` to be deleted.
     pub deleting: Option<usize>,
+    /// The earlier versions of a prompt being browsed, opened with `v`.
+    pub versions: Option<VersionList>,
+    /// The prompt deleted last, which `u` brings back.
+    pub restorable: Option<String>,
+}
+
+/// The earlier versions of one of the user's prompts, newest first.
+pub struct VersionList {
+    pub key: String,
+    pub title: String,
+    pub list: Vec<crate::rules::Version>,
+    pub cursor: usize,
 }
 
 impl RulesPicker {
@@ -471,15 +513,22 @@ impl App {
             announcement: None,
             alerts: crate::alerts::Detector::default(),
             update_rx: crate::update::background(),
+            clean_hint_rx: crate::clean::daily_scan(),
             log: JsonlTail::new(dir.join("events.jsonl")),
             readers: HashMap::new(),
             sys: System::new(),
             last_slow_refresh: Instant::now() - Duration::from_secs(60),
             counter: Counter::default(),
+            system: None,
+            clean: None,
+            compose: None,
+            control: None,
+            sampler: crate::system::Sampler::default(),
+            pin: None,
         }
     }
 
-    /// Sessions to show, in the chosen sort order (most urgent first by default).
+    /// Sessions to show, in the chosen sort order (working sessions on top by default).
     pub fn visible(&self) -> Vec<&Session> {
         let now = crate::now();
         let mut list: Vec<&Session> = self
@@ -555,7 +604,7 @@ impl App {
         let library = crate::rules::library();
         let saved = crate::settings::rules();
         let ticked = library.iter().map(|r| saved.contains(&r.key)).collect();
-        self.rules_picker = Some(RulesPicker { library, ticked, cursor: 0, mode: None, deleting: None });
+        self.rules_picker = Some(RulesPicker { library, ticked, cursor: 0, mode: None, deleting: None, versions: None, restorable: None });
     }
 
     /// Routes a key to the prompt writer; a saved prompt joins the picker's library, ticked.
@@ -594,23 +643,56 @@ impl App {
         match crate::rules::remove_own(&key) {
             Ok(_) => {
                 picker.reload(crate::rules::library(), None, false);
-                self.info = Some(format!("deleted {key} "));
+                picker.restorable = Some(key.clone());
+                self.info = Some(format!("deleted {key} · u brings it back "));
             }
             Err(e) => self.error = Some(format!("{e:#} ")),
         }
     }
 
+    /// Makes version `number` of `key` (the newest when None) the prompt again and highlights it.
+    fn restore_prompt(&mut self, key: &str, number: Option<u32>) {
+        let Some(picker) = self.rules_picker.as_mut() else { return };
+        match crate::rules::restore_own(key, number) {
+            Ok(v) => {
+                picker.reload(crate::rules::library(), Some(key), false);
+                (picker.versions, picker.restorable) = (None, None);
+                self.info = Some(format!("restored {key} to v{} from {} · the text it replaced is kept as a version ", v.number, v.when()));
+            }
+            Err(e) => self.error = Some(format!("{e:#} ")),
+        }
+    }
+
+    /// Keys while browsing a prompt's earlier versions: `enter` restores the highlighted one.
+    fn on_versions_key(&mut self, code: KeyCode) {
+        let Some(list) = self.rules_picker.as_mut().and_then(|p| p.versions.as_mut()) else { return };
+        let last = list.list.len().saturating_sub(1);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q' | 'v') => {
+                if let Some(p) = self.rules_picker.as_mut() {
+                    p.versions = None;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => list.cursor = (list.cursor + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => list.cursor = list.cursor.saturating_sub(1),
+            KeyCode::Enter => {
+                let (key, number) = (list.key.clone(), list.list.get(list.cursor).map(|v| v.number));
+                self.restore_prompt(&key, number);
+            }
+            _ => {}
+        }
+    }
+
     fn on_picker_key(&mut self, code: KeyCode) {
-        use crate::rules::Mode;
+        use crate::rules::Choice;
         let Some(picker) = self.rules_picker.as_mut() else { return };
         if let Some(mode) = picker.mode {
-            let other = if mode == Mode::Session { Mode::Team } else { Mode::Session };
             match code {
                 KeyCode::Esc => picker.mode = None,
                 KeyCode::Char('q' | 'c') => self.rules_picker = None,
-                KeyCode::Down | KeyCode::Up | KeyCode::Char('j' | 'k') | KeyCode::Tab => picker.mode = Some(other),
-                KeyCode::Char('1') => picker.mode = Some(Mode::Session),
-                KeyCode::Char('2') => picker.mode = Some(Mode::Team),
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => picker.mode = Some(mode.step(1)),
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => picker.mode = Some(mode.step(-1)),
+                KeyCode::Char(d) if Choice::numbered(d).is_some() => picker.mode = Choice::numbered(d),
                 KeyCode::Enter => {
                     let keys: Vec<String> = picker.chosen().iter().map(|r| r.key.clone()).collect();
                     let library = std::mem::take(&mut picker.library);
@@ -631,6 +713,10 @@ impl App {
             self.on_delete_key(code);
             return;
         }
+        if picker.versions.is_some() {
+            self.on_versions_key(code);
+            return;
+        }
         let last = picker.library.len().saturating_sub(1);
         let highlighted = picker.library.get(picker.cursor);
         match code {
@@ -648,6 +734,22 @@ impl App {
                 Some(rule) => self.error = Some(format!("{} is built in and can't be deleted; e saves a copy you can change ", rule.title)),
                 None => {}
             },
+            KeyCode::Char('v') => match highlighted {
+                Some(rule) if rule.own => {
+                    let list = crate::rules::versions(&rule.key);
+                    if list.is_empty() {
+                        self.info = Some(format!("{} has no earlier versions yet; one is kept each time it changes ", rule.title));
+                    } else {
+                        picker.versions = Some(VersionList { key: rule.key.clone(), title: rule.title.clone(), list, cursor: 0 });
+                    }
+                }
+                Some(rule) => self.error = Some(format!("{} is built in, so it has no versions ", rule.title)),
+                None => {}
+            },
+            KeyCode::Char('u') => match picker.restorable.clone() {
+                Some(key) => self.restore_prompt(&key, None),
+                None => self.error = Some("nothing deleted to bring back ".into()),
+            },
             KeyCode::Down | KeyCode::Char('j') => picker.cursor = (picker.cursor + 1).min(last),
             KeyCode::Up | KeyCode::Char('k') => picker.cursor = picker.cursor.saturating_sub(1),
             KeyCode::Char(' ' | 'x') => picker.toggle(picker.cursor),
@@ -658,9 +760,10 @@ impl App {
         }
     }
 
-    /// Copies the command that starts `mode` with the prompts in `chosen`, writing their files first.
-    /// False when a file couldn't be written, so nothing was copied.
-    fn copy_launch_command(&mut self, chosen: &[&crate::rules::Rule], mode: crate::rules::Mode) -> bool {
+    /// Copies the command that starts `choice` with the prompts in `chosen`, or only their file's
+    /// path, writing the files first. False when a file couldn't be written, so nothing was copied.
+    fn copy_launch_command(&mut self, chosen: &[&crate::rules::Rule], choice: crate::rules::Choice) -> bool {
+        let mode = choice.mode();
         let path = match crate::rules::ensure(chosen, mode) {
             Ok(path) => path,
             Err(e) => {
@@ -668,8 +771,13 @@ impl App {
                 return false;
             }
         };
-        let command = crate::rules::launch_command(&path);
+        let path_only = choice == crate::rules::Choice::Path;
+        let command = if path_only { path.to_string_lossy().into_owned() } else { crate::rules::launch_command(&path) };
         let headline = match crate::clipboard::copy(&command) {
+            crate::clipboard::Copied::Native(_) if path_only => {
+                self.info = Some(format!("copied: the path of {} · paste it into a running session ", crate::rules::titles(chosen)));
+                return true;
+            }
             crate::clipboard::Copied::Native(_) => {
                 let lead = if mode == crate::rules::Mode::Team { " as a team lead" } else { "" };
                 self.info = Some(format!("copied: claude{lead} with {} · it applies to new conversations ", crate::rules::titles(chosen)));
@@ -679,9 +787,52 @@ impl App {
             crate::clipboard::Copied::Failed => "Couldn't reach a clipboard. Copy this command by hand:",
         };
         let path = crate::rules::quote_arg(&path.to_string_lossy());
-        let cli = crate::rules::cli_command(chosen, mode);
+        let cli = crate::rules::cli_command(chosen, mode) + if path_only { " --path" } else { "" };
         self.copy_note = Some(CopyNote { headline, command, path, cli });
         true
+    }
+
+    /// Opens or closes the always-on-top window with the sessions' statuses.
+    fn toggle_pin(&mut self) {
+        if self.pin.take().is_some() {
+            self.info = Some("closed the window on top ".into());
+            return;
+        }
+        match crate::pin::Pin::open(&self.pin_text()) {
+            Ok(pin) => {
+                self.pin = Some(pin);
+                self.info = Some("opened a window that stays on top of other apps · P closes it ".into());
+            }
+            Err(e) => self.error = Some(format!("{e:#} ")),
+        }
+    }
+
+    fn pin_text(&self) -> String {
+        crate::pin::text(&self.visible(), self.rate_limits())
+    }
+
+    /// Keeps the window on top current, and notices when the user closed it.
+    fn refresh_pin(&mut self) {
+        if self.pin.is_none() {
+            return;
+        }
+        let text = self.pin_text();
+        let Some(pin) = self.pin.as_mut() else { return };
+        if pin.is_open() {
+            pin.show(&text);
+        } else {
+            self.pin = None;
+        }
+    }
+
+    /// Copies the selected session's full id, for `claude --resume` or a bug report.
+    fn copy_session_id(&mut self) {
+        let Some(id) = self.selected_session().map(|s| s.id.clone()) else { return };
+        match crate::clipboard::copy(&id) {
+            crate::clipboard::Copied::Native(_) => self.info = Some(format!("copied session id {id} ")),
+            crate::clipboard::Copied::Terminal => self.info = Some(format!("sent session id {id} to your terminal's clipboard ")),
+            crate::clipboard::Copied::Failed => self.error = Some(format!("couldn't reach a clipboard; the id is {id} ")),
+        }
     }
 
     /// The rank and achievements now, with the header's all-time figure as the rank total.
@@ -759,10 +910,11 @@ impl App {
         self.sort_reversed = reversed;
     }
 
-    /// The selected session's history events that pass the filter.
+    /// The selected session's history events that pass the filter, newest first.
     pub fn history<'a>(&self, s: &'a Session) -> Vec<TimelineEntry<'a>> {
         let mut list = s.timeline();
         list.retain(|e| self.history_filter.matches(&e.event.kind));
+        list.reverse();
         list
     }
 
@@ -808,6 +960,15 @@ impl App {
             self.usage.reload();
             self.announce(b);
         }
+        if let Some(clean) = self.clean.as_mut() {
+            clean.tick();
+        }
+        if let Some(Ok(bytes)) = self.clean_hint_rx.as_ref().map(|rx| rx.try_recv()) {
+            self.clean_hint_rx = None;
+            if self.info.is_none() && self.error.is_none() {
+                self.info = Some(format!("{} can be freed · press D ", crate::clean::fmt_bytes(bytes)));
+            }
+        }
         if let Ok(notice) = self.update_rx.try_recv() {
             self.update = Some(notice);
         }
@@ -820,6 +981,8 @@ impl App {
             self.refresh_transcripts();
             self.refresh_snapshots();
             self.counter.reload_if_due();
+            self.sample_system();
+            self.refresh_pin();
             if self.view == View::Board {
                 self.refresh_board();
             }
@@ -833,6 +996,58 @@ impl App {
         if self.alerts_on {
             alerts.fire();
         }
+    }
+
+    fn on_compose_key(&mut self, code: KeyCode) {
+        let Some(c) = self.compose.as_mut() else { return };
+        match code {
+            KeyCode::Esc => self.compose = None,
+            KeyCode::Backspace => {
+                c.text.pop();
+            }
+            KeyCode::Char(ch) => c.text.push(ch),
+            KeyCode::Enter if c.text.trim().is_empty() => {}
+            KeyCode::Enter => {
+                let c = self.compose.take().unwrap();
+                match crate::channel::tell(&c.session, &c.text) {
+                    Ok(()) => self.info = Some(format!("queued for {}: Claude reads it at the next tool call or prompt ", c.name)),
+                    Err(e) => self.error = Some(format!("couldn't queue the message: {e:#} ")),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Text pasted while composing goes into the message, on one line.
+    pub fn on_compose_paste(&mut self, text: &str) -> bool {
+        let Some(c) = self.compose.as_mut() else { return false };
+        c.text.push_str(&text.replace(['\r', '\n'], " "));
+        true
+    }
+
+    fn apply_control(&mut self, c: &Control) {
+        if c.interrupt {
+            let sent = self.sessions.get(&c.session).map(crate::channel::interrupt);
+            match sent {
+                Some(Ok(())) => self.info = Some(format!("interrupted {} ", c.name)),
+                Some(Err(e)) => self.error = Some(format!("couldn't interrupt {}: {e:#} ", c.name)),
+                None => self.error = Some(format!("couldn't interrupt {}: the session is gone ", c.name)),
+            }
+        } else {
+            match crate::channel::request_stop(&c.session) {
+                Ok(()) => self.info = Some(format!("{} stops before its next tool call ", c.name)),
+                Err(e) => self.error = Some(format!("couldn't request the stop: {e:#} ")),
+            }
+        }
+    }
+
+    /// Statfs, memory counters, CPU ticks and one Finder free-space call (about 5 ms): cheap enough
+    /// to stay on this thread.
+    fn sample_system(&mut self) {
+        let cwds = self.sessions.values().filter(|s| s.status != Status::Ended).map(|s| s.cwd.clone());
+        let paths = crate::system::watched_paths(cwds);
+        let t = crate::disk::Config::load().thresholds;
+        self.system = Some(self.sampler.sample(paths.iter().map(PathBuf::as_path), &t));
     }
 
     /// Marks sessions whose Claude Code process is gone (crash, closed terminal) as ended.
@@ -906,6 +1121,16 @@ impl App {
             self.on_picker_key(key.code);
             return Action::None;
         }
+        if self.compose.is_some() {
+            self.on_compose_key(key.code);
+            return Action::None;
+        }
+        if let Some(c) = self.control.take() {
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                self.apply_control(&c);
+            }
+            return Action::None;
+        }
         // Esc dismisses a badge note before it does anything else.
         if key.code == KeyCode::Esc && self.announcing() {
             self.announcement = None;
@@ -923,6 +1148,25 @@ impl App {
                 self.view = View::Usage;
                 self.usage.reload();
             }
+            (View::List, KeyCode::Char('t')) => {
+                if let Some(s) = self.selected_session().filter(|s| s.status != Status::Ended) {
+                    self.compose = Some(Compose { session: s.id.clone(), name: s.project(), text: String::new() });
+                }
+            }
+            (View::List, KeyCode::Char(k @ ('x' | 'X'))) => {
+                if let Some(s) = self.selected_session().filter(|s| s.status != Status::Ended) {
+                    self.control = Some(Control { session: s.id.clone(), name: s.project(), interrupt: k == 'X' });
+                }
+            }
+            (View::List, KeyCode::Char('D')) => {
+                self.clean = Some(crate::clean_view::CleanView::open());
+                self.view = View::Clean;
+            }
+            (View::Clean, code) => {
+                if !self.clean.as_mut().is_some_and(|c| c.on_key(code)) {
+                    self.view = View::List;
+                }
+            }
             (View::List, KeyCode::Esc) => return Action::Quit,
             (View::List, KeyCode::Down | KeyCode::Char('j')) => self.move_selection(1),
             (View::List, KeyCode::Up | KeyCode::Char('k')) => self.move_selection(-1),
@@ -936,6 +1180,8 @@ impl App {
                 }
             }
             (View::List, KeyCode::Char('p')) => self.open_share(),
+            (View::List, KeyCode::Char('P')) => self.toggle_pin(),
+            (View::List | View::History | View::Agents, KeyCode::Char('y')) => self.copy_session_id(),
             (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
             (View::List | View::Board, KeyCode::Char('c')) => self.open_rules_picker(),
             (View::List, KeyCode::Char('n')) => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real())),
@@ -1005,7 +1251,8 @@ pub fn run() -> anyhow::Result<()> {
             if event::poll(Duration::from_millis(250))? {
                 match event::read()? {
                     Event::Paste(text) => {
-                        if let Some(share) = app.share.as_mut() {
+                        if app.on_compose_paste(&text) {
+                        } else if let Some(share) = app.share.as_mut() {
                             share.on_paste(&text);
                         } else if let Some(view) = app.prompt_view.as_mut() {
                             view.on_paste(&text);

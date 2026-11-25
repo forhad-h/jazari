@@ -3,6 +3,125 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.16.0 - 2026-11-25
+
+- `e` on one of your prompts opens a box to ask Claude for the change; it takes several lines, a paste or `$EDITOR`
+
+## 0.15.0 - 2026-11-24
+
+- A subagent's history details show the model it ran on
+
+## 0.14.7 - 2026-11-24
+
+- The System panel's CPU line shows how many cores are idle, such as `9.4 of 10 cores idle`
+
+## 0.14.6 - 2026-11-24
+
+- The System panel shows load only when it passes twice the core count, with the multiple of cores
+
+## 0.14.5 - 2026-11-24
+
+- A row above the footer shows the selected session's context and the 5h and 7d limits, like Claude Code's status line
+
+## 0.14.4 - 2026-11-24
+
+- On macOS, the System panel and `marsad system` show free disk space as Finder does
+- The System panel and `marsad system` list CPU, memory, swap, then disk
+- `marsad system` measures CPU over one second, so a single spike no longer skews it
+- Key hints inside windows show the key bold and what it does muted, like the footer
+
+## 0.14.3 - 2026-11-24
+
+- The System panel shows swap on its own line, with how much is used of the total
+
+## 0.14.2 - 2026-11-24
+
+- The header shows when the 5h and 7d limits reset again, and no longer repeats context left
+
+## 0.14.1 - 2026-11-24
+
+- Hints, units and other secondary text use a lighter gray that is easier to read
+- Panel borders are darker than text, so the frame no longer competes with what it holds
+- On a narrow terminal the header keeps the context left and drops reset times and totals first
+- The footer keeps the most-used keys and quit on a narrow terminal, with … where keys were left out
+- Token totals of a billion or more read like `15.9B`, matching the header
+- Memory on macOS is counted the way Activity Monitor does, so the meter and the memory guard no longer read several GiB too free
+
+## 0.14.0 - 2026-11-24
+
+- Every action marsad takes (messages, stops, interrupts, cleanups, settings, updates) goes through one gate
+- `marsad actions` lists what marsad did, refused or held, and who asked
+- `marsad pause [--for 2h]` / `marsad resume` hold everything marsad does on its own
+- A session gets a permission prompt before a marsad command that stops sessions, removes items or changes a guard
+- A message from another session is marked as not from you
+- The same interrupt can't fire twice within 30 seconds
+- `marsad disk --guard off` also stops the watcher's emergency interrupts
+- `MARSAD_DRY_RUN=1` shows what any action would do without doing it
+- The panel below the session list splits in two: what the session is doing now, its id and model, and a System panel
+- Disk, memory and CPU meters move from the header into the System panel
+- The selected session's context shows in the header beside the 5h and 7d limits
+- `enter` opens the session's details (was history): tokens, mode, folder, agents and skills above its history
+
+## 0.13.0 - 2026-11-23
+
+- Run `marsad install` again after updating: it adds the new guard, message and handoff hooks
+- At 80% context a session is asked to write a handoff and pass it to `marsad handoff`
+- `marsad handoff` opens a new session in this terminal, else the default terminal, else tmux
+- Warp, iTerm2, Terminal.app, Ghostty, WezTerm, kitty, Windows Terminal and tmux are supported
+- `marsad handoff --close` ends the old session once the new one is open (`--auto-close on` makes it the default)
+- `marsad handoff list` and `resume <id>` show and restart saved handoffs
+- The context warning also reaches long turns between tool calls
+- `marsad install` offers to install tmux when it is missing
+- Sessions stop before their next tool call when the disk is nearly full (95% or 8 GB free), so it can't hang the machine
+- At 90% or 15 GB free, sessions are told once to finish the step and write a handoff
+- `marsad disk` shows free space and the levels; `--guard off` only warns
+- `marsad system` shows disk, memory, swap and CPU, and what to be careful about before heavy work
+- The dashboard has disk, memory and CPU meters under the header
+- All-time tokens read in B once past a billion
+- A session stopped for disk space shows why, with its resume command
+- A background watcher checks the disk every 20 s while sessions run and notifies once per level
+- At the emergency level (98% or 3 GB free) running sessions are interrupted
+- Optional ballast file (`disk.ballast_gb`) that is deleted at the emergency level to free space
+- Optional phone notifications through ntfy or a webhook (`disk.ntfy`, `disk.webhook`)
+- `marsad disk` shows the watcher, the ballast and phone notifications
+- `D` and `marsad clean` list caches, build output and Docker data that can go, by tier, with sizes
+- Rebuildable caches and build output are cleaned on their own once the disk reaches the warning level
+- Backups, unused Docker volumes and merged worktrees are removed one at a time, after a confirmation
+- `J` asks Claude whether each data-holding item can go; it only advises
+- marsad's own CPU, memory and data folder size show beside the meters
+- Tool calls that delete the home folder or root, wipe a disk, or send secrets out are refused
+- `curl | sh`, decode-and-run, persistence, security changes and remote shells ask first
+- File writes are checked too, including package install scripts that download or `eval` code
+- Package names one letter away from a popular package ask "did you mean"
+- `marsad risk` lists findings; `--check` tests a command; `--guard off` turns the check off
+- Optional, off by default: OSV lookups for malicious packages, and ClamAV scans of fresh files before they run
+- A session goes idle once background agents that outlived its turn finish, instead of staying active
+- Session history lists the newest events first
+- Sessions keep their place in the list: working ones sit on top, the rest stay in first-seen order
+- Share: three post variants (`v` cycles), each naming the features worked on and avoiding your posts of the last 10 days
+- The session list shows each session's name, with its project where the activity was
+- The details pane is shorter and shows the full session id; `y` copies it
+- The agent board shows a relation map: who messages whom, conflicts, and overlapping claims
+- Usage limit reset times use a 12-hour clock (`7:20pm`, `Fri 10:00am`)
+- `P` opens a small window that stays on top of other apps with every session's status (macOS)
+- The `c` picker's last step can copy only the prompts' file path, to paste into a running session (`marsad rules --path`)
+- Heavy commands wait while memory or CPU is under pressure; `marsad system --wait` returns once there is room
+- `t` sends a session a message it reads at its next step; `x` stops it before its next tool call; `X` interrupts it now
+- `marsad say` lets a session post what it is doing to the dashboard (`--attention` when it needs you)
+- New built-in prompt, Working with marsad, for sessions that report to and take direction from marsad
+- Disk warnings name the largest things to free; the dashboard says once a day what can be cleaned
+- The cleanup also finds old Claude Code versions, stale session scratch folders and idle virtualenvs
+- A report-only group lists space owned by apps and tools, with the command that frees it
+- The details pane shows the command check's latest finding for the session
+
+## 0.12.0 - 2026-11-23
+
+- Every edit, rename and delete of your prompts keeps a version; `v` in the `c` picker lists and restores them
+- `u` in the `c` picker brings back the prompt just deleted
+- `marsad prompt versions` and `marsad prompt restore` list and restore versions from the command line
+- The `c` picker tags each prompt `[built-in]` or `[yours]`, and so does `marsad rules`
+- `esc` on an unsaved draft asks before discarding it
+
 ## 0.11.0 - 2026-11-23
 
 - marsad keeps its data in `~/.marsad`; the data in `~/.claude/marsad` is copied over once and left there

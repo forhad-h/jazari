@@ -14,6 +14,13 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     if ev.get("agent_id").is_none() {
         session.last_hook = session.last_hook.max(ts);
         session.stopped = matches!(event, "Stop" | "SessionStart");
+    } else if let Some(aid) = s("agent_id") {
+        // A subagent whose start was missed (an older log) is still known to be working, until it stops.
+        let a = session.subagents.entry(aid.to_string()).or_default();
+        a.running = !matches!(event, "SubagentStop" | "StopFailure");
+        if a.agent_type.is_empty() {
+            a.agent_type = s("agent_type").filter(|t| !t.is_empty()).unwrap_or("agent").to_string();
+        }
     }
 
     if let Some(cwd) = s("cwd") {
@@ -36,6 +43,13 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     }
     if let Some(model) = model_name(&ev["model"]) {
         session.model = Some(model);
+    }
+
+    // A new prompt, a resume or the end of the session closes a stop by marsad's guard.
+    if matches!(event, "UserPromptSubmit" | "SessionStart" | "SessionEnd") && ev.get("agent_id").is_none() {
+        session.halted = None;
+        session.flag = None;
+        session.stop_requested = false;
     }
 
     let summary = s("summary").unwrap_or("");
@@ -132,7 +146,44 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
             session.set_status(Status::Ended, ts);
             session.detail = s("reason").unwrap_or("").to_string();
         }
+        crate::risk::FLAGGED_EVENT => {
+            let decision = if s("decision") == Some("block") { "refused" } else { "asked" };
+            let who = if ev.get("agent_id").is_some() { "a subagent's call " } else { "" };
+            session.flag = Some(format!("{who}{decision} ({}): {}", s("rule").unwrap_or("?"), s("reason").unwrap_or("")));
+        }
+        crate::disk::HALTED_EVENT => {
+            let (why, then) = match s("reason") {
+                Some("disk") | None => ("disk almost full", "free space, then "),
+                Some(other) => (other, ""),
+            };
+            let full = s("message").map(|m| format!(" ({m})")).unwrap_or_default();
+            session.halted = Some(format!("halted: {why}{full} · {then}claude --resume {}", session.id));
+            session.stop_requested = false;
+        }
+        crate::channel::TOLD_EVENT => match s("kind") {
+            Some("stop") => session.stop_requested = true,
+            _ => session.waiting += 1,
+        },
+        crate::channel::DELIVERED_EVENT => {
+            session.waiting = 0;
+            if ev["stop"] == true {
+                session.stop_requested = false;
+            }
+        }
+        crate::channel::SAID_EVENT => {
+            let text = s("message").unwrap_or("").to_string();
+            if ev["attention"] == true {
+                session.set_status(Status::Question, ts);
+                session.detail = text.clone();
+            }
+            session.said = Some(text);
+        }
         _ => {}
+    }
+    // The refused tool call's own PreToolUse line can land after the halt; the halt still wins.
+    if let Some(halted) = &session.halted {
+        session.detail = halted.clone();
+        session.set_status(Status::Error, ts);
     }
 }
 
@@ -175,6 +226,45 @@ mod tests {
         assert_eq!(s.detail, "Bash: npm test");
         assert_eq!(s.project(), "web");
         assert_eq!(s.pid, Some(42));
+    }
+
+    #[test]
+    fn a_disk_halt_shows_until_the_session_is_resumed() {
+        let tool = json!({"hook_event_name": "PreToolUse", "tool_name": "Bash", "summary": "docker build ."});
+        let halt = json!({"hook_event_name": crate::disk::HALTED_EVENT, "reason": "disk", "message": "96% full, 9.0 GB free"});
+        // The refused call's own PreToolUse line may land after the halt.
+        let s = run(&[tool.clone(), halt.clone(), tool.clone()]);
+        assert_eq!(s.status, Status::Error);
+        assert!(s.detail.starts_with("halted: disk almost full (96% full, 9.0 GB free)"), "{}", s.detail);
+        assert!(s.detail.ends_with(&format!("claude --resume {}", s.id)), "{}", s.detail);
+        let resumed = run(&[tool, halt, json!({"hook_event_name": "SessionStart", "source": "resume"})]);
+        assert_eq!((resumed.status, resumed.halted), (Status::Idle, None));
+    }
+
+    #[test]
+    fn a_command_check_finding_stays_until_the_next_prompt() {
+        let flagged = json!({"hook_event_name": crate::risk::FLAGGED_EVENT, "decision": "ask", "rule": "download-exec", "reason": "piping into `bash`"});
+        let s = run(&[flagged.clone(), json!({"hook_event_name": "PreToolUse", "tool_name": "Bash"})]);
+        assert_eq!(s.flag.as_deref(), Some("asked (download-exec): piping into `bash`"));
+        let s = run(&[flagged, json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"})]);
+        assert_eq!(s.flag, None);
+    }
+
+    #[test]
+    fn messages_stops_and_status_lines_from_the_channel() {
+        let told = json!({"hook_event_name": crate::channel::TOLD_EVENT, "kind": "message", "message": "hi"});
+        let stop = json!({"hook_event_name": crate::channel::TOLD_EVENT, "kind": "stop"});
+        let s = run(&[told.clone(), told.clone(), stop.clone()]);
+        assert_eq!((s.waiting, s.stop_requested), (2, true));
+        let s = run(&[told, stop.clone(), json!({"hook_event_name": crate::channel::DELIVERED_EVENT, "messages": 1, "stop": true})]);
+        assert_eq!((s.waiting, s.stop_requested), (0, false));
+        let said = json!({"hook_event_name": crate::channel::SAID_EVENT, "message": "need the API key", "attention": true});
+        let s = run(&[json!({"hook_event_name": "PreToolUse", "tool_name": "Bash"}), said]);
+        assert_eq!((s.status, s.said.as_deref(), s.detail.as_str()), (Status::Question, Some("need the API key"), "need the API key"));
+        let s = run(&[stop.clone(), json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"})]);
+        assert!(!s.stop_requested, "a new prompt drops a waiting stop");
+        let halted = run(&[json!({"hook_event_name": crate::disk::HALTED_EVENT, "reason": "stopped from marsad"})]);
+        assert_eq!(halted.detail, format!("halted: stopped from marsad · claude --resume {}", halted.id));
     }
 
     #[test]
@@ -270,6 +360,36 @@ mod tests {
         s.stats.turn_ended_at = Some(1.5);
         s.reconcile(10.0);
         assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Interrupted));
+    }
+
+    #[test]
+    fn a_background_agent_finishing_after_stop_leaves_the_session_idle() {
+        let mut s = run(&[
+            json!({"hook_event_name": "UserPromptSubmit", "prompt": "go"}),
+            json!({"hook_event_name": "Stop"}),
+            json!({"hook_event_name": "SubagentStart", "agent_id": "a1", "agent_type": "general-purpose"}),
+            json!({"hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a1"}),
+        ]);
+        s.reconcile(10.0);
+        assert_eq!(s.status, Status::Active, "the agent is still working");
+        let mut map = HashMap::from([("s1".to_string(), s)]);
+        apply(&mut map, &json!({"session_id": "s1", "ts": 11.0, "hook_event_name": "SubagentStop", "agent_id": "a1"}));
+        let mut s = map.remove("s1").unwrap();
+        s.reconcile(12.0);
+        assert_eq!(s.status, Status::Active, "hooks may still be settling");
+        s.reconcile(14.0);
+        assert_eq!((s.status, s.idle_cause), (Status::Idle, IdleCause::Finished));
+        // A subagent that failed has stopped too.
+        let mut map = HashMap::from([("s1".to_string(), s)]);
+        apply(&mut map, &json!({"session_id": "s1", "ts": 15.0, "hook_event_name": "PreToolUse", "tool_name": "Read", "agent_id": "a2"}));
+        apply(&mut map, &json!({"session_id": "s1", "ts": 16.0, "hook_event_name": "StopFailure", "agent_id": "a2"}));
+        let mut s = map.remove("s1").unwrap();
+        assert!(!s.subagents["a2"].running);
+        // A running background shell still keeps it active.
+        s.set_status(Status::Active, 15.0);
+        s.stats.background = vec![(1.0, "cargo build".into())];
+        s.reconcile(30.0);
+        assert_eq!(s.status, Status::Active);
     }
 
     #[test]

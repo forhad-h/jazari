@@ -256,7 +256,7 @@ impl Paint {
     fn new() -> Self {
         use std::io::IsTerminal;
         if std::io::stdout().is_terminal() {
-            Self { yellow: "\x1b[33m", green: "\x1b[32m", bold: "\x1b[1m", dim: "\x1b[2m", reset: "\x1b[0m" }
+            Self { yellow: "\x1b[33m", green: "\x1b[32m", bold: "\x1b[1m", dim: "\x1b[38;5;247m", reset: "\x1b[0m" }
         } else {
             Self { yellow: "", green: "", bold: "", dim: "", reset: "" }
         }
@@ -278,7 +278,8 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     let mut state = load_state();
     if let Some(toggle) = args.auto {
         state.auto = matches!(toggle, Toggle::On);
-        save_state(&state)?;
+        let a = crate::act::Action::new(crate::act::Kind::Setting, "update.auto").detail(if state.auto { "on" } else { "off" });
+        crate::act::run(&a, || save_state(&state))?;
         let word = if state.auto { "on" } else { "off" };
         println!("Automatic updates are {word}.");
         if state.auto {
@@ -318,7 +319,7 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     }
 
     println!("Installing v{latest}…");
-    let exe = install(&latest, false)?;
+    let exe = crate::act::run(&crate::act::Action::new(crate::act::Kind::Update, format!("v{latest}")), || install(&latest, false))?;
     println!();
     println!("{green}✓ Updated v{CURRENT} → v{latest}{reset}  {dim}{}{reset}", exe.display());
     println!("{dim}Restart any open marsad dashboards to use the new version.{reset}");
@@ -354,7 +355,8 @@ pub fn background() -> Receiver<Notice> {
         }
         let Some(latest) = latest.filter(|v| is_newer(v, CURRENT)) else { return };
         let auto_ok = state.auto && current_exe().ok().and_then(|e| install_root(&e)).is_some();
-        let notice = if auto_ok && install(&latest, true).is_ok() {
+        let a = crate::act::Action::new(crate::act::Kind::Update, format!("v{latest}")).on_its_own(true);
+        let notice = if auto_ok && crate::act::run(&a, || install(&latest, true)).is_ok() {
             Notice::Installed(latest)
         } else {
             Notice::Available(latest)

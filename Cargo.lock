@@ -992,12 +992,13 @@ dependencies = [
 
 [[package]]
 name = "marsad"
-version = "0.11.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "dirs",
+ "libc",
  "ratatui",
  "resvg",
  "rusqlite",

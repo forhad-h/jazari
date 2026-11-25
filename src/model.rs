@@ -25,6 +25,15 @@ impl Status {
         }
     }
 
+    /// 0 while the session is at work or waiting on the user, 1 when idle, 2 once ended.
+    pub fn group(self) -> u8 {
+        match self {
+            Status::Idle => 1,
+            Status::Ended => 2,
+            _ => 0,
+        }
+    }
+
     pub fn needs_user(self) -> bool {
         matches!(self, Status::Approve | Status::Question)
     }
@@ -122,8 +131,9 @@ pub enum EventKind {
     Prompt(String),
     /// A skill invocation; index into `TranscriptStats::runs`.
     Skill(usize),
-    /// A subagent launch, with its final report once it has returned.
-    Agent { agent_type: String, description: String, tool_use_id: String, result: Option<String> },
+    /// A subagent launch, with its final report once it has returned. `model` is the
+    /// override the launch asked for (`sonnet`, `opus`, ...), if any.
+    Agent { agent_type: String, description: String, tool_use_id: String, model: Option<String>, result: Option<String> },
     /// One AskUserQuestion question, with the user's answer once given.
     Question { question: String, answer: Option<String> },
     /// Claude's reply that ended a turn.
@@ -223,12 +233,14 @@ impl Level {
     }
 }
 
-/// Compact token count: `950`, `12.3k`, `1.2M`.
+/// Compact token count: `950`, `12.3k`, `1.2M`, `15.9B`. Each unit starts where the one below
+/// would round up to `1000.0`, so 999.96k reads `1.0M`.
 pub fn fmt_tokens(n: u64) -> String {
     match n {
         0..1_000 => n.to_string(),
-        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
-        _ => format!("{:.1}M", n as f64 / 1e6),
+        1_000..999_950 => format!("{:.1}k", n as f64 / 1e3),
+        999_950..999_950_000 => format!("{:.1}M", n as f64 / 1e6),
+        _ => format!("{:.1}B", n as f64 / 1e9),
     }
 }
 
@@ -247,18 +259,18 @@ pub fn fmt_count(n: u64) -> String {
     }
 }
 
-/// Local wall-clock time a rate-limit window resets: `16:30` today,
-/// `Tue 09:00` within the week, `Oct 21 09:00` beyond.
+/// Local wall-clock time a rate-limit window resets, on a 12-hour clock: `4:30pm` today,
+/// `Tue 9:00am` within the week, `Oct 21 9:00am` beyond.
 pub fn fmt_reset(ts: f64) -> String {
     use chrono::{Local, TimeZone};
     let Some(t) = Local.timestamp_opt(ts as i64, 0).single() else { return "—".into() };
     let days = (t.date_naive() - Local::now().date_naive()).num_days();
+    let clock = t.format("%-I:%M%P");
     match days {
-        ..=0 => t.format("%H:%M"),
-        1..7 => t.format("%a %H:%M"),
-        _ => t.format("%b %d %H:%M"),
+        ..=0 => clock.to_string(),
+        1..7 => format!("{} {clock}", t.format("%a")),
+        _ => format!("{} {clock}", t.format("%b %-d")),
     }
-    .to_string()
 }
 
 /// The user's auto-compact window, from `CLAUDE_CODE_AUTO_COMPACT_WINDOW` or the
@@ -392,6 +404,16 @@ pub struct Session {
     pub model: Option<String>,
     pub title: Option<String>,
     pub pid: Option<u32>,
+    /// Why marsad's guard stopped the session and how to resume it, until it is resumed.
+    pub halted: Option<String>,
+    /// The command check's latest finding in this turn, e.g. "asked (download-exec): …".
+    pub flag: Option<String>,
+    /// The latest status line the session posted with `marsad say`.
+    pub said: Option<String>,
+    /// Messages queued with `marsad tell` that the session hasn't picked up yet.
+    pub waiting: usize,
+    /// A stop request from marsad waits for the session's next tool call.
+    pub stop_requested: bool,
     pub subagents: BTreeMap<String, Subagent>,
     pub stats: TranscriptStats,
     pub snapshot: Option<StatusSnapshot>,
@@ -416,6 +438,11 @@ impl Session {
             model: None,
             title: None,
             pid: None,
+            halted: None,
+            flag: None,
+            said: None,
+            waiting: 0,
+            stop_requested: false,
             subagents: BTreeMap::new(),
             stats: TranscriptStats::default(),
             snapshot: None,
@@ -452,6 +479,16 @@ impl Session {
             self.set_idle(IdleCause::Interrupted, now);
             self.detail.clear();
         }
+        // Background agents that outlive the main agent's Stop keep the session active through their
+        // own hooks; once the last one stops and the hooks settle, the work is done.
+        // Only subagent hooks came after the Stop; a finished background shell instead waits for the
+        // follow-up turn Claude runs on its result.
+        let agents = self.subagents.values().any(|a| a.running);
+        let after_stop = self.last_event > self.last_hook;
+        if self.stopped && after_stop && self.status == Status::Active && !agents && !running && now - self.last_event >= INTERRUPT_GRACE_SECS {
+            self.set_idle(IdleCause::Finished, now);
+            self.detail.clear();
+        }
         if self.status == Status::Idle && running {
             let shells: Vec<&str> = self.shells().collect();
             let more = if shells.len() > 1 { format!(" +{}", shells.len() - 1) } else { String::new() };
@@ -480,6 +517,15 @@ impl Session {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.id.chars().take(8).collect())
+    }
+
+    /// The session's name: its title from Claude Code, else the start of its id.
+    pub fn name(&self) -> String {
+        self.title
+            .clone()
+            .or_else(|| self.stats.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| format!("session {}", self.id.chars().take(8).collect::<String>()))
     }
 
     /// Main agent plus all subagents.
@@ -570,7 +616,8 @@ impl Session {
 /// Column the live session list is sorted by; `s` cycles through them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SortKey {
-    /// Most urgent first, then most recent activity.
+    /// Sessions at work (active or waiting on the user) on top, the rest below; each group keeps
+    /// first-seen order, so rows don't move as sessions send events.
     #[default]
     Status,
     /// Alphabetical; stays put while sessions work, which keeps selection steady.
@@ -612,7 +659,7 @@ pub fn sort_sessions(list: &mut [&Session], key: SortKey, reversed: bool, compac
     let now = crate::now();
     list.sort_by(|a, b| {
         let ord = match key {
-            SortKey::Status => a.status.cmp(&b.status).then(b.last_event.total_cmp(&a.last_event)),
+            SortKey::Status => a.status.group().cmp(&b.status.group()),
             SortKey::Project => a.project().to_lowercase().cmp(&b.project().to_lowercase()),
             SortKey::Context => match (left(a), left(b)) {
                 (Some(x), Some(y)) => x.cmp(&y),
@@ -635,6 +682,8 @@ mod tests {
     fn counts_switch_to_billions_and_trillions() {
         assert_eq!(fmt_count(0), "0");
         assert_eq!(fmt_count(11_300_000), "11.3M");
+        assert_eq!(fmt_tokens(15_876_300_000), "15.9B");
+        assert_eq!(fmt_tokens(999_960), "1.0M");
         assert_eq!(fmt_count(344_000_000), "344M");
         assert_eq!(fmt_count(2_000), "2k");
         assert_eq!(fmt_count(10_050_000), "10.1M");
@@ -644,6 +693,18 @@ mod tests {
         assert_eq!(fmt_count(999_960_000), "1B", "no 1000M");
         assert_eq!(fmt_count(999_960_000_000), "1T", "no 1000B");
         assert_eq!(fmt_count(999_900), "999.9k");
+    }
+
+    #[test]
+    fn reset_times_use_a_12_hour_clock() {
+        use chrono::{Local, TimeZone};
+        let today = Local::now().date_naive();
+        let at = |days: i64, h: u32, m: u32| Local.from_local_datetime(&(today + chrono::Days::new(days as u64)).and_hms_opt(h, m, 0).unwrap()).unwrap().timestamp() as f64;
+        assert_eq!(fmt_reset(at(0, 16, 30)), "4:30pm");
+        assert_eq!(fmt_reset(at(0, 0, 5)), "12:05am");
+        let tue = Local.timestamp_opt(at(2, 9, 0) as i64, 0).unwrap().format("%a").to_string();
+        assert_eq!(fmt_reset(at(2, 9, 0)), format!("{tue} 9:00am"));
+        assert!(fmt_reset(at(20, 12, 0)).ends_with(" 12:00pm"));
     }
 
     #[test]
@@ -691,6 +752,13 @@ mod tests {
             list.iter().map(|s| s.id.as_str()).collect::<String>()
         };
         assert_eq!(order(SortKey::Status, false), "bca");
+        // Newer events don't reorder a group: first-seen order holds.
+        let (mut d, mut e) = (mk("d", "/x/d", Status::Idle, 4.0, None), mk("e", "/x/e", Status::Active, 5.0, None));
+        d.last_event = 100.0;
+        e.last_event = 1.0;
+        let mut list = vec![&d, &a, &e, &b, &c];
+        sort_sessions(&mut list, SortKey::Status, false, None);
+        assert_eq!(list.iter().map(|s| s.id.as_str()).collect::<String>(), "bcead");
         assert_eq!(order(SortKey::Project, false), "bac", "case-insensitive");
         assert_eq!(order(SortKey::Project, true), "cab");
         assert_eq!(order(SortKey::Context, false), "cab", "least left first, unknown last");

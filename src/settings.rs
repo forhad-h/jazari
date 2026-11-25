@@ -25,8 +25,28 @@ fn set_at(path: &Path, key: &str, value: Value) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, serde_json::to_vec_pretty(&Value::Object(map))?)?;
+    // Written beside it and renamed over it, so a reader never sees half a file.
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&Value::Object(map))?)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
     Ok(())
+}
+
+/// Writes one setting to the real file through marsad's action gate, so it is recorded.
+fn save(key: &str, value: Value) -> anyhow::Result<()> {
+    let a = crate::act::Action::new(crate::act::Kind::Setting, key).detail(value.to_string());
+    crate::act::run(&a, || set_at(&path(), key, value))
+}
+
+/// One setting's raw value, for modules that parse their own settings.
+pub(crate) fn get(key: &str) -> Option<Value> {
+    load_at(&path()).remove(key)
+}
+
+pub(crate) fn set(key: &str, value: Value) -> anyhow::Result<()> {
+    save(key, value)
 }
 
 fn alerts_at(path: &Path) -> bool {
@@ -39,7 +59,7 @@ pub fn alerts() -> bool {
 }
 
 pub fn set_alerts(on: bool) -> anyhow::Result<()> {
-    set_at(&path(), "alerts", json!(on))
+    save("alerts", json!(on))
 }
 
 fn rules_at(path: &Path) -> Vec<String> {
@@ -58,20 +78,20 @@ pub fn rules() -> Vec<String> {
 }
 
 pub fn set_rules(keys: &[&str]) -> anyhow::Result<()> {
-    set_at(&path(), "rules", json!(keys))
+    save("rules", json!(keys))
 }
 
-fn launch_mode_at(path: &Path) -> crate::rules::Mode {
-    load_at(path).get("launch_mode").and_then(Value::as_str).and_then(crate::rules::Mode::parse).unwrap_or_default()
+fn launch_mode_at(path: &Path) -> crate::rules::Choice {
+    load_at(path).get("launch_mode").and_then(Value::as_str).and_then(crate::rules::Choice::parse).unwrap_or_default()
 }
 
-/// Whether `c` last copied a command for a normal session or an agent team.
-pub fn launch_mode() -> crate::rules::Mode {
+/// Whether `c` last copied a command for a normal session or an agent team, or only the file path.
+pub fn launch_mode() -> crate::rules::Choice {
     launch_mode_at(&path())
 }
 
-pub fn set_launch_mode(mode: crate::rules::Mode) -> anyhow::Result<()> {
-    set_at(&path(), "launch_mode", json!(mode.key()))
+pub fn set_launch_mode(choice: crate::rules::Choice) -> anyhow::Result<()> {
+    save("launch_mode", json!(choice.key()))
 }
 
 fn generator_model_at(path: &Path) -> String {
@@ -119,7 +139,7 @@ pub fn retention_days() -> Option<u64> {
 }
 
 pub fn set_retention_days(days: u64) -> anyhow::Result<()> {
-    set_at(&path(), "retention_days", json!(days))
+    save("retention_days", json!(days))
 }
 
 /// Default share of the auto-compact point at which a session is told to hand off.
@@ -139,7 +159,7 @@ pub fn context_warning() -> Option<u32> {
 }
 
 pub fn set_context_warning(pct: Option<u32>) -> anyhow::Result<()> {
-    set_at(&path(), "context_warning_pct", pct.map_or(json!(false), |p| json!(p)))
+    save("context_warning_pct", pct.map_or(json!(false), |p| json!(p)))
 }
 
 /// Badge levels last announced on this machine (`badges_announced`), or None when never
@@ -210,7 +230,7 @@ mod tests {
 
     #[test]
     fn rules_default_to_coordination_and_mode_to_session() {
-        use crate::rules::Mode;
+        use crate::rules::Choice as Mode;
         let (file, _) = temp("rules");
         assert_eq!(rules_at(&file), ["coordination"], "never chosen");
         assert_eq!(launch_mode_at(&file), Mode::Session);
@@ -220,6 +240,8 @@ mod tests {
         assert_eq!(rules_at(&file), ["coordination"], "an empty choice falls back");
         set_at(&file, "launch_mode", json!("team")).unwrap();
         assert_eq!(launch_mode_at(&file), Mode::Team);
+        set_at(&file, "launch_mode", json!("path")).unwrap();
+        assert_eq!(launch_mode_at(&file), Mode::Path);
         set_at(&file, "launch_mode", json!("retired")).unwrap();
         assert_eq!(launch_mode_at(&file), Mode::Session);
         std::fs::remove_dir_all(file.parent().unwrap()).ok();

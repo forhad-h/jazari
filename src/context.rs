@@ -1,6 +1,6 @@
 //! `marsad context`: how full a session's context is, so a session can decide to hand off before
-//! auto-compact. With `--hook` it is also the UserPromptSubmit hook that tells a session, once per
-//! crossing, that its context passed the warning threshold.
+//! auto-compact. With `--hook` it is also the UserPromptSubmit and PostToolUse hook that tells a
+//! session, once per crossing, that its context passed the warning threshold and how to hand off.
 
 use crate::model::{ContextInfo, Session, auto_compact_window, context_info, fmt_tokens};
 use crate::report::Format;
@@ -20,7 +20,7 @@ pub struct ContextArgs {
     warn: Option<String>,
     #[arg(long, value_enum, default_value = "table")]
     format: Format,
-    /// Hook entrypoint called by Claude Code on UserPromptSubmit (reads hook JSON on stdin).
+    /// Hook entrypoint called by Claude Code on UserPromptSubmit and PostToolUse (reads hook JSON on stdin).
     #[arg(long, hide = true)]
     hook: bool,
 }
@@ -94,7 +94,7 @@ fn warning_label(pct: Option<u32>) -> String {
 }
 
 /// This process and its ancestors, nearest first.
-fn ancestors() -> Vec<u32> {
+pub(crate) fn ancestors() -> Vec<u32> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
     let mut sys = System::new();
     let mut out = vec![std::process::id()];
@@ -113,7 +113,7 @@ fn ancestors() -> Vec<u32> {
 
 /// The session to report: an explicit id, then Claude Code's session id variable, then the
 /// session whose Claude Code process is an ancestor of this one.
-fn find_session<'a>(
+pub(crate) fn find_session<'a>(
     sessions: &'a HashMap<String, Session>,
     explicit: Option<&str>,
     env_id: Option<&str>,
@@ -151,7 +151,12 @@ fn hook() -> Option<String> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input).ok()?;
     let raw: Value = serde_json::from_str(&input).ok()?;
+    if from_subagent(&raw) {
+        return None;
+    }
     let threshold = crate::settings::context_warning()?;
+    // Only these events let a hook add text to the session's context.
+    let event = raw["hook_event_name"].as_str().filter(|e| matches!(*e, "UserPromptSubmit" | "PostToolUse")).unwrap_or("UserPromptSubmit");
     let id = raw["session_id"].as_str().filter(|id| !id.is_empty() && !id.contains(['/', '\\', '.']))?;
     let snapshot = crate::statusline::load(&crate::statusline::status_dir().join(format!("{id}.json")));
     let tail = raw["transcript_path"].as_str().and_then(|p| last_context(Path::new(p)));
@@ -169,15 +174,23 @@ fn hook() -> Option<String> {
     } else if was_warned && !warned {
         let _ = std::fs::remove_file(&marker);
     }
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "marsad".into());
     emit.then(|| {
         json!({
             "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": note(pct),
+                "hookEventName": event,
+                "additionalContext": crate::handoff::context_note(pct, &exe, crate::handoff::auto_close()),
             }
         })
         .to_string()
     })
+}
+
+/// A subagent's tool calls carry the parent's session id and their own `agent_id`. Only the main
+/// agent may take the once-per-crossing warning: a subagent would use it up, and the handoff it is
+/// told to run would end the main session.
+fn from_subagent(raw: &Value) -> bool {
+    raw.get("agent_id").is_some_and(|a| !a.is_null())
 }
 
 /// (whether to warn now, whether the session counts as warned afterwards). Dropping below the
@@ -185,13 +198,6 @@ fn hook() -> Option<String> {
 fn decide(pct: f64, threshold: u32, warned: bool) -> (bool, bool) {
     let over = pct >= threshold as f64;
     (over && !warned, over)
-}
-
-fn note(pct: f64) -> String {
-    format!(
-        "[marsad] This session's context is {pct:.0}% full; Claude Code auto-compacts at 100%. \
-         Consider writing a handoff prompt for a fresh session now, before continuing."
-    )
 }
 
 fn clean_markers(dir: &Path) {
@@ -254,6 +260,13 @@ fn fresher_context(snap: Option<&crate::model::StatusSnapshot>, tail: Option<&Ta
 mod tests {
     use super::*;
     use crate::model::StatusSnapshot;
+
+    #[test]
+    fn subagent_calls_never_take_the_warning() {
+        assert!(from_subagent(&json!({ "session_id": "s", "agent_id": "a1", "hook_event_name": "PostToolUse" })));
+        assert!(!from_subagent(&json!({ "session_id": "s", "hook_event_name": "PostToolUse" })));
+        assert!(!from_subagent(&json!({ "session_id": "s", "agent_id": null })));
+    }
 
     #[test]
     fn warns_once_per_crossing() {

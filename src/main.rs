@@ -1,34 +1,48 @@
+mod act;
 mod alerts;
 mod app;
 mod badge_art;
 mod badges;
 mod board;
 mod card;
+mod channel;
+mod clean;
+mod clean_judge;
+mod clean_view;
 mod clipboard;
 mod context;
+mod disk;
 mod events;
+mod handoff;
 mod hook;
 mod install;
 mod jsonl;
 mod live;
 mod migrate;
 mod model;
+mod pin;
 mod portable;
 mod prompt_gen;
+mod pressure;
 mod prompt_view;
 mod report;
+mod risk;
 mod rules;
 mod settings;
 mod share;
+mod share_history;
 mod share_view;
 mod shot;
 mod statusline;
 mod store;
+mod system;
 mod term;
+mod terminal;
 mod transcript;
 mod ui;
 mod update;
 mod usage;
+mod watch;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -88,6 +102,8 @@ enum Cmd {
     },
     /// How full this session's context is, and the automatic handoff warning (--warn).
     Context(context::ContextArgs),
+    /// Save a handoff prompt (stdin or --file) and open a new terminal where a fresh session starts from it.
+    Handoff(handoff::HandoffArgs),
     /// List the rules a Claude Code session can start with, or print the command that loads a chosen set.
     Rules(rules::RulesArgs),
     /// Write, edit, copy or delete your own prompts: `new` drafts one from a rough idea with Claude.
@@ -95,8 +111,34 @@ enum Cmd {
     Prompt(prompt_gen::PromptCmd),
     /// Print the `claude` command that starts a session with the coordination rules (`marsad rules coordination`).
     Coordination(rules::CoordinationArgs),
+    /// Free disk space and the levels at which sessions are warned and stopped (--guard on/off).
+    Disk(disk::DiskArgs),
+    /// Find caches, build output and Docker data that can be rebuilt, and remove them safely.
+    Clean(clean::CleanArgs),
+    /// Send a running session a message, or stop (--stop) or interrupt (--interrupt) it.
+    Tell(channel::TellArgs),
+    /// From inside a session: post what it is doing to marsad (--attention: it needs the user).
+    Say(channel::SayArgs),
+    /// Disk, memory, swap and CPU in one reading, with what to be careful about before heavy work.
+    System(system::SystemArgs),
+    /// Ask about or refuse risky tool calls: check a command (--check), turn it on/off, list findings.
+    Risk(risk::RiskArgs),
+    /// Background disk watcher (started by the SessionStart hook), or with --hook the synchronous
+    /// hook that checks the disk and risky commands before each tool call and prompt.
+    #[command(hide = true)]
+    Guard {
+        /// Hook entrypoint called by Claude Code on PreToolUse and UserPromptSubmit.
+        #[arg(long)]
+        hook: bool,
+    },
     /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
     Update(update::UpdateArgs),
+    /// Hold what marsad does on its own (interrupting or ending sessions, cleaning up, updating).
+    Pause(act::PauseArgs),
+    /// Turn marsad's own actions back on after `marsad pause`.
+    Resume,
+    /// What marsad did, refused or held: messages, stops, cleanups, setting changes and more.
+    Actions(act::ActionsArgs),
 }
 
 /// The folder `MARSAD_HOME` names, which replaces both `data_dir` and `legacy_dir`.
@@ -136,8 +178,12 @@ pub fn now() -> f64 {
 fn main() -> anyhow::Result<()> {
     let cmd = Cli::parse().cmd;
     // Before anything reads or writes data. The hooks and the status line must stay quiet.
-    let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_)));
-    match migrate::from_legacy(if quiet { migrate::HOOK_WAIT } else { migrate::WAIT }, !quiet) {
+    let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_) | Cmd::Guard { .. }));
+    // Claude Code waits on the guard hook before every tool call: it never copies data, which can
+    // take longer than the hook may. Any other marsad run does that.
+    let sync_hook = matches!(cmd, Some(Cmd::Guard { hook: true }));
+    let outcome = if sync_hook { migrate::Outcome::Idle } else { migrate::from_legacy(if quiet { migrate::HOOK_WAIT } else { migrate::WAIT }, !quiet) };
+    match outcome {
         migrate::Outcome::Busy if !quiet => {
             anyhow::bail!("marsad's data is being copied to {} by another marsad; try again in a moment", data_dir().display())
         }
@@ -149,6 +195,18 @@ fn main() -> anyhow::Result<()> {
     {
         eprintln!("{note}");
     }
+    act::set_origin(match &cmd {
+        None => act::Origin::Dashboard,
+        Some(Cmd::Guard { hook: false }) => act::Origin::Watcher,
+        Some(Cmd::Hook | Cmd::Statusline | Cmd::Guard { hook: true }) => act::Origin::Hook,
+        Some(Cmd::Context(_)) if quiet && std::env::args().any(|a| a == "--hook") => act::Origin::Hook,
+        // Anything else is worked out on first use: the user's terminal or a Claude Code session.
+        Some(_) => return dispatch(cmd),
+    });
+    dispatch(cmd)
+}
+
+fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
     match cmd {
         Some(Cmd::Hook) => {
             // Never fail or print: a hook must not disturb the session.
@@ -159,8 +217,10 @@ fn main() -> anyhow::Result<()> {
             let _ = statusline::run();
             Ok(())
         }
-        Some(Cmd::Install { no_statusline }) => install::install(!no_statusline),
-        Some(Cmd::Uninstall) => install::uninstall(),
+        Some(Cmd::Install { no_statusline }) => {
+            act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("install"), || install::install(!no_statusline))
+        }
+        Some(Cmd::Uninstall) => act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("uninstall"), install::uninstall),
         Some(Cmd::Sync) => report::sync_now(),
         Some(Cmd::Retention(args)) => report::retention(args),
         Some(Cmd::Total(args)) => report::total(args),
@@ -173,13 +233,35 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Cmd::Status(args)) => live::status(args),
+        Some(Cmd::Handoff(args)) => handoff::run(args),
         Some(Cmd::Context(args)) => context::run(args),
         Some(Cmd::Rules(args)) => rules::run(args),
         Some(Cmd::Prompt(cmd)) => prompt_gen::run(cmd),
         Some(Cmd::Coordination(args)) => rules::run_coordination(args),
         Some(Cmd::Export { file }) => portable::export(file),
         Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
+        Some(Cmd::Disk(args)) => disk::run(args),
+        Some(Cmd::System(args)) => system::run(args),
+        Some(Cmd::Tell(args)) => channel::run_tell(args),
+        Some(Cmd::Say(args)) => channel::run_say(args),
+        Some(Cmd::Clean(args)) => clean::run(args),
+        Some(Cmd::Risk(args)) => risk::run(args),
+        Some(Cmd::Guard { hook }) => {
+            if !hook {
+                return watch::run();
+            }
+            // Never fail or print anything but the verdict: a hook must not disturb the session, so
+            // even a panic prints nothing and exits 0.
+            std::panic::set_hook(Box::new(|_| {}));
+            if let Ok(Some(out)) = std::panic::catch_unwind(disk::hook) {
+                println!("{out}");
+            }
+            Ok(())
+        }
         Some(Cmd::Update(args)) => update::run(args),
+        Some(Cmd::Pause(args)) => act::run_pause(args),
+        Some(Cmd::Resume) => act::run_resume(),
+        Some(Cmd::Actions(args)) => act::run_actions(args),
         None => app::run(),
     }
 }

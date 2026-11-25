@@ -1,6 +1,6 @@
 [package]
 name = "marsad"
-version = "0.11.0"
+version = "0.16.0"
 edition = "2024"
 description = "A live terminal dashboard for all your Claude Code sessions"
 license = "MIT"
@@ -21,6 +21,9 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sysinfo = "0.39.6"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # The profile that 'dist' will build with
 [profile.dist]
