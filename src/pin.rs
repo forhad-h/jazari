@@ -82,15 +82,17 @@ pub fn text(sessions: &[&Session], limits: Option<(Option<RateWindow>, Option<Ra
         out.push_str(&limits.join("  ·  "));
         out.push('\n');
     }
+    // Same columns as the dashboard: session, project, then the status at the right edge, which
+    // the window colors by its label.
     for s in live.iter().take(MAX_ROWS) {
-        let (glyph, label) = match s.status {
-            Status::Approve => ("●", "APPROVE"),
-            Status::Question => ("?", "QUESTION"),
-            Status::Error => ("✗", "ERROR"),
-            Status::Active => ("◐", "ACTIVE"),
-            _ => ("○", "IDLE"),
+        let (label, glyph) = match s.status {
+            Status::Approve => ("APPROVE", "●"),
+            Status::Question => ("QUESTION", "?"),
+            Status::Error => ("ERROR", "✗"),
+            Status::Active => ("ACTIVE", "◐"),
+            _ => ("IDLE", "○"),
         };
-        out.push_str(&format!("{glyph} {label:<8}  {:<30}  {}\n", clip(&s.name(), 30), s.project()));
+        out.push_str(&format!("{:<28}  {:<14}  {label:>8} {glyph}\n", clip(&s.name(), 28), clip(&s.project(), 14)));
     }
     if live.len() > MAX_ROWS {
         out.push_str(&format!("+{} more\n", live.len() - MAX_ROWS));
@@ -129,8 +131,8 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "marsad · 1 needs you");
         assert_eq!(lines[1], "5h 14%");
-        assert_eq!(lines[2], "? QUESTION  Which database should we use…   web");
-        assert!(lines[3].starts_with("◐ ACTIVE    Dark mode "), "{}", lines[3]);
+        assert_eq!(lines[2], "Which database should we us…  web             QUESTION ?");
+        assert_eq!(lines[3], "Dark mode                     web               ACTIVE ◐");
         assert_eq!(lines.len(), 4, "ended sessions are left out");
         assert_eq!(super::text(&[], None), "marsad · 0 idle\nno live sessions\n");
     }
