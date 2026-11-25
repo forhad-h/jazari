@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.17.0 - 2026-11-25
 
 - The `P` window lists each session like the dashboard: name, project, then its status in color
 
