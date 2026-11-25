@@ -62,10 +62,11 @@ History lists the newest events first. By default sessions that are working or w
 
 `P` opens a small window in the top-right corner that stays above every other app, listing each
 live session in the dashboard's order (name, project, then its status in the dashboard's color)
-with your usage limits, so you can keep an eye on sessions while
-reading or browsing without switching back to the terminal. It doesn't take focus when clicked; drag
-it anywhere. `P` again or its close button closes it, and it closes with the dashboard. macOS only
-(it runs through `osascript`); on other systems use your terminal's own "always on top" setting.
+under the selected session's context and the 5-hour limit, colored as on the dashboard, so you can
+keep an eye on sessions while reading or browsing without switching back to the terminal. It
+doesn't take focus when clicked; drag it anywhere. `P` again or its close button closes it, and it
+closes with the dashboard. macOS only (it runs through `osascript`); on other systems use your
+terminal's own "always on top" setting.
 
 ### Alerts
 

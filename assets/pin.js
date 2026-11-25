@@ -30,12 +30,33 @@ function run(argv) {
     ACTIVE: [$.NSColor.systemGreenColor, font],
     IDLE: [$.NSColor.systemBlueColor, font],
   };
-  const styled = (body) => {
+  const levels = { ok: $.NSColor.systemGreenColor, warn: $.NSColor.systemYellowColor, crit: $.NSColor.systemRedColor };
+  const styled = (marked) => {
+    // The first line may be the gauge row: `[ok]ctx 18%[/] · 795.5k left · [warn]5h 64%[/] ↻2:10pm`.
+    // Its marked parts show bold in their level's color, the rest dimmed.
+    const gauges = [];
+    let body = marked, dimmed = 0;
+    if (/^\[(ok|warn|crit)\]/.test(marked)) {
+      const nl = marked.indexOf('\n');
+      const first = nl < 0 ? marked : marked.slice(0, nl);
+      let plain = '';
+      for (const part of first.split(/(\[(?:ok|warn|crit)\].*?\[\/\])/)) {
+        const m = part.match(/^\[(ok|warn|crit)\](.*)\[\/\]$/);
+        if (m) { gauges.push([plain.length, m[2].length, levels[m[1]]]); plain += m[2]; } else plain += part;
+      }
+      body = plain + (nl < 0 ? '' : marked.slice(nl));
+      dimmed = plain.length;
+    }
     const out = $.NSMutableAttributedString.new;
     out.mutableString.setString(body);
     const all = $.NSMakeRange(0, body.length);
     out.addAttributeValueRange($.NSFontAttributeName, font, all);
     out.addAttributeValueRange($.NSForegroundColorAttributeName, $.NSColor.labelColor, all);
+    out.addAttributeValueRange($.NSForegroundColorAttributeName, $.NSColor.secondaryLabelColor, $.NSMakeRange(0, dimmed));
+    for (const [at, len, color] of gauges) {
+      out.addAttributeValueRange($.NSForegroundColorAttributeName, color, $.NSMakeRange(at, len));
+      out.addAttributeValueRange($.NSFontAttributeName, bold, $.NSMakeRange(at, len));
+    }
     let at = 0;
     for (const line of body.split('\n')) {
       const m = line.match(/([A-Z]+) \S+$/);
