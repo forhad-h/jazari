@@ -4,7 +4,7 @@ use crate::model::{EventKind, RateWindow, Session, SortKey, Status, Subagent, Ti
 use crate::transcript::{self, TranscriptReader};
 use crate::badges::Badges;
 use crate::share_view::{Outcome, ShareView};
-use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::backend::Backend;
 use ratatui::crossterm::execute;
 use std::collections::HashMap;
@@ -1103,6 +1103,21 @@ impl App {
 }
 
 impl App {
+    /// Scrolls the wheel as ↓/↑ would, except over a text box or a waiting y/n question, which a
+    /// stray scroll shouldn't type into or answer.
+    fn on_wheel(&mut self, down: bool) {
+        let asking = self.compose.is_some()
+            || self.control.is_some()
+            || self.prompt_view.is_some()
+            || self.share.as_ref().is_some_and(|s| s.editing())
+            || self.rules_picker.as_ref().is_some_and(|p| p.deleting.is_some())
+            || (self.view == View::Clean && self.clean.as_ref().is_some_and(|c| c.confirm.is_some()));
+        if !asking {
+            let code = if down { KeyCode::Down } else { KeyCode::Up };
+            self.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+    }
+
     /// Handles one key press. The share view gets keys first, so `q` there cancels the share.
     fn on_key(&mut self, key: KeyEvent) -> Action {
         if let Some(share) = self.share.as_mut() {
@@ -1221,17 +1236,33 @@ impl App {
 type Tui = ratatui::Terminal<crate::term::Aligned<ratatui::backend::CrosstermBackend<std::io::Stdout>>>;
 
 /// ratatui's terminal setup (raw mode, alternate screen, panic hook), drawing through
-/// `term::Aligned` so complex-script text can't shift a row's columns.
+/// `term::Aligned` so complex-script text can't shift a row's columns. Mouse capture sends the wheel
+/// to marsad, so the terminal doesn't scroll its own history behind the dashboard.
 fn init_terminal() -> std::io::Result<Tui> {
     drop(ratatui::init());
+    static RELEASE_MOUSE_ON_PANIC: std::sync::Once = std::sync::Once::new();
+    RELEASE_MOUSE_ON_PANIC.call_once(|| {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = execute!(std::io::stdout(), DisableMouseCapture);
+            hook(info);
+        }));
+    });
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     ratatui::Terminal::new(crate::term::Aligned::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())))
+}
+
+/// Undoes `init_terminal`.
+fn restore_terminal() {
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    ratatui::restore();
 }
 
 /// Hands the terminal to the user's editor for `text`, then takes it back: a fresh terminal and what
 /// was saved.
 fn edit_suspended(text: &str, kind: &str, ext: &str) -> std::io::Result<(Tui, Result<String, String>)> {
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
-    ratatui::restore();
+    restore_terminal();
     let edited = crate::share_view::edit_in_editor(text, kind, ext);
     let terminal = init_terminal()?;
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
@@ -1277,6 +1308,11 @@ pub fn run() -> anyhow::Result<()> {
                             }
                         }
                     },
+                    Event::Mouse(mouse) => match mouse.kind {
+                        MouseEventKind::ScrollDown => app.on_wheel(true),
+                        MouseEventKind::ScrollUp => app.on_wheel(false),
+                        _ => {}
+                    },
                     Event::Resize(..) => app.cell_aspect = crate::ui::cell_aspect(terminal.backend_mut().window_size().ok()),
                     _ => {}
                 }
@@ -1286,7 +1322,7 @@ pub fn run() -> anyhow::Result<()> {
         }
     })();
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
-    ratatui::restore();
+    restore_terminal();
     result
 }
 

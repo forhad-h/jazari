@@ -443,6 +443,11 @@ impl ShareView {
         }
     }
 
+    /// True while the line is being edited.
+    pub fn editing(&self) -> bool {
+        matches!(self.phase, Phase::Editing { .. })
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> Outcome {
         let code = key.code;
         match &mut self.phase {
