@@ -2,7 +2,7 @@
 //! The dashboard writes a small status file each second; the window shows it and closes when the
 //! file goes stale, so a crashed dashboard never leaves it behind.
 
-use crate::model::{RateWindow, Session, Status};
+use crate::model::{ContextInfo, Level, RateWindow, Session, Status};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -58,8 +58,9 @@ impl Drop for Pin {
     }
 }
 
-/// The window's text: a title line, the usage limits, then one line per session.
-pub fn text(sessions: &[&Session], limits: Option<(Option<RateWindow>, Option<RateWindow>)>) -> String {
+/// The window's text: a title line, the dashboard's status row (the selected session's context and
+/// the 5-hour limit), then one line per session.
+pub fn text(sessions: &[&Session], ctx: Option<ContextInfo>, limits: Option<(Option<RateWindow>, Option<RateWindow>)>) -> String {
     let live: Vec<&&Session> = sessions.iter().filter(|s| s.status != Status::Ended).collect();
     let waiting = live.iter().filter(|s| s.status.needs_user()).count();
     let active = live.iter().filter(|s| s.status == Status::Active).count();
@@ -69,17 +70,17 @@ pub fn text(sessions: &[&Session], limits: Option<(Option<RateWindow>, Option<Ra
         (n, _) => format!("marsad · {n} need{} you", if n == 1 { "s" } else { "" }),
     };
     out.push('\n');
-    let limits: Vec<String> = limits
-        .into_iter()
-        .flat_map(|(five, seven)| [("5h", five), ("7d", seven)])
-        .filter_map(|(label, w)| {
-            let w = w?;
-            let reset = w.resets_at.map(|t| format!(" ↻{}", crate::model::fmt_reset(t))).unwrap_or_default();
-            Some(format!("{label} {:.0}%{reset}", w.used_pct))
-        })
-        .collect();
-    if !limits.is_empty() {
-        out.push_str(&limits.join("  ·  "));
+    let mut gauges = Vec::new();
+    if let Some(ctx) = ctx {
+        let approx = if ctx.estimated { "≈" } else { "" };
+        gauges.push(format!("{} · {} left", gauge(&format!("ctx {approx}{:.0}%", ctx.used_ratio() * 100.0), ctx.used_ratio()), crate::model::fmt_tokens(ctx.left())));
+    }
+    if let Some(w) = limits.and_then(|(five, _)| five) {
+        let reset = w.resets_at.map(|t| format!(" ↻{}", crate::model::fmt_reset(t))).unwrap_or_default();
+        gauges.push(format!("{}{reset}", gauge(&format!("5h {:.0}%", w.used_pct), w.used_pct / 100.0)));
+    }
+    if !gauges.is_empty() {
+        out.push_str(&gauges.join(" · "));
         out.push('\n');
     }
     // Same columns as the dashboard: session, project, then the status at the right edge, which
@@ -101,6 +102,17 @@ pub fn text(sessions: &[&Session], limits: Option<(Option<RateWindow>, Option<Ra
         out.push_str("no live sessions\n");
     }
     out
+}
+
+/// `[ok]ctx 18%[/]`: the window shows the text bold in the dashboard's color for how full it is,
+/// and dims the rest of the line.
+fn gauge(text: &str, ratio: f64) -> String {
+    let level = match Level::of(ratio) {
+        Level::Ok => "ok",
+        Level::Warn => "warn",
+        Level::Critical => "crit",
+    };
+    format!("[{level}]{text}[/]")
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -126,14 +138,15 @@ mod tests {
             session("b", "Dark mode", Status::Active),
             session("c", "Old work", Status::Ended),
         );
-        let limits = Some((Some(RateWindow { used_pct: 14.2, resets_at: None }), None));
-        let text = text(&[&a, &b, &c], limits);
+        let limits = Some((Some(RateWindow { used_pct: 64.2, resets_at: None }), Some(RateWindow { used_pct: 38.0, resets_at: None })));
+        let ctx = ContextInfo { used: 18_000, window: 200_000, limit: 100_000, estimated: false };
+        let text = text(&[&a, &b, &c], Some(ctx), limits);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "marsad · 1 needs you");
-        assert_eq!(lines[1], "5h 14%");
+        assert_eq!(lines[1], "[ok]ctx 18%[/] · 82.0k left · [warn]5h 64%[/]", "the 7-day limit is left out");
         assert_eq!(lines[2], "Which database should we us…  web             QUESTION ?");
         assert_eq!(lines[3], "Dark mode                     web               ACTIVE ◐");
         assert_eq!(lines.len(), 4, "ended sessions are left out");
-        assert_eq!(super::text(&[], None), "marsad · 0 idle\nno live sessions\n");
+        assert_eq!(super::text(&[], None, None), "marsad · 0 idle\nno live sessions\n");
     }
 }

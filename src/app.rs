@@ -808,7 +808,8 @@ impl App {
     }
 
     fn pin_text(&self) -> String {
-        crate::pin::text(&self.visible(), self.rate_limits())
+        let ctx = self.selected_session().and_then(|s| s.context(self.compact_window));
+        crate::pin::text(&self.visible(), ctx, self.rate_limits())
     }
 
     /// Keeps the window on top current, and notices when the user closed it.
