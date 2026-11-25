@@ -1306,11 +1306,6 @@ fn edit_suspended(text: &str, kind: &str, ext: &str) -> std::io::Result<(Tui, Re
 pub fn run() -> anyhow::Result<()> {
     let mut app = App::new();
     app.refresh();
-    if crate::settings::clear_scrollback() {
-        // Before the alternate screen, so the terminal's own scrollbar has no history left to show.
-        use ratatui::crossterm::{cursor::MoveTo, terminal::{Clear, ClearType}};
-        let _ = execute!(std::io::stdout(), MoveTo(0, 0), Clear(ClearType::All), Clear(ClearType::Purge));
-    }
     let mut terminal = init_terminal()?;
     app.cell_aspect = crate::ui::cell_aspect(terminal.backend_mut().window_size().ok());
     // Bracketed paste, so a pasted newline while editing the share line doesn't confirm it.

@@ -72,12 +72,6 @@ enum Cmd {
     Uninstall,
     /// Index new transcript data into the usage history.
     Sync,
-    /// Show or set whether the dashboard erases the terminal's scrollback when it opens (default off).
-    Scrollback {
-        /// `on` erases the commands and output above the dashboard each time it opens; they can't be
-        /// brought back. Omit to show the current setting.
-        clear: Option<update::Toggle>,
-    },
     /// Show or set how many days of usage history are kept (default 30).
     Retention(report::RetentionArgs),
     /// Total tokens used since marsad started counting, including days no longer kept.
@@ -232,17 +226,6 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
         }
         Some(Cmd::Uninstall) => act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("uninstall"), install::uninstall),
         Some(Cmd::Sync) => report::sync_now(),
-        Some(Cmd::Scrollback { clear }) => {
-            if let Some(toggle) = clear {
-                settings::set_clear_scrollback(matches!(toggle, update::Toggle::On))?;
-            }
-            println!("{}", if settings::clear_scrollback() {
-                "The dashboard erases the terminal's scrollback when it opens (turn off: marsad scrollback off)."
-            } else {
-                "The dashboard keeps the terminal's scrollback (erase it on open: marsad scrollback on)."
-            });
-            Ok(())
-        }
         Some(Cmd::Retention(args)) => report::retention(args),
         Some(Cmd::Total(args)) => report::total(args),
         Some(Cmd::Badges(args)) => badges::run(args),
