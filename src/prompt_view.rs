@@ -1,7 +1,8 @@
 //! The dashboard's prompt writer, opened from the `c` picker: a rough idea in, a reviewed prompt in
 //! the user's library out. The idea goes to `claude -p` on a thread; the review shows the draft, what
 //! it assumed and what it left open, and the draft can be edited, revised with feedback or renamed
-//! before it is saved. The picker routes keys here while it is open.
+//! before it is saved. Editing an existing prompt opens on the box that asks Claude for a change. The
+//! picker routes keys here while it is open.
 
 use crate::prompt_gen::{Draft, Request};
 use crate::rules::Rule;
@@ -119,7 +120,7 @@ impl Field {
     }
 }
 
-/// What the one-line input on the review screen is for.
+/// What the input on the review screen is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineFor {
     /// Feedback for a revision.
@@ -128,6 +129,22 @@ pub enum LineFor {
     Answer(usize),
     /// A new key.
     Key,
+}
+
+impl LineFor {
+    /// Feedback and answers go to Claude and may span lines; a key is one line.
+    pub fn multiline(self) -> bool {
+        self != LineFor::Key
+    }
+}
+
+/// Where the editor's text goes when it comes back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditTarget {
+    Idea,
+    Draft,
+    /// The open feedback or answer box.
+    Request,
 }
 
 enum Phase {
@@ -156,8 +173,7 @@ pub struct PromptView {
     replacing: Option<String>,
     /// The built-in prompt this is a copy of.
     copy_of: Option<String>,
-    /// Where the editor's text goes when it comes back.
-    editing_draft: bool,
+    editing: EditTarget,
     /// The draft has changes that aren't saved: a new or revised draft, an edit or a rename.
     dirty: bool,
     /// `esc` was pressed once on an unsaved draft; a second one discards it.
@@ -182,7 +198,7 @@ impl PromptView {
             key: String::new(),
             replacing: None,
             copy_of: None,
-            editing_draft: false,
+            editing: EditTarget::Idea,
             dirty: false,
             discarding: false,
             warning: None,
@@ -204,8 +220,13 @@ impl PromptView {
             view.copy_of = Some(rule.key.clone());
             view.notice = Some(format!("{} is built in, so this saves a copy to your library.", rule.title));
         }
-        view.phase = Phase::Review;
+        view.phase = Phase::Line(LineFor::Feedback, TextBox::default());
         view
+    }
+
+    /// The model that writes and revises drafts.
+    pub fn model(&self) -> &str {
+        &self.env.model
     }
 
     pub fn title(&self) -> &'static str {
@@ -234,7 +255,7 @@ impl PromptView {
             Phase::Idea => vec![("enter", "write it"), ("alt+enter", "new line"), ("tab", "next field"), ("ctrl+e", "editor"), ("esc", "cancel")],
             Phase::Generating { .. } => vec![("esc", "cancel")],
             Phase::Review => {
-                let mut keys = vec![("enter", "save"), ("e", "edit"), ("r", "revise"), ("n", "rename"), ("↑↓", "scroll")];
+                let mut keys = vec![("enter", "save"), ("e", "edit"), ("r", "ask Claude"), ("n", "rename"), ("↑↓", "scroll")];
                 if self.draft.as_ref().is_some_and(|d| !d.questions.is_empty()) {
                     keys.insert(3, ("1-9", "answer"));
                 }
@@ -242,7 +263,7 @@ impl PromptView {
                 keys
             }
             Phase::Line(LineFor::Key, _) => vec![("enter", "rename"), ("esc", "back")],
-            Phase::Line(..) => vec![("enter", "revise"), ("esc", "back")],
+            Phase::Line(..) => vec![("enter", "revise with Claude"), ("alt+enter", "new line"), ("ctrl+e", "editor"), ("esc", "back to the draft")],
         }
     }
 
@@ -313,13 +334,19 @@ impl PromptView {
         }
     }
 
-    /// Takes the text back from the user's editor: the idea, or the draft's body.
+    /// Takes the text back from the user's editor: the idea, the draft's body, or the request to Claude.
     pub fn edited(&mut self, edited: Result<String, String>) {
         self.notice = None;
         match edited {
             Err(why) => self.warning = Some(format!("Couldn't open the editor: {why}")),
             Ok(text) if text.trim().is_empty() => self.warning = Some("The edited text was empty, so it was not used.".into()),
-            Ok(text) if self.editing_draft => {
+            Ok(text) if self.editing == EditTarget::Request => {
+                if let Phase::Line(_, input) = &mut self.phase {
+                    *input = TextBox::of(text.trim_end());
+                }
+                self.warning = None;
+            }
+            Ok(text) if self.editing == EditTarget::Draft => {
                 if let Some(d) = self.draft.take() {
                     self.draft = Some(Draft { body: text, ..d }.normalized_keeping_key());
                     self.dirty = true;
@@ -333,7 +360,7 @@ impl PromptView {
         }
     }
 
-    /// Inserts pasted text; only the idea keeps its line breaks.
+    /// Inserts pasted text; the idea and the request to Claude keep their line breaks.
     pub fn on_paste(&mut self, pasted: &str) {
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let (target, multiline) = match &mut self.phase {
@@ -343,7 +370,7 @@ impl PromptView {
                 self.field = Field::Idea;
                 (&mut self.idea, true)
             }
-            Phase::Line(_, text) => (text, false),
+            Phase::Line(purpose, text) => (text, purpose.multiline()),
             _ => return,
         };
         for c in pasted.chars() {
@@ -363,7 +390,7 @@ impl PromptView {
                 }
                 KeyCode::Enter if self.field == Field::Cancel => return Outcome::Close,
                 KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.editing_draft = false;
+                    self.editing = EditTarget::Idea;
                     return Outcome::Edit(self.idea.text());
                 }
                 KeyCode::Enter if self.field == Field::Idea && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => {
@@ -402,7 +429,7 @@ impl PromptView {
                     }
                     KeyCode::Enter => return self.save(),
                     KeyCode::Char('e') => {
-                        self.editing_draft = true;
+                        self.editing = EditTarget::Draft;
                         return Outcome::Edit(self.draft.as_ref().map(|d| d.body.clone()).unwrap_or_default());
                     }
                     KeyCode::Char('r') => self.phase = Phase::Line(LineFor::Feedback, TextBox::default()),
@@ -418,7 +445,12 @@ impl PromptView {
                 }
             }
             Phase::Line(purpose, text) => match code {
-                KeyCode::Esc => self.phase = Phase::Review,
+                KeyCode::Esc => (self.phase, self.warning) = (Phase::Review, None),
+                KeyCode::Enter if purpose.multiline() && key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) => text.insert('\n'),
+                KeyCode::Char('e') if purpose.multiline() && key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.editing = EditTarget::Request;
+                    return Outcome::Edit(text.text());
+                }
                 KeyCode::Enter => {
                     let (purpose, input) = (*purpose, text.text().trim().to_string());
                     self.submit_line(purpose, input);
@@ -583,6 +615,7 @@ mod tests {
         assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Close, "a second esc discards");
 
         let mut v = PromptView::revise(env_with_lib(vec![own("tone")]), &own("tone"));
+        assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Stay, "esc leaves the request box for the draft");
         assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Close, "an unchanged prompt closes at once");
     }
 
@@ -657,6 +690,7 @@ mod tests {
         let (e, _, saved) = fake(Vec::new(), lib.clone());
         let mut v = PromptView::revise(e, &mine);
         assert_eq!(v.title(), " Edit prompt ");
+        v.on_key(key(KeyCode::Esc));
         assert_eq!(v.on_key(key(KeyCode::Char('e'))), Outcome::Edit("# tone\n\nMine.".into()));
         v.edited(Ok("# Tone\n\nWarmer.\n".into()));
         assert_eq!(v.draft.as_ref().unwrap().summary, "Warmer.", "the summary follows the edit");
@@ -667,6 +701,7 @@ mod tests {
         let mut v = PromptView::revise(e, &lib[1]);
         assert_eq!((v.title(), v.key.as_str()), (" Copy prompt ", "output-hygiene-copy"));
         assert!(v.notice.as_deref().unwrap().contains("saves a copy"));
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Stay, "an empty request goes back to the draft");
         assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "output-hygiene-copy".into(), replaced: None });
         assert_eq!(saved.lock().unwrap()[0].2, None, "a copy replaces nothing");
     }
@@ -727,6 +762,34 @@ mod tests {
         v.edited(Err("vi exited".into()));
         assert!(v.warning.as_deref().unwrap().contains("vi exited"));
         assert_eq!(v.on_key(key(KeyCode::Esc)), Outcome::Close);
+    }
+
+    #[test]
+    fn editing_opens_on_a_box_that_asks_claude_for_the_change() {
+        let mine = own("tone");
+        let revised = Draft { key: "tone".into(), ..draft("Warmer tone", &[]) };
+        let (env, asked, saved) = fake(vec![Ok(revised.clone())], vec![mine.clone()]);
+        let mut v = PromptView::revise(env, &mine);
+        assert!(matches!(v.screen(), Screen::Review { line: Some((LineFor::Feedback, _)), .. }), "the request box is open");
+        assert_eq!(v.model(), "fable");
+        typed(&mut v, "warmer, and");
+        v.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        v.on_paste("cover\ncommits");
+        assert_eq!(v.on_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)), Outcome::Edit("warmer, and\ncover\ncommits".into()));
+        v.edited(Ok("be warmer\nand cover commits\n".into()));
+        v.on_key(key(KeyCode::Enter));
+        assert!(matches!(v.screen(), Screen::Generating { revising: true, .. }));
+        wait(&mut v);
+        let req = asked.lock().unwrap()[0].clone();
+        assert_eq!(req.feedback, "be warmer\nand cover commits", "the box's lines go to Claude as they are");
+        assert_eq!(req.previous.as_deref(), Some("# tone\n\nMine."));
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "tone".into(), replaced: Some("tone".into()) });
+        assert_eq!(saved.lock().unwrap()[0].1, revised.body);
+
+        // A new name stays on one line.
+        v.on_key(key(KeyCode::Char('n')));
+        v.on_paste("a\nb");
+        assert!(matches!(v.screen(), Screen::Review { line: Some((LineFor::Key, t)), .. } if t.text() == "tonea b"));
     }
 
     use std::path::Path;
