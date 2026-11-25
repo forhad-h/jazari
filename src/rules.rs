@@ -28,11 +28,35 @@ pub struct Rule {
     pub title: String,
     pub summary: String,
     body: String,
-    /// The user's own prompt from the prompts dir, not one marsad ships.
+    /// The user's own prompt or skill, not one marsad ships.
     pub own: bool,
+    pub kind: Kind,
+}
+
+/// What a library entry is: a prompt merged into the launch file, or a skill the session is told
+/// to use (see `skills`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kind {
+    #[default]
+    Prompt,
+    Skill,
+}
+
+impl Kind {
+    /// The word for one, in messages.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Kind::Prompt => "prompt",
+            Kind::Skill => "skill",
+        }
+    }
 }
 
 impl Rule {
+    pub(crate) fn new(key: String, title: String, summary: String, body: String, own: bool, kind: Kind) -> Self {
+        Rule { key, title, summary, body, own, kind }
+    }
+
     /// The prompt's text, as it goes into the launch file.
     pub fn body(&self) -> &str {
         &self.body
@@ -186,15 +210,31 @@ fn launch_dir(data: &Path) -> PathBuf {
     data.join("launch")
 }
 
-/// The built-in prompts, then the user's own in file-name order.
+/// The built-in prompts, then the user's own in file-name order, then the skills (see `skills`).
+/// A skill named like a prompt is left out, so one key always means one entry.
 pub fn library() -> Vec<Rule> {
-    library_in(&prompts_dir())
+    with_skills(library_in(&prompts_dir()), crate::skills::rules(&crate::skills::library()))
+}
+
+fn with_skills(mut lib: Vec<Rule>, skills: Vec<Rule>) -> Vec<Rule> {
+    for skill in skills {
+        if !lib.iter().any(|r| r.key == skill.key) {
+            lib.push(skill);
+        }
+    }
+    lib
+}
+
+/// The prompts marsad ships.
+#[cfg(test)]
+pub(crate) fn builtin_rules() -> Vec<Rule> {
+    builtin_library()
 }
 
 fn builtin_library() -> Vec<Rule> {
     BUILTIN
         .iter()
-        .map(|b| Rule { key: b.key.into(), title: b.title.into(), summary: b.summary.into(), body: b.body.into(), own: false })
+        .map(|b| Rule { key: b.key.into(), title: b.title.into(), summary: b.summary.into(), body: b.body.into(), own: false, kind: Kind::Prompt })
         .collect()
 }
 
@@ -223,7 +263,7 @@ pub(crate) fn library_in(dir: &Path) -> Vec<Rule> {
 /// text. None for an empty file.
 fn own_rule(key: String, text: String) -> Option<Rule> {
     let (title, summary) = title_and_summary(&key, &text)?;
-    Some(Rule { key, title, summary, body: text, own: true })
+    Some(Rule { key, title, summary, body: text, own: true, kind: Kind::Prompt })
 }
 
 /// The title and summary the library reads from a prompt file's `text`. None for an empty file.
@@ -251,8 +291,8 @@ pub fn key_problem(lib: &[Rule], key: &str, replacing: Option<&str>) -> Option<S
         return Some("\"all\" stands for every prompt".into());
     }
     match lib.iter().find(|r| r.key == key) {
-        Some(r) if r.own => Some(format!("you already have a prompt named {key}")),
-        Some(_) => Some(format!("{key} is a built-in prompt")),
+        Some(r) if r.own => Some(format!("you already have a {} named {key}", r.kind.noun())),
+        Some(r) => Some(format!("{key} is a built-in {}", r.kind.noun())),
         None => None,
     }
 }
@@ -587,8 +627,14 @@ fn launch_name(role: &str, rules: &[&Rule], text: &str) -> String {
     format!("{role}-{}-{}.md", keys.trim_end_matches(['+', '-', '.']), &hash[..8])
 }
 
+/// The prompts' text, then a section that makes the session use the skills.
 fn merge(rules: &[&Rule]) -> String {
-    rules.iter().map(|r| r.body.trim_end()).collect::<Vec<_>>().join("\n\n") + "\n"
+    let mut parts: Vec<String> = rules.iter().filter(|r| r.kind == Kind::Prompt).map(|r| r.body.trim_end().to_string()).collect();
+    let skills: Vec<&Rule> = rules.iter().copied().filter(|r| r.kind == Kind::Skill).collect();
+    if !skills.is_empty() {
+        parts.push(crate::skills::launch_section(&skills).trim_end().to_string());
+    }
+    parts.join("\n\n") + "\n"
 }
 
 /// The lead's instructions: hand the teammates' file to each teammate it spawns, and with
@@ -772,6 +818,9 @@ pub fn run(args: RulesArgs) -> anyhow::Result<()> {
     }
     let chosen = parse(&lib, &args.keys)?;
     if args.path {
+        for report in crate::skills::provide(&chosen)? {
+            eprintln!("{}", report.message());
+        }
         println!("{}", ensure(&chosen, Mode::Session)?.display());
         return Ok(());
     }
@@ -793,6 +842,11 @@ pub fn run_coordination(args: CoordinationArgs) -> anyhow::Result<()> {
 }
 
 fn print_command(chosen: &[&Rule], mode: Mode, format: crate::report::Format) -> anyhow::Result<()> {
+    // A ticked skill must be where Claude Code loads skills before a session is told to use it.
+    // The notes go to stderr, so the command stays the first line of stdout.
+    for report in crate::skills::provide(chosen)? {
+        eprintln!("{}", report.message());
+    }
     // Written before anything is printed: a command pointing at a missing file is worse than none.
     let path = ensure(chosen, mode)?;
     println!("{}", render(format, chosen, mode, &launch_command(&path), &path));
@@ -805,7 +859,7 @@ fn render_list(format: crate::report::Format, lib: &[Rule], dir: &Path) -> Strin
         Format::Table => {
             let width = lib.iter().map(|r| r.key.chars().count()).max().unwrap_or(0);
             let mut out: Vec<String> =
-                lib.iter().map(|r| format!("{:<width$}  {:<10}  {}", r.key, if r.own { "[yours]" } else { "[built-in]" }, r.summary)).collect();
+                lib.iter().map(|r| format!("{:<width$}  {:<10}  {:<6}  {}", r.key, if r.own { "[yours]" } else { "[built-in]" }, r.kind.noun(), r.summary)).collect();
             out.push(String::new());
             out.push("`marsad rules <name>…` prints the command that starts Claude Code with them, e.g.".into());
             out.push(format!("marsad rules {}", lib.iter().map(|r| quote_arg(&r.key)).collect::<Vec<_>>().join(" ")));
@@ -817,13 +871,13 @@ fn render_list(format: crate::report::Format, lib: &[Rule], dir: &Path) -> Strin
         }
         Format::Json => {
             let list: Vec<_> =
-                lib.iter().map(|r| serde_json::json!({ "name": r.key, "title": r.title, "summary": r.summary, "own": r.own })).collect();
+                lib.iter().map(|r| serde_json::json!({ "name": r.key, "title": r.title, "summary": r.summary, "own": r.own, "kind": r.kind.noun() })).collect();
             serde_json::to_string_pretty(&list).unwrap_or_default()
         }
         Format::Csv => {
             let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-            let mut out = vec!["name,title,summary,own".to_string()];
-            out.extend(lib.iter().map(|r| format!("{},{},{},{}", quote(&r.key), quote(&r.title), quote(&r.summary), r.own)));
+            let mut out = vec!["name,title,summary,own,kind".to_string()];
+            out.extend(lib.iter().map(|r| format!("{},{},{},{},{}", quote(&r.key), quote(&r.title), quote(&r.summary), r.own, r.kind.noun())));
             out.join("\n")
         }
     }
@@ -1053,6 +1107,28 @@ mod tests {
     }
 
     #[test]
+    fn skills_reach_the_session_and_every_teammate() {
+        let skills = crate::skills::rules(&crate::skills::library_in(Path::new("/nonexistent")));
+        let lib = with_skills(builtins(), skills.clone());
+        assert_eq!(lib.last().map(|r| (r.key.as_str(), r.kind)), Some(("easy-english", Kind::Skill)));
+        let clash = Rule { key: "easy-english".into(), title: "x".into(), summary: String::new(), body: "x".into(), own: true, kind: Kind::Prompt };
+        assert_eq!(with_skills(vec![clash], skills).len(), 1, "one key, one entry");
+        let chosen = known(&lib, &[COORDINATION, "output-hygiene", "easy-english"]);
+        let data = Path::new("/d");
+        let session = files_for(data, &chosen, Mode::Session);
+        let text = &session[0].1;
+        assert!(text.contains("# Output hygiene") && text.contains("This session must use these skills"));
+        assert!(text.find("# Output hygiene").unwrap() < text.find("# Skills").unwrap(), "skills after the prompts");
+        assert!(text.contains("- **easy-english**: Write technical English"));
+        assert!(!text.contains("# Easy English"), "the session loads the skill itself; its body isn't merged");
+        let team = files_for(data, &chosen, Mode::Team);
+        assert_eq!(team.len(), 2);
+        assert!(team[0].1.contains("# Skills") && team[1].1.contains("# Skills"), "the lead and the teammates");
+        let only = files_for(data, &known(&lib, &["easy-english"]), Mode::Team);
+        assert!(only[1].1.starts_with("# Skills"), "a skill alone still reaches teammates");
+    }
+
+    #[test]
     fn quoting_follows_the_platform_shell() {
         assert_eq!(quote_for("/Users/me/.marsad/launch/session-coordination+output-hygiene-0123abcd.md", false), "/Users/me/.marsad/launch/session-coordination+output-hygiene-0123abcd.md");
         assert_eq!(quote_for("/Users/Jane Doe/x.md", false), "'/Users/Jane Doe/x.md'");
@@ -1068,7 +1144,7 @@ mod tests {
         assert_eq!(cmd, "claude --append-system-prompt-file /srv/marsad/launch/a.md");
         assert!(!cmd.ends_with('\n'));
         let lib = builtins();
-        let mine = Rule { key: "my rules".into(), title: "x".into(), summary: String::new(), body: "x".into(), own: true };
+        let mine = Rule { key: "my rules".into(), title: "x".into(), summary: String::new(), body: "x".into(), own: true, kind: Kind::Prompt };
         let chosen = vec![&lib[1], &mine];
         assert_eq!(cli_command(&chosen, Mode::Team), format!("marsad rules output-hygiene {} --team", quote_arg("my rules")));
     }
@@ -1206,7 +1282,7 @@ mod tests {
     }
 
     fn own(key: &str, body: &str) -> Rule {
-        Rule { key: key.into(), title: key.into(), summary: String::new(), body: body.into(), own: true }
+        Rule { key: key.into(), title: key.into(), summary: String::new(), body: body.into(), own: true, kind: Kind::Prompt }
     }
 
     #[test]

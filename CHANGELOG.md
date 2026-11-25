@@ -3,6 +3,14 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## 0.19.0 - 2026-11-25
+
+- Skills in the `c` picker: a ticked skill must be loaded and followed by the session and by agent-team teammates
+- Built-in skill Easy English: plain technical English for every reader, with a sentence and word checker
+- A ticked skill is installed to `~/.claude/skills` when missing; a copy marsad didn't write is never overwritten
+- Write your own skills from a rough idea (`n` on a skill in the picker, `marsad skill new`), edit them with Claude, restore versions
+- `marsad skill list|new|edit|copy|rm|versions|restore|install`
+
 ## 0.18.1 - 2026-11-25
 
 - The mouse wheel scrolls the dashboard instead of the terminal's earlier output; hold Shift to select text

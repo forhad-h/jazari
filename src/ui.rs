@@ -283,7 +283,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                     ("↑↓", "move".into()),
                     (picker_digits.as_str(), "tick".into()),
                     ("enter", "next".into()),
-                    ("n", "new".into()),
+                    ("n", if picker.library.get(picker.cursor).is_some_and(|r| r.kind == crate::rules::Kind::Skill) { "new skill" } else { "new prompt" }.into()),
                     ("e", "edit".into()),
                     ("d", "delete".into()),
                     ("v", "versions".into()),
@@ -745,18 +745,47 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
                 footer.extend(chosen.body.lines().take(8).map(|l| Line::from(dim(format!("  │ {}", crate::rules::shorten(l, 72))))));
             }
             footer.push(Line::from(""));
-            footer.push(hint(&[("enter", " makes it the prompt again; the current text is kept as a version")]));
-            (lines, footer, " Prompt versions ", 2 + v.cursor * 2)
+            let noun = v.kind.noun();
+            footer.push(hint(&[("enter", if noun == "skill" { " makes it the skill again; the current folder is kept as a version" } else { " makes it the prompt again; the current text is kept as a version" })]));
+            (lines, footer, if noun == "skill" { " Skill versions " } else { " Prompt versions " }, 2 + v.cursor * 2)
         }
         (None, None) => {
-            let mut lines = vec![Line::from(dim("Copy the command that starts Claude Code with:")), Line::from("")];
+            let mut lines = vec![
+                Line::from(dim("Copy the command that starts Claude Code with:")),
+                Line::from(""),
+                Line::from(vec![Span::styled("Prompts", Style::new().bold()), dim(" · rules added to the session's system prompt")]),
+            ];
+            // The skills follow the prompts under a heading of their own.
+            let first_skill = picker.library.iter().position(|r| r.kind == crate::rules::Kind::Skill);
+            // Summaries wrap instead of being cut, so each one can be read in full.
+            let text_width = (area.width as usize).saturating_sub(16).clamp(30, 100);
+            let mut cursor_line = 0;
             for (i, rule) in picker.library.iter().enumerate() {
+                if Some(i) == first_skill {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![Span::styled("Skills", Style::new().bold()), dim(" · step-by-step guides the session must load and follow")]));
+                }
                 let tick = if picker.ticked[i] { "[x]" } else { "[ ]" };
                 let digit = if i < 9 { format!("{}", i + 1) } else { " ".into() };
                 // Every prompt says whose it is: built into marsad, or the user's own file.
                 let tag = if rule.own { Span::styled("  [yours]", Style::new().fg(Color::Green)) } else { Span::styled("  [built-in]", Style::new().fg(MUTED)) };
                 lines.push(row(i == picker.cursor, format!("{digit} {tick} "), rule.title.clone(), Some(tag)));
-                lines.push(Line::from(dim(format!("        {}", rule.summary))));
+                // The highlighted skill shows its whole description: when Claude loads it, and when not.
+                let (_, description) = crate::skills::front(rule.body());
+                let summary = if i == picker.cursor && rule.kind == crate::rules::Kind::Skill && !description.trim().is_empty() {
+                    description.split_whitespace().collect::<Vec<_>>().join(" ")
+                } else {
+                    rule.summary.clone()
+                };
+                for l in wrap_line(Line::from(dim(summary)), text_width) {
+                    let mut spans = vec![Span::raw("        ")];
+                    spans.extend(l.spans);
+                    lines.push(Line::from(spans));
+                }
+                if i == picker.cursor {
+                    // The scroll keeps two lines from here in view: so here is the entry's end less one.
+                    cursor_line = lines.len().saturating_sub(2);
+                }
             }
             let footer = match picker.deleting.and_then(|i| picker.library.get(i)) {
                 Some(rule) => vec![
@@ -772,12 +801,15 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
                 ],
                 None => vec![
                     Line::from(""),
-                    hint(&[("n", " writes a new prompt with Claude · "), ("e", " edits yours or copies a built-in · "), ("d", " deletes yours")]),
-                    hint(&[("v", " lists a prompt's earlier versions to restore · "), ("u", " brings back the one just deleted")]),
-                    Line::from(dim(format!("Your prompts are .md files in {}", home_relative(&crate::rules::prompts_dir())))),
+                    hint(&[("n", " writes a new one with Claude, in the highlighted group · "), ("e", " edits yours or copies a built-in")]),
+                    hint(&[("d", " deletes yours · "), ("v", " lists earlier versions to restore · "), ("u", " brings back the one just deleted")]),
+                    Line::from(""),
+                    Line::from(dim(format!("Your prompts: {} (one .md file each)", home_relative(&crate::rules::prompts_dir())))),
+                    Line::from(dim(format!("Your skills: {} (one folder each)", home_relative(&crate::skills::skills_dir())))),
+                    Line::from(dim(format!("A ticked skill is installed to {} when it is missing there", home_relative(&crate::skills::claude_skills_dir())))),
                 ],
             };
-            (lines, footer, " Launch command ", 2 + picker.cursor * 2)
+            (lines, footer, " Launch command ", cursor_line)
         }
         (Some(mode), _) => {
             let mut lines = vec![Line::from(dim(format!("Start {} as:", crate::rules::titles(&picker.chosen())))), Line::from("")];
@@ -790,7 +822,9 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
         }
     };
     let body_len = lines.len();
-    lines.extend(footer);
+    // Footer lines wrap to the window, so a narrow terminal or a long path cuts nothing off.
+    let room = area.width.saturating_sub(4) as usize;
+    lines.extend(footer.into_iter().flat_map(|l| wrap_line(l, room)));
     let w = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 4;
     let (w, h) = (w.min(area.width), (lines.len() as u16 + 2).min(area.height));
     let [_, rect, _] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(w), Constraint::Fill(1)]).areas(area);
@@ -825,9 +859,9 @@ fn draw_prompt_view(f: &mut Frame, area: Rect, view: &crate::prompt_view::Prompt
         .chain(view.notice.iter().map(|n| Line::from(n.clone().green())))
         .collect();
     match view.screen() {
-        Prompt::Idea { idea, name, field } => draw_prompt_idea(f, inner, idea, name, field, status),
+        Prompt::Idea { idea, name, field } => draw_prompt_idea(f, inner, view.kind(), idea, name, field, status),
         Prompt::Generating { model, secs, revising } => {
-            let what = if revising { "Revising the prompt" } else { "Writing the prompt" };
+            let what = format!("{} the {}", if revising { "Revising" } else { "Writing" }, view.kind().noun());
             let lines = vec![
                 Line::from(vec![
                     Span::styled(format!("{} ", SPINNER[(tick / 2 % 4) as usize]), Style::new().fg(ACCENT)),
@@ -873,6 +907,7 @@ fn cursor_lines(text: &crate::prompt_view::TextBox, focused: bool) -> Vec<Line<'
 fn draw_prompt_idea(
     f: &mut Frame,
     area: Rect,
+    kind: crate::rules::Kind,
     idea: &crate::prompt_view::TextBox,
     name: &crate::prompt_view::TextBox,
     field: crate::prompt_view::Field,
@@ -881,10 +916,13 @@ fn draw_prompt_idea(
     use crate::prompt_view::Field;
     let width = area.width as usize;
     let intro = wrap_line(
-        Line::from(dim(
+        Line::from(dim(if kind == crate::rules::Kind::Skill {
+            "Describe the skill you want, in your own words: what Claude should do, and when. Claude writes the skill's \
+             SKILL.md (and any scripts it needs), and you review it before it is saved."
+        } else {
             "Describe the standing instruction you want, in your own words. Claude turns it into a prompt for your library, \
-             and you review it before it is saved.",
-        )),
+             and you review it before it is saved."
+        })),
         width,
     );
     let status: Vec<Line> = status.into_iter().flat_map(|l| wrap_line(l, width)).collect();
@@ -928,7 +966,7 @@ fn draw_prompt_idea(
         Span::styled(format!("[ {text} ]"), style)
     };
     let mut row = vec![
-        button("Write prompt", field == Field::Submit, true),
+        button(if kind == crate::rules::Kind::Skill { "Write skill" } else { "Write prompt" }, field == Field::Submit, true),
         Span::raw("  "),
         button("Cancel", field == Field::Cancel, false),
         Span::raw("   "),
@@ -1008,10 +1046,23 @@ fn draw_prompt_review(
     let wide = area.width >= 120;
     let side_width = if wide { (area.width * 2 / 5).clamp(44, 70) } else { area.width };
     let w = side_width as usize;
+    let skill = view.kind() == crate::rules::Kind::Skill;
+    let saved_at = if skill { crate::skills::skills_dir().join(key).join(crate::skills::SKILL_MD) } else { crate::rules::prompts_dir().join(format!("{key}.md")) };
     let mut side: Vec<Line<'static>> = vec![
         Line::from(vec![Span::styled("Saves as ", Style::new().bold()), Span::styled(key.to_string(), Style::new().fg(ACCENT).bold())]),
-        Line::from(dim(home_relative(&crate::rules::prompts_dir().join(format!("{key}.md"))))),
+        Line::from(dim(home_relative(&saved_at))),
     ];
+    if skill {
+        let changed = view.changed_files();
+        side.push(Line::from(""));
+        side.push(Line::from(Span::styled("Files changed", Style::new().fg(ACCENT).bold())));
+        if changed.is_empty() {
+            side.push(Line::from(dim("none yet")));
+        }
+        for (path, what) in changed {
+            side.push(Line::from(vec![Span::styled("• ", Style::new().fg(ACCENT)), Span::raw(path), dim(format!("  {what}"))]));
+        }
+    }
     let list = |side: &mut Vec<Line<'static>>, heading: &str, items: &[String], numbered: bool, empty: &str| {
         side.push(Line::from(""));
         side.push(Line::from(Span::styled(heading.to_string(), Style::new().fg(ACCENT).bold())));
@@ -1050,7 +1101,7 @@ fn draw_prompt_review(
                     Line::from(vec![Span::styled(format!("Your answer to question {}: ", i + 1), Style::new().fg(ACCENT).bold()), Span::raw(question)])
                 }
                 _ => Line::from(vec![
-                    Span::styled("Ask Claude to change this prompt", Style::new().fg(ACCENT).bold()),
+                    Span::styled(format!("Ask Claude to change this {}", view.kind().noun()), Style::new().fg(ACCENT).bold()),
                     dim(format!("  {} rewrites the draft from what you write here; you review it before it is saved.", view.model())),
                 ]),
             };
@@ -1078,7 +1129,8 @@ fn draw_prompt_review(
         let rows = (side.len() as u16).min(area.height / 2);
         Layout::vertical([Constraint::Fill(1), Constraint::Length(rows)]).spacing(1).areas(area)
     };
-    let block = Block::bordered().border_type(BorderType::Rounded).border_style(FRAME).title_style(TITLE).title(format!(" {key}.md "));
+    let file_title = if skill { format!(" {key}/{} ", crate::skills::SKILL_MD) } else { format!(" {key}.md ") };
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(FRAME).title_style(TITLE).title(file_title);
     let inner = block.inner(draft_area).inner(Margin { horizontal: 1, vertical: 0 });
     f.render_widget(block, draft_area);
     let rows: Vec<Line> = markdown_lines(&draft.body).into_iter().flat_map(|l| wrap_line(l, inner.width as usize)).collect();
@@ -2390,7 +2442,3 @@ mod tests {
         assert_eq!(line.spans, vec![dim("Edit the line · "), "enter".bold(), dim(" keeps it")]);
     }
 }
-
-
-
-

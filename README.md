@@ -53,7 +53,7 @@ marsad actions     # what marsad did, refused or held, and who asked
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session details · `tab` subagents · `y` copy the session id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session details · `tab` subagents · `y` copy the session id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts and skills, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new prompt or skill, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 The mouse wheel works like `↑↓` in every list and pane; to select text with the mouse, hold `Shift` (`Option` in macOS Terminal and iTerm2) while you drag.
 In session details and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session details also: `f` filter by event kind · `J`/`K` scroll the selected event's details.
@@ -473,6 +473,36 @@ marsad prompt versions short-prs                               # earlier version
 marsad prompt versions                                         # deleted prompts that can be restored
 marsad prompt restore short-prs 2                              # make v2 the prompt again; without a number, the newest
 ```
+
+### Skills
+
+The picker lists the prompts under a **Prompts** heading, then the skills under a **Skills** heading. Each skill shows the first sentence of its description, and the highlighted one shows the whole description, which says when Claude loads it. A ticked skill goes into the launch file as a short section: the session must load each skill with the Skill tool before the first step its description names, and follow it for the whole session. An agent team's teammates' file gets the same section. marsad remembers the ticked skills with the prompts.
+
+marsad ships one skill, **Easy English** (`easy-english`): Claude writes technical English that every reader understands on the first read, whatever their first language, in commit messages, pull requests, comments, docs, UI text and long replies. It comes with a checker (`scripts/check.py`, Python 3 with no packages) that finds long sentences, idioms, noun stacks and words outside a B2 word list. Without Python 3 the skill skips the checker and applies its rules by hand.
+
+Claude Code loads skills from `~/.claude/skills/`, so when you copy a command with a skill ticked, marsad makes sure the skill is there:
+
+- No copy there: marsad installs its library copy, with a `.marsad-skill.json` file that records which files it wrote.
+- A copy marsad installed that nobody changed since: marsad updates it to the library's version.
+- Any other copy (one you wrote, or one marsad installed that you changed by hand): marsad uses it as it is and never overwrites it.
+
+The footer says which of these happened. `MARSAD_CLAUDE_SKILLS` points marsad at another skills folder, for testing.
+
+**Your own skills** are folders in `~/.marsad/skills/<name>/`, each with a `SKILL.md`, tagged `[yours]`. `n` on a skill in the picker writes a new skill from a rough idea (on a prompt, it writes a new prompt), in the same text box and review as a prompt. Claude writes the `SKILL.md` frontmatter (`name`, and a `description` that names the concrete moments to load the skill and when not to), the steps, and any scripts the skill needs. The review lists the files the draft changes. `e` on one of your skills opens the review with the change box open; Claude may change `SKILL.md` and the skill's other text files, and large data files are kept as they are. From the review, `e` opens `SKILL.md` in `$EDITOR`. `e` on a built-in skill saves a copy under a new name; the copy's `name` and its paths (`~/.claude/skills/<name>/…`) follow the new name. When you save an edit, marsad also updates the installed copy in `~/.claude/skills/` if it installed that copy and nobody changed it; otherwise it tells you and leaves it alone. Every edit, rename, restore and delete keeps the whole folder it replaces in `~/.marsad/skills/.versions/<name>/`, up to the newest 20 per skill; `v` lists them and `enter` restores one. Deleting a skill leaves its installed copy in `~/.claude/skills/`.
+
+```sh
+marsad skill list                                     # built-in and your own skills, and which are installed
+marsad skill new "check that every migration has a rollback"   # write, review, save; --from <file> or stdin also work
+marsad skill edit my-skill                            # SKILL.md in $EDITOR; --with "<change>" revises the skill with Claude
+marsad skill copy easy-english --as plain-english     # a copy of a built-in skill you can change
+marsad skill rm my-skill                              # its folder is kept as a version
+marsad skill versions my-skill                        # earlier versions; add a number to print one's SKILL.md
+marsad skill restore my-skill 2                       # make v2 the skill again; without a number, the newest
+marsad skill install easy-english                     # install into ~/.claude/skills unless a copy is there
+marsad rules coordination easy-english                # a launch command with a prompt and a skill
+```
+
+Easy English's word lists are the CEFR-J Wordlist 1.5 (Yukio Tono, Tokyo University of Foreign Studies; free for research and commercial use with this citation) and the New General Service List 1.2 (Browne, Culligan and Phillips; CC BY-SA 4.0). They are included unchanged; `assets/skills/easy-english/data/SOURCES.md` has the full credits.
 
 Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.marsad/launch/`, written when the command is copied and named after its role, its prompts and a hash of its text, such as `lead-coordination+output-hygiene-8873230f.md`. A session's or lead's file whose command hasn't been copied for a week is removed (a conversation keeps the prompt it started with); a teammates' file is kept, since a resumed lead still points at it. `marsad coordination` prints the stable `~/.marsad/coordination.md`.
 

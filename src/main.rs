@@ -30,6 +30,7 @@ mod risk;
 mod rules;
 mod settings;
 mod share;
+mod skills;
 mod share_history;
 mod share_view;
 mod shot;
@@ -109,6 +110,9 @@ enum Cmd {
     /// Write, edit, copy or delete your own prompts: `new` drafts one from a rough idea with Claude.
     #[command(subcommand)]
     Prompt(prompt_gen::PromptCmd),
+    /// List, write, edit, copy, delete or install skills: `new` writes one from a rough idea with Claude.
+    #[command(subcommand)]
+    Skill(prompt_gen::SkillCmd),
     /// Print the `claude` command that starts a session with the coordination rules (`marsad rules coordination`).
     Coordination(rules::CoordinationArgs),
     /// Free disk space and the levels at which sessions are warned and stopped (--guard on/off).
@@ -237,6 +241,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
         Some(Cmd::Context(args)) => context::run(args),
         Some(Cmd::Rules(args)) => rules::run(args),
         Some(Cmd::Prompt(cmd)) => prompt_gen::run(cmd),
+        Some(Cmd::Skill(cmd)) => prompt_gen::run_skill(cmd),
         Some(Cmd::Coordination(args)) => rules::run_coordination(args),
         Some(Cmd::Export { file }) => portable::export(file),
         Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
