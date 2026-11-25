@@ -1,11 +1,11 @@
-//! The dashboard's prompt writer, opened from the `c` picker: a rough idea in, a reviewed prompt in
-//! the user's library out. The idea goes to `claude -p` on a thread; the review shows the draft, what
+//! The dashboard's prompt and skill writer, opened from the `c` picker: a rough idea in, a reviewed
+//! prompt or skill in the user's library out. The idea goes to `claude -p` on a thread; the review shows the draft, what
 //! it assumed and what it left open, and the draft can be edited, revised with feedback or renamed
 //! before it is saved. Editing an existing prompt opens on the box that asks Claude for a change. The
 //! picker routes keys here while it is open.
 
-use crate::prompt_gen::{Draft, Request};
-use crate::rules::Rule;
+use crate::prompt_gen::{Draft, DraftFile, Request};
+use crate::rules::{Kind, Rule};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -15,27 +15,41 @@ use std::sync::Arc;
 use std::time::Instant;
 
 type GenerateFn = dyn Fn(&Request, &AtomicBool) -> Result<Draft, String> + Send + Sync;
-type SaveFn = dyn Fn(&str, &str, Option<&str>) -> Result<PathBuf, String> + Send + Sync;
+type FilesFn = dyn Fn(&str) -> Vec<crate::skills::File> + Send + Sync;
+/// (key, draft, the user's entry it replaces, the built-in one it copies).
+type SaveFn = dyn Fn(&str, &Draft, Option<&str>, Option<&str>) -> Result<PathBuf, String> + Send + Sync;
 
 /// What the writer runs: the real thing in the dashboard, fakes in tests.
 #[derive(Clone)]
 pub struct Env {
     /// Runs on a thread; stops early once the flag is set.
     pub generate: Arc<GenerateFn>,
-    /// Saves (key, body, the key it replaces) and returns the file's path.
+    /// Saves the draft and returns the path of its file or folder.
     pub save: Arc<SaveFn>,
     pub library: Arc<dyn Fn() -> Vec<Rule> + Send + Sync>,
+    /// A skill's files in the library, by key, for a revision.
+    pub files: Arc<FilesFn>,
     /// The model named while generating.
     pub model: String,
+    /// What is written: a prompt or a skill.
+    pub kind: Kind,
 }
 
 impl Env {
-    pub fn real() -> Self {
+    pub fn real(kind: Kind) -> Self {
         Env {
             generate: Arc::new(crate::prompt_gen::generate),
-            save: Arc::new(|key, body, replacing| crate::rules::save_own(key, body, replacing).map_err(|e| format!("{e:#}"))),
+            save: Arc::new(move |key, draft, replacing, copy_of| {
+                match kind {
+                    Kind::Prompt => crate::rules::save_own(key, &draft.body, replacing),
+                    Kind::Skill => crate::skills::save_draft(key, draft, replacing, copy_of),
+                }
+                .map_err(|e| format!("{e:#}"))
+            }),
             library: Arc::new(crate::rules::library),
+            files: Arc::new(|key| crate::skills::find(key).map(|s| s.files).unwrap_or_default()),
             model: crate::settings::generator_model(),
+            kind,
         }
     }
 }
@@ -173,6 +187,8 @@ pub struct PromptView {
     replacing: Option<String>,
     /// The built-in prompt this is a copy of.
     copy_of: Option<String>,
+    /// The skill's files in the library before this draft, which the draft changes.
+    base: Vec<crate::skills::File>,
     editing: EditTarget,
     /// The draft has changes that aren't saved: a new or revised draft, an edit or a rename.
     dirty: bool,
@@ -198,6 +214,7 @@ impl PromptView {
             key: String::new(),
             replacing: None,
             copy_of: None,
+            base: Vec::new(),
             editing: EditTarget::Idea,
             dirty: false,
             discarding: false,
@@ -213,12 +230,15 @@ impl PromptView {
         let mut view = PromptView::new(env);
         view.idea = TextBox::of(rule.body());
         view.draft = Some(Draft::of(rule));
+        if rule.kind == Kind::Skill {
+            view.base = (view.env.files)(&rule.key);
+        }
         if rule.own {
             (view.key, view.replacing) = (rule.key.clone(), Some(rule.key.clone()));
         } else {
             view.key = crate::rules::suggest_key(&(view.env.library)(), &format!("{}-copy", rule.key), &rule.title);
             view.copy_of = Some(rule.key.clone());
-            view.notice = Some(format!("{} is built in, so this saves a copy to your library.", rule.title));
+            view.notice = Some(format!("{} is built in, so this saves a copy to your library as {}.", rule.title, view.key));
         }
         view.phase = Phase::Line(LineFor::Feedback, TextBox::default());
         view
@@ -229,13 +249,40 @@ impl PromptView {
         &self.env.model
     }
 
-    pub fn title(&self) -> &'static str {
-        match (&self.phase, &self.replacing, &self.copy_of) {
-            (Phase::Idea | Phase::Generating { .. }, None, None) if self.draft.is_none() => " New prompt ",
-            (_, Some(_), _) => " Edit prompt ",
-            (_, _, Some(_)) => " Copy prompt ",
-            _ => " Review prompt ",
+    pub fn kind(&self) -> Kind {
+        self.env.kind
+    }
+
+    pub fn title(&self) -> String {
+        let verb = match (&self.phase, &self.replacing, &self.copy_of) {
+            (Phase::Idea | Phase::Generating { .. }, None, None) if self.draft.is_none() => "New",
+            (_, Some(_), _) => "Edit",
+            (_, _, Some(_)) => "Copy",
+            _ => "Review",
+        };
+        format!(" {verb} {} ", self.env.kind.noun())
+    }
+
+    /// Each file a skill draft changes from the library copy, with what happens to it: `new`,
+    /// `changed` or `removed`. Empty for a prompt.
+    pub fn changed_files(&self) -> Vec<(String, &'static str)> {
+        let Some(draft) = self.draft.as_ref().filter(|_| self.env.kind == Kind::Skill) else { return Vec::new() };
+        let old = |path: &str| self.base.iter().find(|f| f.path == path);
+        let mut out = Vec::new();
+        match old(crate::skills::SKILL_MD).and_then(crate::skills::File::text).map(str::trim) {
+            None => out.push((crate::skills::SKILL_MD.to_string(), "new")),
+            Some(text) if text != draft.body.trim() => out.push((crate::skills::SKILL_MD.to_string(), "changed")),
+            Some(_) => {}
         }
+        for f in &draft.files {
+            match old(&f.path) {
+                None => out.push((f.path.clone(), "new")),
+                Some(o) if o.bytes != f.content.as_bytes() => out.push((f.path.clone(), "changed")),
+                Some(_) => {}
+            }
+        }
+        out.extend(draft.removed.iter().filter(|p| old(p).is_some()).map(|p| (p.clone(), "removed")));
+        out
     }
 
     pub fn screen(&self) -> Screen<'_> {
@@ -277,6 +324,11 @@ impl PromptView {
         };
         match result {
             Ok(draft) => {
+                // A revision returns only the files it changed, on top of the draft before it.
+                let draft = match &self.draft {
+                    Some(earlier) => draft.on_top_of(earlier),
+                    None => draft,
+                };
                 // The first draft names itself; a revision keeps the name already shown.
                 if self.draft.is_none() {
                     let name = self.name.text();
@@ -287,7 +339,7 @@ impl PromptView {
                 self.phase = Phase::Review;
             }
             Err(why) => {
-                self.warning = Some(format!("Couldn't write the prompt: {why}"));
+                self.warning = Some(format!("Couldn't write the {}: {why}", self.env.kind.noun()));
                 self.back();
             }
         }
@@ -311,12 +363,29 @@ impl PromptView {
 
     /// The request for a first draft, or for a revision of the current one with `feedback`.
     fn request(&self, feedback: Option<String>) -> Request {
-        Request {
+        let mut req = Request {
             idea: self.idea.text(),
             name: self.name.text().trim().to_string(),
             previous: feedback.as_ref().and(self.draft.as_ref()).map(|d| d.body.clone()),
             feedback: feedback.unwrap_or_default(),
+            kind: self.env.kind,
+            ..Request::default()
+        };
+        if self.env.kind == Kind::Skill && req.previous.is_some() {
+            // Claude sees the skill's files as the draft has them now.
+            let (sent, named) = crate::skills::for_revision(&self.base);
+            let draft = self.draft.as_ref();
+            let mut files: Vec<DraftFile> = sent
+                .iter()
+                .filter(|f| !draft.is_some_and(|d| d.removed.contains(&f.path) || d.files.iter().any(|n| n.path == f.path)))
+                .map(|f| DraftFile { path: f.path.clone(), content: f.text().unwrap_or_default().to_string() })
+                .collect();
+            files.extend(draft.map(|d| d.files.clone()).unwrap_or_default());
+            files.sort_by(|a, b| a.path.cmp(&b.path));
+            req.files = files;
+            req.other_files = named.into_iter().filter(|p| !draft.is_some_and(|d| d.removed.contains(p))).collect();
         }
+        req
     }
 
     fn save(&mut self) -> Outcome {
@@ -325,7 +394,7 @@ impl PromptView {
             self.warning = Some(format!("Can't save as {}: {why}. Press n to rename it.", self.key));
             return Outcome::Stay;
         }
-        match (self.env.save)(&self.key, &draft.body, self.replacing.as_deref()) {
+        match (self.env.save)(&self.key, draft, self.replacing.as_deref(), self.copy_of.as_deref()) {
             Ok(_) => Outcome::Saved { key: self.key.clone(), replaced: self.replacing.clone() },
             Err(why) => {
                 self.warning = Some(format!("Couldn't save: {why}"));
@@ -514,6 +583,7 @@ mod tests {
             body: format!("# {title}\n\nKeeps pull requests short.\n\n- Under 150 words.\n"),
             assumptions: vec!["Descriptions only.".into()],
             questions: questions.iter().map(|q| q.to_string()).collect(),
+            ..Draft::default()
         }
     }
 
@@ -539,12 +609,14 @@ mod tests {
                 a.lock().unwrap().push(req.clone());
                 answers.lock().unwrap().remove(0)
             }),
-            save: Arc::new(move |k, b, r| {
-                s.lock().unwrap().push((k.into(), b.into(), r.map(String::from)));
+            save: Arc::new(move |k, d, r, _| {
+                s.lock().unwrap().push((k.into(), d.body.clone(), r.map(String::from)));
                 Ok(PathBuf::from(format!("/p/{k}.md")))
             }),
             library: Arc::new(move || lib.clone()),
+            files: Arc::new(|_| Vec::new()),
             model: "fable".into(),
+            kind: Kind::Prompt,
         };
         (env, asked, saved)
     }
@@ -699,7 +771,7 @@ mod tests {
 
         let (e, _, saved) = fake(Vec::new(), lib.clone());
         let mut v = PromptView::revise(e, &lib[1]);
-        assert_eq!((v.title(), v.key.as_str()), (" Copy prompt ", "output-hygiene-copy"));
+        assert_eq!((v.title().as_str(), v.key.as_str()), (" Copy prompt ", "output-hygiene-copy"));
         assert!(v.notice.as_deref().unwrap().contains("saves a copy"));
         assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Stay, "an empty request goes back to the draft");
         assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "output-hygiene-copy".into(), replaced: None });
@@ -718,6 +790,46 @@ mod tests {
         wait(&mut v);
         assert_eq!(v.on_key(key(KeyCode::Char('q'))), Outcome::Stay, "q doesn't throw a draft away");
         assert!(matches!(v.screen(), Screen::Review { .. }));
+    }
+
+    #[test]
+    fn editing_a_builtin_skill_sends_its_files_and_saves_a_copy() {
+        let skills = crate::skills::library_in(Path::new("/nonexistent"));
+        let lib = [crate::rules::builtin_rules(), crate::skills::rules(&skills)].concat();
+        let rule = lib.iter().find(|r| r.key == "easy-english").unwrap().clone();
+        let revised = Draft {
+            key: "easy-english".into(),
+            body: rule.body().replace("# Easy English", "# Easier English"),
+            files: vec![DraftFile { path: "data/extra.txt".into(), content: "x".into() }],
+            kind: Kind::Skill,
+            ..Draft::default()
+        };
+        let (env, asked, _) = fake(vec![Ok(revised)], lib.clone());
+        let copies = Arc::new(Mutex::new(Vec::new()));
+        let c = copies.clone();
+        let files = skills[0].files.clone();
+        let env = Env {
+            kind: Kind::Skill,
+            files: Arc::new(move |_| files.clone()),
+            save: Arc::new(move |k, d, r, copy| {
+                c.lock().unwrap().push((k.to_string(), d.files.len(), r.map(String::from), copy.map(String::from)));
+                Ok(PathBuf::from(k))
+            }),
+            ..env
+        };
+        let mut v = PromptView::revise(env, &rule);
+        assert_eq!(v.title(), " Copy skill ");
+        assert!(v.changed_files().is_empty(), "nothing changed yet");
+        typed(&mut v, "shorter");
+        v.on_key(key(KeyCode::Enter));
+        wait(&mut v);
+        let req = asked.lock().unwrap()[0].clone();
+        assert_eq!(req.kind, Kind::Skill);
+        assert!(req.files.iter().any(|f| f.path == "scripts/check.py"), "Claude sees the script");
+        assert!(req.other_files.contains(&"data/ngsl-forms.csv".to_string()), "and is told of the word lists");
+        assert_eq!(v.changed_files(), [("SKILL.md".to_string(), "changed"), ("data/extra.txt".to_string(), "new")]);
+        assert_eq!(v.on_key(key(KeyCode::Enter)), Outcome::Saved { key: "easy-english-copy".into(), replaced: None });
+        assert_eq!(copies.lock().unwrap()[0], ("easy-english-copy".into(), 1, None, Some("easy-english".into())));
     }
 
     #[test]

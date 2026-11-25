@@ -220,13 +220,14 @@ pub struct RulesPicker {
     pub deleting: Option<usize>,
     /// The earlier versions of a prompt being browsed, opened with `v`.
     pub versions: Option<VersionList>,
-    /// The prompt deleted last, which `u` brings back.
-    pub restorable: Option<String>,
+    /// The prompt or skill deleted last, which `u` brings back.
+    pub restorable: Option<(String, crate::rules::Kind)>,
 }
 
 /// The earlier versions of one of the user's prompts, newest first.
 pub struct VersionList {
     pub key: String,
+    pub kind: crate::rules::Kind,
     pub title: String,
     pub list: Vec<crate::rules::Version>,
     pub cursor: usize,
@@ -616,16 +617,25 @@ impl App {
             Outcome::Close => self.prompt_view = None,
             Outcome::Edit(text) => return Action::EditPrompt(text),
             Outcome::Saved { key, replaced } => {
+                let kind = view.kind();
                 self.prompt_view = None;
+                let noun = kind.noun();
+                // An edited skill also reaches the copy marsad installed for Claude Code, unless
+                // someone changed that copy by hand.
+                let installed = match (kind == crate::rules::Kind::Skill).then(|| crate::skills::sync_installed(&key)).flatten() {
+                    Some(Ok(report)) => format!(" · {}", report.message()),
+                    Some(Err(e)) => format!(" · couldn't update the installed copy: {e:#}"),
+                    None => String::new(),
+                };
                 match self.rules_picker.as_mut() {
                     Some(picker) => {
-                        // A new prompt or a copy is ticked; an edit or rename keeps the tick it had.
+                        // A new entry or a copy is ticked; an edit or rename keeps the tick it had.
                         let tick = replaced.is_none_or(|old| picker.chosen().iter().any(|r| r.key == old));
                         picker.reload(crate::rules::library(), Some(&key), tick);
                         let ticked = if tick { " and ticked it" } else { "" };
-                        self.info = Some(format!("saved {key} to your prompts{ticked} "));
+                        self.info = Some(format!("saved {key} to your {noun}s{ticked}{installed} "));
                     }
-                    None => self.info = Some(format!("saved {key} to your prompts · c to start a session with it ")),
+                    None => self.info = Some(format!("saved {key} to your {noun}s{installed} · c to start a session with it ")),
                 }
             }
         }
@@ -639,21 +649,30 @@ impl App {
         if code != KeyCode::Char('y') {
             return;
         }
-        let key = picker.library[i].key.clone();
-        match crate::rules::remove_own(&key) {
+        let (key, kind) = (picker.library[i].key.clone(), picker.library[i].kind);
+        let removed = match kind {
+            crate::rules::Kind::Prompt => crate::rules::remove_own(&key),
+            crate::rules::Kind::Skill => crate::skills::remove_own(&key),
+        };
+        match removed {
             Ok(_) => {
                 picker.reload(crate::rules::library(), None, false);
-                picker.restorable = Some(key.clone());
+                picker.restorable = Some((key.clone(), kind));
                 self.info = Some(format!("deleted {key} · u brings it back "));
             }
             Err(e) => self.error = Some(format!("{e:#} ")),
         }
     }
 
-    /// Makes version `number` of `key` (the newest when None) the prompt again and highlights it.
-    fn restore_prompt(&mut self, key: &str, number: Option<u32>) {
+    /// Makes version `number` of `key` (the newest when None) the prompt or skill again and
+    /// highlights it.
+    fn restore_prompt(&mut self, key: &str, kind: crate::rules::Kind, number: Option<u32>) {
         let Some(picker) = self.rules_picker.as_mut() else { return };
-        match crate::rules::restore_own(key, number) {
+        let restored = match kind {
+            crate::rules::Kind::Prompt => crate::rules::restore_own(key, number),
+            crate::rules::Kind::Skill => crate::skills::restore_own(key, number),
+        };
+        match restored {
             Ok(v) => {
                 picker.reload(crate::rules::library(), Some(key), false);
                 (picker.versions, picker.restorable) = (None, None);
@@ -676,8 +695,8 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => list.cursor = (list.cursor + 1).min(last),
             KeyCode::Up | KeyCode::Char('k') => list.cursor = list.cursor.saturating_sub(1),
             KeyCode::Enter => {
-                let (key, number) = (list.key.clone(), list.list.get(list.cursor).map(|v| v.number));
-                self.restore_prompt(&key, number);
+                let (key, kind, number) = (list.key.clone(), list.kind, list.list.get(list.cursor).map(|v| v.number));
+                self.restore_prompt(&key, kind, number);
             }
             _ => {}
         }
@@ -721,11 +740,12 @@ impl App {
         let highlighted = picker.library.get(picker.cursor);
         match code {
             KeyCode::Esc | KeyCode::Char('q' | 'c') => self.rules_picker = None,
-            KeyCode::Char('n') => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real())),
+            KeyCode::Char('n') => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real(crate::rules::Kind::Prompt))),
+            KeyCode::Char('s') => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real(crate::rules::Kind::Skill))),
             KeyCode::Char('e') => {
                 match highlighted.map(|rule| (rule, crate::rules::copy_problem(rule))) {
                     Some((_, Some(why))) => self.error = Some(format!("{why} ")),
-                    Some((rule, None)) => self.prompt_view = Some(crate::prompt_view::PromptView::revise(crate::prompt_view::Env::real(), rule)),
+                    Some((rule, None)) => self.prompt_view = Some(crate::prompt_view::PromptView::revise(crate::prompt_view::Env::real(rule.kind), rule)),
                     None => {}
                 }
             }
@@ -736,18 +756,21 @@ impl App {
             },
             KeyCode::Char('v') => match highlighted {
                 Some(rule) if rule.own => {
-                    let list = crate::rules::versions(&rule.key);
+                    let list = match rule.kind {
+                        crate::rules::Kind::Prompt => crate::rules::versions(&rule.key),
+                        crate::rules::Kind::Skill => crate::skills::versions(&rule.key),
+                    };
                     if list.is_empty() {
                         self.info = Some(format!("{} has no earlier versions yet; one is kept each time it changes ", rule.title));
                     } else {
-                        picker.versions = Some(VersionList { key: rule.key.clone(), title: rule.title.clone(), list, cursor: 0 });
+                        picker.versions = Some(VersionList { key: rule.key.clone(), kind: rule.kind, title: rule.title.clone(), list, cursor: 0 });
                     }
                 }
                 Some(rule) => self.error = Some(format!("{} is built in, so it has no versions ", rule.title)),
                 None => {}
             },
             KeyCode::Char('u') => match picker.restorable.clone() {
-                Some(key) => self.restore_prompt(&key, None),
+                Some((key, kind)) => self.restore_prompt(&key, kind, None),
                 None => self.error = Some("nothing deleted to bring back ".into()),
             },
             KeyCode::Down | KeyCode::Char('j') => picker.cursor = (picker.cursor + 1).min(last),
@@ -764,6 +787,14 @@ impl App {
     /// path, writing the files first. False when a file couldn't be written, so nothing was copied.
     fn copy_launch_command(&mut self, chosen: &[&crate::rules::Rule], choice: crate::rules::Choice) -> bool {
         let mode = choice.mode();
+        // A ticked skill must be where Claude Code loads skills before a session is told to use it.
+        let installed = match crate::skills::provide(chosen) {
+            Ok(reports) => reports.iter().map(|r| format!(" · {}", r.message())).collect::<String>(),
+            Err(e) => {
+                self.error = Some(format!("{e:#} "));
+                return false;
+            }
+        };
         let path = match crate::rules::ensure(chosen, mode) {
             Ok(path) => path,
             Err(e) => {
@@ -775,12 +806,12 @@ impl App {
         let command = if path_only { path.to_string_lossy().into_owned() } else { crate::rules::launch_command(&path) };
         let headline = match crate::clipboard::copy(&command) {
             crate::clipboard::Copied::Native(_) if path_only => {
-                self.info = Some(format!("copied: the path of {} · paste it into a running session ", crate::rules::titles(chosen)));
+                self.info = Some(format!("copied: the path of {} · paste it into a running session{installed} ", crate::rules::titles(chosen)));
                 return true;
             }
             crate::clipboard::Copied::Native(_) => {
                 let lead = if mode == crate::rules::Mode::Team { " as a team lead" } else { "" };
-                self.info = Some(format!("copied: claude{lead} with {} · it applies to new conversations ", crate::rules::titles(chosen)));
+                self.info = Some(format!("copied: claude{lead} with {} · it applies to new conversations{installed} ", crate::rules::titles(chosen)));
                 return true;
             }
             crate::clipboard::Copied::Terminal => "Sent to your terminal's clipboard, if it allows that. To copy it by hand:",
@@ -1200,7 +1231,7 @@ impl App {
             (View::List | View::History | View::Agents, KeyCode::Char('y')) => self.copy_session_id(),
             (View::List | View::History | View::Agents, KeyCode::Char('b')) => self.open_board(),
             (View::List | View::Board, KeyCode::Char('c')) => self.open_rules_picker(),
-            (View::List, KeyCode::Char('n')) => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real())),
+            (View::List, KeyCode::Char('n')) => self.prompt_view = Some(crate::prompt_view::PromptView::new(crate::prompt_view::Env::real(crate::rules::Kind::Prompt))),
             (View::Board, KeyCode::Esc | KeyCode::Char('b') | KeyCode::Left | KeyCode::Char('h')) => self.view = View::List,
             (View::Board, KeyCode::Down | KeyCode::Char('j')) => self.board.scroll(1),
             (View::Board, KeyCode::Up | KeyCode::Char('k')) => self.board.scroll(-1),

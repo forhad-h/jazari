@@ -70,6 +70,13 @@ A markdown file of instructions for a session's system prompt: one marsad ships,
 The `claude -p` run that turns a user's rough idea into a rules file for their library, returning the draft with what it assumed and the questions the idea left open. It runs isolated from the user's projects and settings, and keeps the user's situation out of the rules it writes.
 *Avoid:* template, wizard
 
+### Skill
+A folder with a `SKILL.md` (frontmatter `name` and `description`, then instructions) and any scripts or data it needs: one marsad ships, such as Easy English, or the user's own in `<data dir>/skills/`. A launch file names the ticked skills, and the session must load each one before the first step its description names. Claude Code loads skills only from `~/.claude/skills/`, so marsad installs a ticked skill there when it is missing.
+
+### Installed copy
+A skill folder in `~/.claude/skills/`. marsad writes `.marsad-skill.json` into a copy it installs, with a hash of its files, and updates that copy only while the files still match the hash. A copy without that file belongs to the user and is never overwritten.
+*Avoid:* deploy, sync
+
 ### Prompt version
 An earlier text of one of the user's prompts, kept when the prompt is edited, renamed, restored over or deleted. Versions are numbered per prompt and follow it through a rename; restoring one keeps the text it replaces as a new version.
 

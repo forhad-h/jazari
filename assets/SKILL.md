@@ -104,7 +104,7 @@ the user asked you to keep going in this session.
 ## Several sessions in one repo
 
 ```sh
-marsad rules                                         # lists the prompts sessions can start with (built-in and the user's own)
+marsad rules                                         # lists the prompts and skills sessions can start with (built-in and the user's own)
 marsad rules coordination --format json              # {command, protocol_path, rules, mode}: starts a session with the coordination rules
 marsad rules coordination output-hygiene             # both, merged into one file (claude reads only one prompt file)
 marsad rules output-hygiene --team                   # starts an agent team lead that passes the prompts on to its teammates
@@ -115,7 +115,18 @@ marsad prompt copy <name> --as <new-name>            # copies a prompt (a built-
 marsad prompt rm <name>                              # deletes one of the user's prompts, keeping its text as a version; built-in ones can't be deleted
 marsad prompt versions [<name> [<n>]]                # a prompt's earlier versions (v<n>, when replaced, title, summary), or version n's text; no name lists deleted prompts
 marsad prompt restore <name> [<n>]                   # makes version n (default: newest) the prompt again, or brings back a deleted one
+marsad rules coordination easy-english               # a skill key works like a prompt key: the session must use that skill
+marsad skill list --format json                      # skills: [{name, title, summary, own, installed}]
+marsad skill new "<rough idea>" --yes --format json  # Claude writes a skill folder (SKILL.md and any scripts) and saves it
+marsad skill edit <name> --with "<feedback>" --yes   # revises one of the user's skills with Claude
+marsad skill copy <name> --as <new-name>             # copies a skill (a built-in one, say) into the user's library
+marsad skill rm|versions|restore <name> [<n>]        # as for prompts; a version is the whole folder
+marsad skill install <name>                          # installs it into ~/.claude/skills unless a copy is there already
 ```
+
+A ticked skill is installed into `~/.claude/skills/<name>/` when its command is copied, unless a copy
+is there. marsad updates only a copy it installed (it has `.marsad-skill.json`) that nobody changed;
+it never overwrites any other copy. The user's own skills are folders in `~/.marsad/skills/`.
 
 The user's prompts are `.md` files in `~/.marsad/prompts/`, and the merged launch files are in
 `~/.marsad/launch/`, named after their role, prompts and a hash, such as
