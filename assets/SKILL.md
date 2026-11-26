@@ -36,7 +36,7 @@ jazari watch say --attention "what you need from the user" # also notifies the u
 jazari build notify "short note for the user"      # send it to the user's paired Telegram chat (if set up)
 jazari build tasks | prefs | quality | limits       # jazari: the queue, the founder's preferences, gate pass rates, usage
 jazari build new|idea|feedback|prefer|forget|mode   # jazari: start or steer products (see `jazari build --help`)
-jazari watch tell <session-id> "message"                  # queue a message another session reads at its next step
+jazari watch tell <session-id> "message"                  # queue a message; an idle session is woken to read it
 jazari watch tell <session-id> --stop                     # stop that session before its next tool call
 ```
 

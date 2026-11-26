@@ -3,6 +3,10 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- `jazari watch tell` and `t` wake an idle session, so it reads the message now (macOS and Linux)
+
 ## 1.0.3 - 2026-11-26
 
 - `jazari update` adds the Claude Code hooks a new version brings, so context warnings, messages and stops work without `jazari install`
