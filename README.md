@@ -563,8 +563,10 @@ login token; the checks and git commands don't. A run is stopped after 45 minute
   still use the network on its own.
 - **The audit record's check stays on your Mac.** Someone with access to your Mac can rewrite the record and its
   saved head together, and `jazari build audit` won't notice. A copy that this machine can't change would fix
-  that, and it is planned. A signal (Ctrl-C, or macOS stopping the service) stops the supervisor at once, so the
-  head isn't saved at the end.
+  that, and it is planned.
+- **Stopping during a task.** Ctrl-C, or macOS stopping the service, lets the supervisor finish the task it is on.
+  Then it saves the audit head and exits. A second Ctrl-C stops it at once. macOS waits only about 20 seconds,
+  so it cuts off a long task. Then the head is not saved, and the task goes back in the queue at the next start.
 - **The hard-line flag comes from the worker.** A worker marks a question as a hard line, so the written override
   is a courtesy check, not a gate. The gates still stop the real risks: the checks, the reviews, and no production,
   payment or outreach credentials in the container.
