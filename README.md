@@ -310,6 +310,52 @@ Before anything is sent, credentials are replaced with `[redacted]`:
 `marsad jazari telegram status` checks the setup, `telegram test` sends a test message, and
 `telegram unpair` forgets the chat.
 
+### The jazari engine
+
+jazari can also do the work: give it a product (a git repo) and tasks. It runs each task as a
+fresh headless Claude session inside that product's Docker container, on your Claude
+subscription.
+
+```sh
+marsad jazari product add shop ~/code/shop     # once per product
+marsad jazari task shop "Add rate limiting to login" --priority 2 --brief "5 tries a minute per IP"
+marsad jazari plan max5                         # pro, max5 or max20: how hard it works
+marsad jazari run                               # the supervisor; --once runs at most one task
+marsad jazari tasks                             # the queue and what each task did
+```
+
+**Before the first run:** save a long-lived Claude login token for the workers. Run `claude setup-token`,
+then on macOS save the token with `security add-generic-password -a "$USER" -s marsad-jazari-claude-token -w`.
+Elsewhere, set `MARSAD_JAZARI_CLAUDE_TOKEN`. Docker must be running.
+
+**What the container gets:** the first task builds the worker image (`jazari-worker:1`) and creates
+the product's container (`jazari-<name>`). The container:
+- sees only the repo, at `/work`;
+- runs as a normal user, with no Linux capabilities;
+- is limited to 2 CPUs, 2 GB of memory and 512 processes.
+
+**How a worker runs:** it runs with permissions bypassed, which applies only inside that container.
+It commits to `jazari/task-<id>` and never pushes. Its final answer is a structured result. A
+finished task can queue up to three follow-up tasks.
+
+**Usage limits:** each run reports the 5-hour and 7-day windows, and jazari waits when it must.
+- When the next task would eat into the share kept for you, jazari sleeps until that window resets.
+  The share is 30%/25% on Pro, 15%/15% on Max 5x and 10%/10% on Max 20x.
+- It also sleeps if a window refused the run.
+- It sleeps when it is ahead of an even pace through the week.
+- A task refused for usage goes back in the queue without counting as a failure.
+- `marsad jazari limits` shows the last reading.
+
+**Telling you:** when Telegram is paired, jazari tells you there when:
+- a task is done or blocked;
+- a task is set aside after 3 failed attempts;
+- it goes to sleep.
+
+**Pausing:** `marsad pause` (or `/pause` in Telegram) pauses it too.
+
+**The record:** every start, finish and sleep is added to `~/.marsad/jazari/audit.jsonl`. Each entry
+carries the hash of the one before it, so `marsad jazari audit` finds an edited or deleted entry.
+
 ### Disk cleanup
 
 `D` in the dashboard (or `marsad clean`) lists what can be removed, measured on disk, in three tiers.

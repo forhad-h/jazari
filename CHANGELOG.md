@@ -8,6 +8,9 @@ GitHub release. Keep each bullet to one short line.
 - `marsad jazari`: pair a Telegram chat with a one-time code, then check, message, stop and pause sessions from it
 - Sessions' `marsad say --attention` notes reach the paired chat; `marsad jazari notify` sends your own
 - Credentials are redacted from everything sent to Telegram, and actions taken from it are recorded with the origin `telegram`
+- `marsad jazari run` works through a task queue: each task is a headless Claude run in the product's own locked-down Docker container
+- jazari sleeps until the 5-hour or 7-day window resets, keeps a share for you by plan (`marsad jazari plan pro|max5|max20`), and spreads the week evenly
+- Finished, blocked and failing tasks are reported on Telegram; `marsad jazari audit` checks the hash-chained audit record
 
 ## 0.21.0 - 2026-11-26
 
