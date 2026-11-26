@@ -6,6 +6,7 @@ GitHub release. Keep each bullet to one short line.
 ## Unreleased
 
 - Telegram pairing codes are 10 letters and digits, and each chat gets one try
+- `jazari build service install|uninstall|status` runs the Telegram bridge and the supervisor in the background on macOS, from login
 
 ## 1.0.1 - 2026-11-26
 

@@ -306,7 +306,32 @@ from your phone. It is off until you set it up, and nothing is sent anywhere bef
    pair again, and the terminal tells you. From then on, the bot obeys
    only the paired chat. Every other chat is ignored and gets no reply.
 4. Start the bridge: `jazari build bridge` keeps running until you stop it, so run it in tmux or a
-   spare terminal.
+   spare terminal. On macOS, `jazari build service install` runs it in the background instead (see
+   Background services).
+
+#### Background services
+
+On macOS, jazari can run the bridge and the supervisor as background services. A service starts
+when you log in. If it stops with an error, macOS starts it again after 60 seconds. Nothing runs
+this way until you install it.
+
+```sh
+jazari build service install               # the bridge
+jazari build service install supervisor    # the supervisor too; it spends your Claude usage
+jazari build service status                # installed? running? where is the log?
+jazari build service uninstall             # stop and remove both; the logs stay
+```
+
+- Each service is a LaunchAgent in `~/Library/LaunchAgents` (`jazari.bridge.plist`,
+  `jazari.supervisor.plist`).
+- Its output goes to `~/.jazari/logs/bridge.log` or `supervisor.log`.
+- The service gets the `PATH` of the shell that installed it, so it finds `docker` and `git`. After
+  you update jazari or change your `PATH`, run `install` again.
+- Stop any bridge you started by hand first. Only one bridge can run at a time. If another copy
+  is still running, the service keeps stopping and starting again every minute, and
+  `service status` tells you.
+- Other systems are not supported yet. There, run `jazari build bridge` and `jazari build run` in
+  tmux or a terminal that stays open.
 
 In the paired chat:
 
@@ -345,6 +370,7 @@ jazari build product add shop ~/code/shop                            # or bring 
 jazari build task shop "Add rate limiting to login" --role backend-engineer --priority 2
 jazari build plan max5                                               # pro, max5 or max20: how hard it works
 jazari build run                                                     # the supervisor; --once runs at most one task
+jazari build service install supervisor                              # macOS: run it in the background, from login
 jazari build tasks                                                   # the queue, and what waits for you
 jazari build answer 12 "Use Twilio"                                  # answer a task's question
 jazari build approve 14                                              # decide on a deploy, spend or contact
