@@ -9,6 +9,15 @@ its own track.
 
 ## How to start
 
+Two pull requests from 2026-11-26 are still open, and their CI runs are not checked yet:
+
+- **#139** adds this file. Until it merges, read this file with `gh pr diff 139` or
+  `git show origin/agent-lead-handoff:HANDOFF.md`.
+- **#137** is the 1.0.9 release.
+
+The lead's first job: check CI on #139 and #137, merge #139, then release 1.0.9 from #137 (see
+"How to release").
+
 Start the lead from the repo, in a terminal outside any Claude Code session:
 
 ```sh
@@ -30,8 +39,9 @@ prompt also tells the teammate to read "Rules for everyone" and that track in `H
 - **Product:** jazari, an AI software company harness and a dashboard for Claude Code sessions.
   The repo is `github.com/forhad-h/jazari`, and it is **public**. Its old name was marsad.
   Versions before 1.0.0 are old marsad releases.
-- **Latest release:** 1.0.9. First check that release PR #137 is merged and that the tag
-  `v1.0.9` exists. If not, merge #137 and tag it, as in "How to release".
+- **Latest release:** 1.0.8. `main` also holds #131 (dashboard answers with Touch ID) and #135
+  (only the installed jazari refreshes the hooks). Release PR #137 turns them into 1.0.9. It is
+  open and not merged.
 - **Founder's machine:** on 1.0.7 or later. The Telegram bridge runs as a launchd service, and
   `jazari update` restarts it by itself.
 - **Open pull requests:** #136 (Build view, draft) and #138 (guard false positives, draft).
