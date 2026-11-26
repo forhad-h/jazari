@@ -382,6 +382,49 @@ impl BuildView {
     }
 }
 
+/// Counts the build questions and approvals that wait for the founder, for the List view. It
+/// reads the store every [`COUNT_EVERY`] on its own thread, and only when the store exists.
+pub struct Watch {
+    rx: Receiver<usize>,
+    pub waiting: usize,
+}
+
+const COUNT_EVERY: Duration = Duration::from_secs(10);
+
+impl Watch {
+    pub fn start() -> Self {
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            let mut db: Option<Db> = None;
+            loop {
+                if db.is_none() && Db::exists() {
+                    db = Db::open().ok();
+                }
+                let n = db.as_ref().and_then(|d| d.waiting().ok()).unwrap_or(0);
+                if tx.send(n).is_err() {
+                    return;
+                }
+                std::thread::sleep(COUNT_EVERY);
+            }
+        });
+        Watch { rx, waiting: 0 }
+    }
+
+    pub fn poll(&mut self) {
+        if let Some(n) = self.rx.try_iter().last() {
+            self.waiting = n;
+        }
+    }
+}
+
+impl BuildView {
+    /// Whether the view holds a box or a second press that a stray key or wheel scroll shouldn't
+    /// type into or confirm.
+    pub fn asking(&self) -> bool {
+        self.input.is_some() || self.pending.is_some()
+    }
+}
+
 /// Reads the store every [`REFRESH`] and after each write, and runs the writes. The store is
 /// opened only when it exists or a write needs it, so looking at the view creates nothing.
 fn worker(actions: Receiver<Action>, out: Sender<Msg>) {
@@ -598,6 +641,16 @@ mod tests {
         assert!(opened.load(std::sync::atomic::Ordering::SeqCst));
         drop(v);
         t.join().unwrap();
+    }
+
+    #[test]
+    fn b_opens_the_view_from_the_list_and_has_no_other_use() {
+        let app = include_str!("app.rs");
+        assert_eq!(app.matches("Char('B')").count(), 1);
+        assert!(app.contains("(View::List, KeyCode::Char('B'))"));
+        for other in [include_str!("clean_view.rs"), include_str!("usage.rs"), include_str!("answer_view.rs"), include_str!("prompt_view.rs"), include_str!("share_view.rs")] {
+            assert!(!other.contains("Char('B')"));
+        }
     }
 
     #[test]

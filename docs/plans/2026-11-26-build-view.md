@@ -226,7 +226,7 @@ The tests use `Store::memory()` and never open the real data folder, Telegram, g
 1. `cargo test` and `cargo clippy --all-targets`.
 2. A throwaway `TestBackend` test at 182×37 and 110×33 with a few products and tasks, deleted after
    the check.
-3. With `MARSAD_HOME=<scratch dir>`:
+3. With `JAZARI_HOME=<scratch dir>`:
    1. Add a product with `jazari build new`.
    2. Block a task by hand in the scratch database.
    3. Answer, approve and deny it from the Build view.

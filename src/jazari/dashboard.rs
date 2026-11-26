@@ -115,12 +115,13 @@ impl Action {
         !matches!(self, Action::Deny { .. })
     }
 
-    /// The reason shown in the system's Touch ID or password dialog.
+    /// The reason in the system's Touch ID or password dialog, which reads "jazari is trying to
+    /// <reason>".
     pub fn reason(&self) -> String {
         match self {
-            Action::Answer { task, .. } | Action::Pick { task, .. } => format!("answer jazari task #{task}"),
-            Action::Approve { task } => format!("approve the request of jazari task #{task}"),
-            Action::Deny { task } => format!("deny the request of jazari task #{task}"),
+            Action::Answer { task, .. } | Action::Pick { task, .. } => format!("answer build task #{task}"),
+            Action::Approve { task } => format!("approve the request of build task #{task}"),
+            Action::Deny { task } => format!("deny the request of build task #{task}"),
             Action::Idea { product, .. } => format!("give {product} a new idea"),
             Action::Task { product, .. } => format!("queue a task for {product}"),
             Action::NewProduct { name, .. } => format!("start the product {name}"),
@@ -142,12 +143,19 @@ pub enum Presence {
 /// Whether this computer can run the presence check. Without it the Build view is read-only plus
 /// deny.
 pub fn presence_available() -> bool {
-    false
+    crate::presence::available()
 }
 
-/// Asks for Touch ID or the Mac password.
-pub fn presence(_reason: &str) -> Presence {
-    Presence::Unavailable
+/// Asks for Touch ID or the Mac password. It blocks for up to 2 minutes, so only the worker thread
+/// calls it.
+pub fn presence(reason: &str) -> Presence {
+    if !crate::presence::available() {
+        Presence::Unavailable
+    } else if crate::presence::confirm(reason) {
+        Presence::Confirmed
+    } else {
+        Presence::Failed
+    }
 }
 
 /// jazari's store, as the Build view uses it.
@@ -169,6 +177,11 @@ impl Db {
 
     pub fn open() -> anyhow::Result<Self> {
         Ok(Db { store: super::open()?, create: super::create_product })
+    }
+
+    /// How many tasks wait for the founder, for the count in the List view.
+    pub fn waiting(&self) -> anyhow::Result<usize> {
+        Ok(self.store.tasks(None, 1000)?.into_iter().map(TaskRow::of).filter(TaskRow::waits).count())
     }
 
     pub fn snapshot(&self, now: f64) -> anyhow::Result<Snapshot> {

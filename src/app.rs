@@ -74,6 +74,8 @@ pub enum View {
     Board,
     /// Caches, build output and Docker data that can be removed (`D`).
     Clean,
+    /// jazari's sandbox work: products, tasks, and what waits for the founder (`B`).
+    Build,
 }
 
 /// Which events the history shows; `f` cycles through them.
@@ -183,6 +185,11 @@ pub struct App {
     pub answer_view: Option<crate::answer_view::AnswerView>,
     /// The cleanup view's state while it is open.
     pub clean: Option<crate::clean_view::CleanView>,
+    /// The Build view's state while it is open.
+    pub build: Option<crate::build_view::BuildView>,
+    /// The count of build questions for the List view. Started in `run()` only, so tests never
+    /// read jazari's store.
+    pub build_watch: Option<crate::build_view::Watch>,
     sampler: crate::system::Sampler,
     /// The always-on-top window while it is open (`P`).
     pub pin: Option<crate::pin::Pin>,
@@ -527,6 +534,8 @@ impl App {
             counter: Counter::default(),
             system: None,
             clean: None,
+            build: None,
+            build_watch: None,
             compose: None,
             control: None,
             answers: None,
@@ -1005,6 +1014,12 @@ impl App {
         if let Some(clean) = self.clean.as_mut() {
             clean.tick();
         }
+        if let Some(build) = self.build.as_mut() {
+            build.tick();
+        }
+        if let Some(watch) = self.build_watch.as_mut() {
+            watch.poll();
+        }
         if let Some(Ok(bytes)) = self.clean_hint_rx.as_ref().map(|rx| rx.try_recv()) {
             self.clean_hint_rx = None;
             if self.info.is_none() && self.error.is_none() {
@@ -1209,7 +1224,8 @@ impl App {
             || self.prompt_view.is_some()
             || self.share.as_ref().is_some_and(|s| s.editing())
             || self.rules_picker.as_ref().is_some_and(|p| p.deleting.is_some())
-            || (self.view == View::Clean && self.clean.as_ref().is_some_and(|c| c.confirm.is_some()));
+            || (self.view == View::Clean && self.clean.as_ref().is_some_and(|c| c.confirm.is_some()))
+            || (self.view == View::Build && self.build.as_ref().is_some_and(|b| b.asking()));
         if !asking {
             let code = if down { KeyCode::Down } else { KeyCode::Up };
             self.on_key(KeyEvent::new(code, KeyModifiers::NONE));
@@ -1249,6 +1265,19 @@ impl App {
             }
             return Action::None;
         }
+        // The Build view gets every key first, so its input box can take `q` and the other letters.
+        if self.view == View::Build
+            && let Some(build) = self.build.as_mut()
+        {
+            if key.code == KeyCode::Char('q') && !build.asking() {
+                return Action::Quit;
+            }
+            if !build.on_key(key) {
+                self.build = None;
+                self.view = View::List;
+            }
+            return Action::None;
+        }
         // Esc dismisses a badge note before it does anything else.
         if key.code == KeyCode::Esc && self.announcing() {
             self.announcement = None;
@@ -1276,6 +1305,10 @@ impl App {
                 if let Some(s) = self.selected_session().filter(|s| s.status != Status::Ended) {
                     self.control = Some(Control { session: s.id.clone(), name: s.project(), interrupt: k == 'X' });
                 }
+            }
+            (View::List, KeyCode::Char('B')) => {
+                self.build = Some(crate::build_view::BuildView::open());
+                self.view = View::Build;
             }
             (View::List, KeyCode::Char('D')) => {
                 self.clean = Some(crate::clean_view::CleanView::open());
@@ -1454,6 +1487,7 @@ fn edit_suspended(text: &str, kind: &str, ext: &str) -> std::io::Result<(Tui, Re
 pub fn run() -> anyhow::Result<()> {
     let mut app = App::new();
     app.answers = crate::answer::server::start();
+    app.build_watch = Some(crate::build_view::Watch::start());
     app.refresh();
     on_signal::install();
     let mut terminal = init_terminal()?;
