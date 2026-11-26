@@ -3,6 +3,10 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- Telegram message text no longer shows in the process list: curl now reads it on stdin
+
 ## 1.0.0 - 2026-11-26
 
 - First release: jazari runs a small AI software company on your Claude subscription, and watches every Claude Code session on your machine

@@ -510,8 +510,6 @@ login token; the checks and git commands don't. A run is stopped after 45 minute
 - **The hard-line flag comes from the worker.** A worker marks a question as a hard line, so the written override
   is a courtesy check, not a gate. The gates still stop the real risks: the checks, the reviews, and no production,
   payment or outreach credentials in the container.
-- **Message text in `ps`.** The text of Telegram messages is passed to `curl` as arguments, so other programs on
-  your Mac can see it briefly. The bot token is not passed this way.
 
 **Usage limits.** Each run reports the 5-hour and 7-day windows, and jazari waits when it must.
 - When the next task would eat into the share kept for you, jazari sleeps until that window resets. The share is

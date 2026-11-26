@@ -23,21 +23,51 @@ impl Curl {
     }
 }
 
+/// curl's fixed arguments. The URL (which holds the token) and the form fields go in the config on
+/// stdin, so the process list shows nothing but these.
+fn curl_args(wait_secs: u64) -> Vec<String> {
+    let mut args: Vec<String> = ["--silent", "--show-error", "--proto", "=https", "-K", "-", "--max-time"].map(String::from).to_vec();
+    args.push((wait_secs + 15).to_string());
+    args
+}
+
+/// A string quoted for a curl config file.
+fn curl_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x0b' => out.push_str("\\v"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The curl config sent on stdin: the URL, then one `data-urlencode` line per form field.
+fn curl_config(token: &str, method: &str, params: &[(&str, String)]) -> String {
+    let mut cfg = format!("url = {}\n", curl_quote(&format!("https://api.telegram.org/bot{token}/{method}")));
+    for (k, v) in params {
+        cfg.push_str(&format!("data-urlencode = {}\n", curl_quote(&format!("{k}={v}"))));
+    }
+    cfg
+}
+
 impl Transport for Curl {
     fn call(&self, method: &str, params: &[(&str, String)], wait_secs: u64) -> anyhow::Result<Value> {
         anyhow::ensure!(
             !self.token.is_empty() && self.token.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-')),
             "the Telegram bot token looks wrong"
         );
-        let mut args: Vec<String> = ["--silent", "--show-error", "--proto", "=https", "-K", "-", "--max-time"].map(String::from).to_vec();
-        args.push((wait_secs + 15).to_string());
-        for (k, v) in params {
-            args.push("--data-urlencode".into());
-            args.push(format!("{k}={v}"));
-        }
-        let mut child = Command::new("curl").args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let mut child = Command::new("curl").args(curl_args(wait_secs)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         if let Some(mut stdin) = child.stdin.take() {
-            writeln!(stdin, "url = \"https://api.telegram.org/bot{}/{method}\"", self.token)?;
+            stdin.write_all(curl_config(&self.token, method, params).as_bytes())?;
         }
         let out = child.wait_with_output()?;
         anyhow::ensure!(out.status.success(), "Telegram couldn't be reached: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -336,5 +366,19 @@ pub mod tests {
         let calls = bot.transport.calls.borrow();
         let markup = &calls[1].1.iter().find(|(k, _)| k == "reply_markup").unwrap().1;
         assert_eq!(markup, r#"{"inline_keyboard":[[{"text":"Approve","callback_data":"/approve 3"}]]}"#);
+    }
+
+    #[test]
+    fn curl_gets_only_fixed_flags_and_the_body_goes_on_stdin() {
+        let args = curl_args(30);
+        assert_eq!(args, ["--silent", "--show-error", "--proto", "=https", "-K", "-", "--max-time", "45"]);
+        let params = [("chat_id", "42".to_string()), ("text", "say \"hi\"\nback\\slash\ttab".to_string())];
+        let cfg = curl_config("123:ABC", "sendMessage", &params);
+        assert_eq!(cfg, concat!(
+            "url = \"https://api.telegram.org/bot123:ABC/sendMessage\"\n",
+            "data-urlencode = \"chat_id=42\"\n",
+            "data-urlencode = \"text=say \\\"hi\\\"\\nback\\\\slash\\ttab\"\n",
+        ));
+        assert_eq!(cfg.lines().count(), 3, "a newline in the text must not start a new config line");
     }
 }
