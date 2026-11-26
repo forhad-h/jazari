@@ -273,6 +273,43 @@ works. Start sessions with the **Working with marsad** prompt (`c`, or `marsad r
 Claude knows to read marsad's notes, post its progress with `marsad say`, wait for resources with
 `marsad system --wait`, and stop when asked.
 
+### Telegram (jazari)
+
+`marsad jazari` connects marsad to a Telegram bot, so you can check on sessions and steer them
+from your phone. It is off until you set it up, and nothing is sent anywhere before that.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`), and send it `/setjoingroups`
+   → Disable so it can't be added to groups.
+2. Save the bot token where marsad reads it, without it passing through a command line or a chat.
+   - On macOS, use the Keychain: `security add-generic-password -a "$USER" -s marsad-jazari-telegram-token -w`.
+   - Elsewhere, set `MARSAD_JAZARI_TELEGRAM_TOKEN`.
+3. Pair your chat: `marsad jazari telegram pair` shows a one-time code. Send that code to the bot in
+   a private chat within 10 minutes. From then on, the bot obeys only that chat. Every other chat
+   is ignored and gets no reply.
+4. Start the bridge: `marsad jazari bridge` keeps running until you stop it, so run it in tmux or a
+   spare terminal.
+
+In the paired chat:
+
+| Command | What it does |
+|---|---|
+| `/status` | Live sessions, which ones need you, and the 5-hour and 7-day usage |
+| `/tell <id> <message>` | A message for a session; give at least 4 letters of its id |
+| `/stop <id>` | Stops a session before its next tool call |
+| `/pause [30m\|2h\|1d]` and `/resume` | The same as `marsad pause` and `marsad resume` |
+
+When a session runs `marsad say --attention "…"`, the bridge sends the note to the chat.
+`marsad jazari notify "…"` sends your own message, from a script or from stdin. `marsad actions`
+lists everything done from Telegram with the origin `telegram`.
+
+Before anything is sent, credentials are replaced with `[redacted]`:
+- known token prefixes (`sk-ant-`, `ghp_`, `github_pat_` and others);
+- Telegram bot tokens;
+- the value in `KEY=value` when the key names a token, secret or password.
+
+`marsad jazari telegram status` checks the setup, `telegram test` sends a test message, and
+`telegram unpair` forgets the chat.
+
 ### Disk cleanup
 
 `D` in the dashboard (or `marsad clean`) lists what can be removed, measured on disk, in three tiers.
