@@ -447,6 +447,9 @@ pub enum SkillCmd {
     Restore(RestoreArgs),
     /// Install a skill into Claude Code's skills folder (~/.claude/skills), unless a copy is there.
     Install(RmArgs),
+    /// What every session start does: install ticked skills that are missing and update installed
+    /// copies that are out of date, in ~/.claude/skills and this folder's .claude/skills.
+    Sync,
 }
 
 pub fn run_skill(cmd: SkillCmd) -> anyhow::Result<()> {
@@ -490,6 +493,24 @@ pub fn run_skill(cmd: SkillCmd) -> anyhow::Result<()> {
                 println!("{}", report.message());
             }
             Ok(())
+        }
+        SkillCmd::Sync => {
+            let cwd = std::env::current_dir().ok();
+            let results = skills::sync_on_start(cwd.as_deref(), &crate::settings::rules());
+            if results.is_empty() {
+                println!("Every installed skill is up to date.");
+            }
+            let mut failed = false;
+            for result in results {
+                match result {
+                    Ok(report) => println!("{}", report.message()),
+                    Err(e) => {
+                        failed = true;
+                        eprintln!("{e:#}");
+                    }
+                }
+            }
+            if failed { anyhow::bail!("some skills could not be synced") } else { Ok(()) }
         }
     }
 }

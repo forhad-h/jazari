@@ -484,9 +484,9 @@ Claude Code loads skills from `~/.claude/skills/`, so when you copy a command wi
 
 - No copy there: marsad installs its library copy, with a `.marsad-skill.json` file that records which files it wrote.
 - A copy marsad installed that nobody changed since: marsad updates it to the library's version.
-- Any other copy (one you wrote, or one marsad installed that you changed by hand): marsad uses it as it is and never overwrites it.
+- Any other copy (one you wrote, or one marsad installed that you changed by hand): marsad uses it as it is, unless the library's skill has a newer `version:` in its frontmatter than the copy (a copy with no version counts as older). Then marsad keeps the old copy in `~/.marsad/skill-backups/<name>/` and installs the new version.
 
-The footer says which of these happened. `MARSAD_CLAUDE_SKILLS` points marsad at another skills folder, for testing.
+The footer says which of these happened. The same check runs at the start of every session: a ticked skill that is missing from `~/.claude/skills` is installed again, and installed copies of library skills, there and in the project's `.claude/skills` folders, are brought up to date. Claude Code picks up a skill installed this way a moment after the session starts, by its next turn at the latest; the launch prompt tells Claude to run `marsad skill sync` if a skill it needs is still missing. `MARSAD_CLAUDE_SKILLS` points marsad at another skills folder, for testing.
 
 **Your own skills** are folders in `~/.marsad/skills/<name>/`, each with a `SKILL.md`, tagged `[yours]`. `n` on a skill in the picker writes a new skill from a rough idea (on a prompt, it writes a new prompt), in the same text box and review as a prompt. Claude writes the `SKILL.md` frontmatter (`name`, and a `description` that names the concrete moments to load the skill and when not to), the steps, and any scripts the skill needs. The review lists the files the draft changes. `e` on one of your skills opens the review with the change box open; Claude may change `SKILL.md` and the skill's other text files, and large data files are kept as they are. From the review, `e` opens `SKILL.md` in `$EDITOR`. `e` on a built-in skill saves a copy under a new name; the copy's `name` and its paths (`~/.claude/skills/<name>/…`) follow the new name. When you save an edit, marsad also updates the installed copy in `~/.claude/skills/` if it installed that copy and nobody changed it; otherwise it tells you and leaves it alone. Every edit, rename, restore and delete keeps the whole folder it replaces in `~/.marsad/skills/.versions/<name>/`, up to the newest 20 per skill; `v` lists them and `enter` restores one. Deleting a skill leaves its installed copy in `~/.claude/skills/`.
 
@@ -499,6 +499,7 @@ marsad skill rm my-skill                              # its folder is kept as a 
 marsad skill versions my-skill                        # earlier versions; add a number to print one's SKILL.md
 marsad skill restore my-skill 2                       # make v2 the skill again; without a number, the newest
 marsad skill install easy-english                     # install into ~/.claude/skills unless a copy is there
+marsad skill sync                                     # what each session start does: install missing ticked skills, update old copies
 marsad rules coordination easy-english                # a launch command with a prompt and a skill
 ```
 

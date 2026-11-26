@@ -1,6 +1,7 @@
 ---
 name: easy-english
-description: "Write technical English that every reader understands on the first read, whatever their first language. Load this skill BEFORE you write or change prose in any of these: a commit message or PR text (before git commit or gh pr create), a code comment of two or more lines, a .md file (docs, README, plan, runbook), an error, log or screen message, UI text, and any chat reply longer than three sentences (explanations, questions, final reports). Also load it when asked to make text simpler, clearer or easier to read. Do not load it for edits that add no prose (code, config, renames, test names) or for text in a language other than English."
+description: "Write technical English that every reader understands on the first read, whatever their first language. Load this skill only when you are about to write English prose for a person to read: a chat reply longer than three sentences (an explanation, a question, a final report), a commit message or PR text (before git commit or gh pr create), a code comment of two or more lines, a .md file (docs, README, plan, runbook), an error, log or screen message, or UI text. Also load it when asked to make text simpler, clearer or easier to read. Load it at the writing step, not at the start of a task: do not load it while you read, search, debug, run commands or tests, or edit code or config, for short status lines, or for text in a language other than English."
+version: 1.1.0
 ---
 
 # Easy English

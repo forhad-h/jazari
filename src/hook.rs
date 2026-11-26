@@ -48,8 +48,14 @@ pub fn run() -> anyhow::Result<()> {
             after_task(&raw);
         }
         Some("Stop") => after_task(&raw),
-        // The disk watcher runs while any session does.
-        Some("SessionStart") => crate::watch::ensure_running(),
+        Some("SessionStart") => {
+            // The disk watcher runs while any session does.
+            crate::watch::ensure_running();
+            // Install a ticked skill that is missing and bring installed copies up to date. This
+            // hook runs async; Claude Code picks up a skill folder that appears after it started.
+            let cwd = raw.get("cwd").and_then(Value::as_str).map(std::path::Path::new);
+            let _ = crate::skills::sync_on_start(cwd, &crate::settings::rules());
+        }
         _ => {}
     }
     Ok(())
