@@ -55,6 +55,17 @@ pub fn run() -> anyhow::Result<()> {
             // hook runs async; Claude Code picks up a skill folder that appears after it started.
             let cwd = raw.get("cwd").and_then(Value::as_str).map(std::path::Path::new);
             let _ = crate::skills::sync_on_start(cwd, &crate::settings::rules());
+            // Add the hooks a newer release registers, for users who never run `jazari update`.
+            // Nothing changes when they are already there, or when jazari isn't installed.
+            let a = crate::act::Action::new(crate::act::Kind::Install, "~/.claude/settings.json").detail("refresh hooks").on_its_own(true);
+            // Only a change is recorded: most session starts find the hooks already current.
+            if crate::act::check(&a).is_ok() {
+                match crate::install::refresh() {
+                    Ok(crate::install::Refresh::Updated) => crate::act::record(&a, "done", ""),
+                    Err(e) => crate::act::record(&a, "failed", &format!("{e:#}")),
+                    Ok(_) => {}
+                }
+            }
         }
         _ => {}
     }

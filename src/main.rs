@@ -72,6 +72,9 @@ enum Top {
         /// Don't install the status line; context size is then estimated from transcripts.
         #[arg(long)]
         no_statusline: bool,
+        /// Only bring the hooks of an installed jazari up to date (run by `jazari update`).
+        #[arg(long, hide = true)]
+        refresh: bool,
     },
     /// Remove jazari's hooks from ~/.claude/settings.json.
     Uninstall,
@@ -98,7 +101,7 @@ impl Top {
         match self {
             Top::Watch { cmd } => cmd,
             Top::Build(c) => Some(Cmd::Build(c)),
-            Top::Install { no_statusline } => Some(Cmd::Install { no_statusline }),
+            Top::Install { no_statusline, refresh } => Some(Cmd::Install { no_statusline, refresh }),
             Top::Uninstall => Some(Cmd::Uninstall),
             Top::Update(a) => Some(Cmd::Update(a)),
             Top::Hook => Some(Cmd::Hook),
@@ -119,6 +122,8 @@ enum Cmd {
     Install {
         #[arg(long)]
         no_statusline: bool,
+        #[arg(long, hide = true)]
+        refresh: bool,
     },
     #[command(hide = true)]
     Uninstall,
@@ -247,7 +252,10 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
             let _ = statusline::run();
             Ok(())
         }
-        Some(Cmd::Install { no_statusline }) => {
+        Some(Cmd::Install { refresh: true, .. }) => {
+            act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("refresh hooks"), install::refresh_cli)
+        }
+        Some(Cmd::Install { no_statusline, refresh: false }) => {
             act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("install"), || install::install(!no_statusline))
         }
         Some(Cmd::Uninstall) => act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("uninstall"), install::uninstall),

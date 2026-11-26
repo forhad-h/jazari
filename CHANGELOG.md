@@ -3,6 +3,12 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- `jazari update` adds the Claude Code hooks a new version brings, so context warnings, messages and stops work without `jazari install`
+- A new session adds missing jazari hooks too; a hook you removed yourself stays removed
+- settings.json is written in one step, and its backup is made only the first time
+
 ## 1.0.2 - 2026-11-26
 
 - Telegram pairing codes are 10 letters and digits, and each chat gets one try
