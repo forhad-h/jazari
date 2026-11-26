@@ -1286,18 +1286,27 @@ fn init_terminal() -> std::io::Result<Tui> {
     ratatui::Terminal::new(crate::term::Aligned::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())))
 }
 
-/// The escape codes that undo `init_terminal` and the bracketed paste that `run` turns on: mouse
-/// capture off, bracketed paste off, back to the main screen, cursor shown. Raw mode is a terminal
-/// setting, not an escape code, so the caller turns it off.
-fn restore_sequence(out: &mut impl std::io::Write) -> std::io::Result<()> {
-    use ratatui::crossterm::{cursor::Show, terminal::LeaveAlternateScreen};
-    execute!(out, DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen, Show)
+/// The ANSI escape codes that undo `init_terminal` and the bracketed paste that `run` turns on:
+/// mouse capture off, bracketed paste off, back to the main screen, cursor shown. Raw mode is a
+/// terminal setting, not an escape code, so the caller turns it off. These are the plain codes on
+/// every platform; `restore_terminal` sends the same commands through crossterm, which uses the
+/// console API instead on a Windows console that doesn't take ANSI.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn restore_codes() -> String {
+    use ratatui::crossterm::{Command, cursor::Show, terminal::LeaveAlternateScreen};
+    let mut codes = String::new();
+    let _ = DisableMouseCapture.write_ansi(&mut codes);
+    let _ = DisableBracketedPaste.write_ansi(&mut codes);
+    let _ = LeaveAlternateScreen.write_ansi(&mut codes);
+    let _ = Show.write_ansi(&mut codes);
+    codes
 }
 
 /// Undoes `init_terminal`.
 fn restore_terminal() {
+    use ratatui::crossterm::{cursor::Show, terminal::LeaveAlternateScreen};
     let _ = ratatui::crossterm::terminal::disable_raw_mode();
-    let _ = restore_sequence(&mut std::io::stdout());
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen, Show);
 }
 
 /// Restores the terminal when the dashboard is stopped by SIGTERM, SIGHUP (its tab was closed),
@@ -1317,9 +1326,7 @@ mod on_signal {
 
     /// Call before raw mode is turned on, so the saved settings are the user's own.
     pub fn install() {
-        let mut codes = Vec::new();
-        let _ = super::restore_sequence(&mut codes);
-        let _ = CODES.set(codes);
+        let _ = CODES.set(super::restore_codes().into_bytes());
         // The same terminal that crossterm puts in raw mode: stdin, or /dev/tty when stdin isn't one.
         let fd = unsafe {
             if libc::isatty(libc::STDIN_FILENO) == 1 { libc::STDIN_FILENO } else { libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) }
@@ -1437,10 +1444,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_restore_sequence_turns_off_mouse_paste_and_the_alternate_screen() {
-        let mut out = Vec::new();
-        restore_sequence(&mut out).unwrap();
-        let text = String::from_utf8(out).unwrap();
+    fn the_restore_codes_turn_off_mouse_paste_and_the_alternate_screen() {
+        let text = restore_codes();
         for code in ["?1000l", "?1002l", "?1003l", "?1006l", "?2004l", "?1049l", "?25h"] {
             assert!(text.contains(code), "{code} missing from {text:?}");
         }
