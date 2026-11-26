@@ -371,27 +371,44 @@ pub struct PauseArgs {
 /// Holds what jazari does on its own, for `duration` (30m, 2h, 1d) or until resumed; returns
 /// " until <time>" or "".
 pub fn pause(duration: Option<&str>) -> anyhow::Result<String> {
+    pause_in(&dir(), "paused", duration)
+}
+
+/// Lifts a pause; false when jazari wasn't paused.
+pub fn resume() -> anyhow::Result<bool> {
+    resume_in(&dir(), "paused")
+}
+
+/// A pause kept in `folder` instead of jazari's own: the supervisor's pause is in its build
+/// folder, so pausing product work leaves the guards for the founder's sessions as they are.
+/// `setting` names it in the actions log.
+pub fn pause_in(folder: &Path, setting: &str, duration: Option<&str>) -> anyhow::Result<String> {
     let now = crate::now();
     let until = duration.map(parse_duration).transpose()?.map(|d| now + d);
-    let action = Action::new(Kind::Setting, "paused").detail(until.map_or("until resumed".into(), fmt_time));
+    let action = Action::new(Kind::Setting, setting).detail(until.map_or("until resumed".into(), fmt_time));
     run(&action, || {
-        std::fs::create_dir_all(dir())?;
-        std::fs::write(pause_path(&dir()), serde_json::to_vec(&json!({ "since": now, "until": until }))?)?;
+        std::fs::create_dir_all(folder)?;
+        std::fs::write(pause_path(folder), serde_json::to_vec(&json!({ "since": now, "until": until }))?)?;
         Ok(())
     })?;
     Ok(Pause { since: now, until }.until_label())
 }
 
-/// Lifts a pause; false when jazari wasn't paused.
-pub fn resume() -> anyhow::Result<bool> {
-    if !paused() {
+/// Lifts the pause in `folder`; false when there wasn't one.
+pub fn resume_in(folder: &Path, setting: &str) -> anyhow::Result<bool> {
+    if !paused_in(folder) {
         return Ok(false);
     }
-    run(&Action::new(Kind::Setting, "paused").detail("resumed"), || {
-        std::fs::remove_file(pause_path(&dir()))?;
+    run(&Action::new(Kind::Setting, setting).detail("resumed"), || {
+        std::fs::remove_file(pause_path(folder))?;
         Ok(())
     })?;
     Ok(true)
+}
+
+/// Whether the pause in `folder` holds right now.
+pub fn paused_in(folder: &Path) -> bool {
+    paused_at(folder, crate::now()).is_some()
 }
 
 /// `jazari watch pause`: hold what jazari does on its own.

@@ -92,6 +92,27 @@ const BUILTIN: &[Builtin] = &[
     },
 ];
 
+/// "Working with jazari": in every launch file that jazari writes, first, so it is never a choice
+/// and can't be left out.
+pub const ALWAYS: &str = "jazari";
+
+/// The library without [`ALWAYS`]: what the `c` picker, `jazari build rules` and the handoff pick
+/// offer.
+pub fn pickable() -> Vec<Rule> {
+    library().into_iter().filter(|r| r.key != ALWAYS).collect()
+}
+
+/// `chosen` with "Working with jazari" first and no second copy of it.
+fn with_always<'a>(always: Option<&'a Rule>, chosen: &[&'a Rule]) -> Vec<&'a Rule> {
+    let mut out: Vec<&Rule> = always.into_iter().collect();
+    for r in chosen.iter().copied().filter(|r| r.key != ALWAYS) {
+        if !out.iter().any(|o| o.key == r.key) {
+            out.push(r);
+        }
+    }
+    out
+}
+
 /// The coordination prompt's key, the default choice before the user picks one.
 pub const COORDINATION: &str = "coordination";
 
@@ -577,7 +598,6 @@ pub fn ensure(chosen: &[&Rule], mode: Mode) -> anyhow::Result<PathBuf> {
 }
 
 fn ensure_in(data: &Path, chosen: &[&Rule], mode: Mode) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(!chosen.is_empty(), "tick at least one prompt");
     let files = files_for(data, chosen, mode);
     // The teammates' file first, so the lead's never points at a file that isn't there yet.
     for (path, text) in files.iter().rev() {
@@ -595,6 +615,9 @@ fn ensure_in(data: &Path, chosen: &[&Rule], mode: Mode) -> anyhow::Result<PathBu
 /// The files for `chosen` started as `mode`: the one the command loads, then for a team the
 /// teammates' file when any prompt reaches them.
 fn files_for(data: &Path, chosen: &[&Rule], mode: Mode) -> Vec<(PathBuf, String)> {
+    let builtin = builtin_library();
+    let always = builtin.iter().find(|r| r.key == ALWAYS);
+    let chosen = &with_always(always, chosen)[..];
     let named = |role: &str, rules: &[&Rule], text: &str| {
         let path = launch_dir(data).join(launch_name(role, rules, text));
         std::path::absolute(&path).unwrap_or(path)
@@ -855,12 +878,15 @@ fn print_command(chosen: &[&Rule], mode: Mode, format: crate::report::Format) ->
 
 fn render_list(format: crate::report::Format, lib: &[Rule], dir: &Path) -> String {
     use crate::report::Format;
+    let lib: Vec<Rule> = lib.iter().filter(|r| r.key != ALWAYS).cloned().collect();
+    let lib = &lib[..];
     match format {
         Format::Table => {
             let width = lib.iter().map(|r| r.key.chars().count()).max().unwrap_or(0);
             let mut out: Vec<String> =
                 lib.iter().map(|r| format!("{:<width$}  {:<10}  {:<6}  {}", r.key, if r.own { "[yours]" } else { "[built-in]" }, r.kind.noun(), r.summary)).collect();
             out.push(String::new());
+            out.push(format!("Every launch file starts with \"Working with jazari\" (`{ALWAYS}`), so it is not in this list."));
             out.push("`jazari build rules <name>…` prints the command that starts Claude Code with them, e.g.".into());
             out.push(format!("jazari build rules {}", lib.iter().map(|r| quote_arg(&r.key)).collect::<Vec<_>>().join(" ")));
             out.push("Add --team to start the lead of an agent team that passes them to its teammates,".into());
@@ -986,11 +1012,41 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_set_is_refused() {
+    fn an_empty_choice_still_starts_with_jazari() {
         let data = temp_dir("empty");
-        assert!(ensure_in(&data, &[], Mode::Session).is_err());
-        assert!(ensure_in(&data, &[], Mode::Team).is_err());
+        for mode in [Mode::Session, Mode::Team] {
+            let path = ensure_in(&data, &[], mode).unwrap();
+            assert!(std::fs::read_to_string(&path).unwrap().starts_with(JAZARI_HEADING));
+        }
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    const JAZARI_HEADING: &str = "# Working with jazari";
+
+    #[test]
+    fn every_launch_file_starts_with_jazari_once() {
+        let skills = crate::skills::rules(&crate::skills::library_in(Path::new("/nonexistent")));
+        let lib = with_skills(builtins(), skills);
+        let data = Path::new("/d");
+        // A saved choice from before, with "jazari" in it, in any place.
+        for keys in [vec!["coordination", "output-hygiene"], vec!["output-hygiene", "jazari", "easy-english"], vec!["jazari"], vec!["all"]] {
+            for mode in [Mode::Session, Mode::Team] {
+                for (path, text) in files_for(data, &known(&lib, &keys), mode) {
+                    assert!(text.starts_with(JAZARI_HEADING), "{keys:?} {mode:?} {}", path.display());
+                    assert_eq!(text.matches(JAZARI_HEADING).count(), 1, "no second copy: {keys:?} {mode:?}");
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    assert_eq!(name.matches("jazari").count(), 1, "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_picker_never_offers_jazari() {
+        let lib: Vec<Rule> = builtins().into_iter().filter(|r| r.key != ALWAYS).collect();
+        assert!(lib.iter().all(|r| r.key != "jazari"));
+        assert!(!render_list(crate::report::Format::Json, &builtins(), Path::new("/p")).contains("\"jazari\""));
+        assert!(render_list(crate::report::Format::Table, &builtins(), Path::new("/p")).contains("Every launch file starts with"));
     }
 
     #[test]
@@ -1015,12 +1071,12 @@ mod tests {
         let lib = builtins();
         let lead = ensure_in(&data, &known(&lib, &["output-hygiene"]), Mode::Team).unwrap();
         let text = std::fs::read_to_string(&lead).unwrap();
-        assert!(text.starts_with("# Output hygiene") && text.contains("# Agent team"));
+        assert!(text.starts_with(JAZARI_HEADING) && text.contains("# Output hygiene") && text.contains("# Agent team"));
         assert!(!text.contains("agent board"), "no coordination, no board duties");
         let mate = names(&launch_dir(&data)).into_iter().map(|n| launch_dir(&data).join(n)).find(|p| *p != lead).unwrap();
         assert!(text.contains(&format!("read `{}`", mate.display())));
         let mate_text = std::fs::read_to_string(&mate).unwrap();
-        assert!(mate_text.starts_with("# Output hygiene") && !mate_text.contains("# Agent team"), "teammates get only the prompts");
+        assert!(mate_text.starts_with(JAZARI_HEADING) && mate_text.contains("# Output hygiene") && !mate_text.contains("# Agent team"), "teammates get only the prompts");
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -1035,13 +1091,13 @@ mod tests {
         assert_eq!(files.len(), 2);
         let mate = files.into_iter().map(|n| launch_dir(&data).join(n)).find(|p| *p != lead).unwrap();
         let mate_text = std::fs::read_to_string(&mate).unwrap();
-        assert!(!mate_text.contains("coordination") && mate_text.starts_with("# Output hygiene"));
+        assert!(!mate_text.contains("# Multi-session coordination") && mate_text.starts_with(JAZARI_HEADING) && mate_text.contains("# Output hygiene"));
 
         let only = ensure_in(&data, &known(&lib, &[COORDINATION]), Mode::Team).unwrap();
         let text = std::fs::read_to_string(&only).unwrap();
-        assert!(!text.contains("Before any other work, read"), "nothing to hand teammates");
+        assert!(text.contains("Before any other work, read"), "teammates get \"Working with jazari\"");
         assert!(text.contains("You represent the whole team on the board"));
-        assert_eq!(names(&launch_dir(&data)).len(), 3, "a coordination-only team writes just the lead's file");
+        assert_eq!(names(&launch_dir(&data)).len(), 4, "a coordination-only team still writes a teammates' file");
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -1125,7 +1181,7 @@ mod tests {
         assert_eq!(team.len(), 2);
         assert!(team[0].1.contains("# Skills") && team[1].1.contains("# Skills"), "the lead and the teammates");
         let only = files_for(data, &known(&lib, &["easy-english"]), Mode::Team);
-        assert!(only[1].1.starts_with("# Skills"), "a skill alone still reaches teammates");
+        assert!(only[1].1.contains("# Skills"), "a skill alone still reaches teammates");
     }
 
     #[test]
@@ -1291,15 +1347,15 @@ mod tests {
         let lib = builtins();
         let session = ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Session).unwrap();
         let name = session.file_name().unwrap().to_string_lossy().into_owned();
-        let hash = name.strip_prefix("session-coordination+output-hygiene-").and_then(|r| r.strip_suffix(".md")).unwrap();
+        let hash = name.strip_prefix("session-jazari+coordination+output-hygiene-").and_then(|r| r.strip_suffix(".md")).unwrap();
         assert!(hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
 
         let lead = ensure_in(&data, &known(&lib, &["coordination", "output-hygiene"]), Mode::Team).unwrap();
-        assert!(lead.file_name().unwrap().to_string_lossy().starts_with("lead-coordination+output-hygiene-"));
+        assert!(lead.file_name().unwrap().to_string_lossy().starts_with("lead-jazari+coordination+output-hygiene-"));
         let mut files = names(&launch_dir(&data));
         files.retain(|n| n.starts_with(TEAMMATE_PREFIX));
         assert_eq!(files.len(), 1);
-        assert!(files[0].starts_with("teammate-output-hygiene-"), "the teammates' file names only the prompts it holds: {}", files[0]);
+        assert!(files[0].starts_with("teammate-jazari+output-hygiene-"), "the teammates' file names only the prompts it holds: {}", files[0]);
         let _ = std::fs::remove_dir_all(&data);
     }
 

@@ -342,9 +342,11 @@ you through jazari.
   `--attention` also marks it as needing you, with the question sound and a notification.
 
 An idle session picks its messages up with your next prompt to it: hooks run only while a session
-works. Start sessions with the **Working with jazari** prompt (`c`, or `jazari build rules jazari`) so
-Claude knows to read jazari's notes, post its progress with `jazari watch say`, wait for resources with
-`jazari watch system --wait`, and stop when asked.
+works. Every session that jazari starts gets the **Working with jazari** prompt: the `c` launch
+command, an agent team's lead and teammates, and a session started from a handoff. It tells Claude to
+read jazari's notes, post its progress with `jazari watch say`, wait for resources with
+`jazari watch system --wait`, and stop when asked. It is always first in the launch file, so it is
+not a choice in the `c` list or in `jazari build rules`.
 
 ### Telegram
 
@@ -393,20 +395,22 @@ jazari build service uninstall             # stop and remove both; the logs stay
 - Other systems are not supported yet. There, run `jazari build bridge` and `jazari build run` in
   tmux or a terminal that stays open.
 
-In the paired chat:
+Telegram controls only jazari's own work: products, tasks, the workers' questions and approvals,
+and the supervisor. The sessions you start yourself are controlled only at your computer, from the
+jazari dashboard. In the paired chat:
 
 | Command | What it does |
 |---|---|
-| `/status` | Live sessions, which ones need you, and the 5-hour and 7-day usage |
-| `/tell <id> <message>` | A message for a session; give at least 4 letters of its id |
-| `/stop <id>` | Stops a session before its next tool call |
-| `/pause [30m\|2h\|1d]` and `/resume` | The same as `jazari watch pause` and `jazari watch resume` |
+| `/status` | Products, tasks, the usage at the last run, and the machine's disk and memory |
+| `/pause [30m\|2h\|1d]` and `/resume` | Pause product work: the supervisor starts no new task. Your own sessions are not affected |
 | `/new <name> <idea>`, `/idea <product> <idea>` | Start a product, or give one a new idea (see Building products) |
 | `/tasks` | What the team is doing, and what waits for you |
 | `/answer <task> <answer>` | Answer a task's question |
 | `/approve <task>`, `/deny <task>` | Decide on a deploy, spend or contact; the buttons do the same |
 
-When a session runs `jazari watch say --attention "…"`, the bridge sends the note to the chat.
+Nothing about the sessions you start yourself goes to Telegram. A `jazari watch say --attention "…"` note
+sounds, notifies you on the desktop and shows on the dashboard, because only you at your computer can answer
+it.
 `jazari build notify "…"` sends your own message, from a script or from stdin. `jazari watch actions`
 lists everything done from Telegram with the origin `telegram`.
 
@@ -618,12 +622,12 @@ login token; the checks and git commands don't. A run is stopped after 45 minute
 - a proposal to add a check, or a role that got worse after a change;
 - a product on hold, or a supervisor that won't start or keeps failing;
 - an audit record that was changed;
-- a session that asks for you with `--attention`.
 
 News (built, merged, sleeping until a limit resets, preferences learned) is not sent. Ask with `/status`,
 `/tasks` or `/prefs`, and the supervisor's output has all of it.
 
-**Pausing.** `jazari watch pause` (or `/pause`) pauses it.
+**Pausing.** `jazari watch pause` pauses it, together with everything else jazari does on its own. `/pause`
+on Telegram pauses only the supervisor.
 
 **The record.** Every start, finish, merge and sleep is added to `~/.jazari/build/audit.jsonl`. Each entry
 carries the hash of the one before it, so `jazari build audit` finds an edited or deleted entry.
@@ -866,7 +870,7 @@ jazari build rules coordination easy-english                # a launch command w
 
 Easy English's word lists are the CEFR-J Wordlist 1.5 (Yukio Tono, Tokyo University of Foreign Studies; free for research and commercial use with this citation) and the New General Service List 1.2 (Browne, Culligan and Phillips; CC BY-SA 4.0). They are included unchanged; `assets/skills/easy-english/data/SOURCES.md` has the full credits.
 
-Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.jazari/launch/`, written when the command is copied and named after its role, its prompts and a hash of its text, such as `lead-coordination+output-hygiene-8873230f.md`. A session's or lead's file whose command hasn't been copied for a week is removed (a conversation keeps the prompt it started with); a teammates' file is kept, since a resumed lead still points at it. `jazari build coordination` prints the stable `~/.jazari/coordination.md`.
+Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.jazari/launch/`, written when the command is copied and named after its role, its prompts and a hash of its text, such as `lead-jazari+coordination+output-hygiene-8873230f.md`. Every file starts with "Working with jazari", once, also when a saved choice names it. A session's or lead's file whose command hasn't been copied for a week is removed (a conversation keeps the prompt it started with); a teammates' file is kept, since a resumed lead still points at it. `jazari build coordination` prints the stable `~/.jazari/coordination.md`.
 
 The prompts are added to the session's system prompt, so they survive `/clear` and compaction. They apply to new conversations only: a resumed conversation keeps the system prompt it started with. The coordination rules add about 2k tokens to each request of those sessions.
 
