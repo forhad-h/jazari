@@ -45,9 +45,10 @@ first message says so.
 the model.
 
 1. jazari prints "Choosing prompts and skills for this session…".
-2. It runs the same `claude -p` runner that `src/prompt_gen.rs` uses: the model from the
-   `generator_model` setting (Haiku by default), `--no-session-persistence`, and `MARKER_ENV`, so
-   the run is not shown or counted as a session.
+2. It runs `claude -p` the way `src/prompt_gen.rs` does: `--safe-mode`,
+   `--no-session-persistence`, and `MARKER_ENV`, so the run is not shown or counted as a session.
+   The model is always Haiku. The `generator_model` setting is for writing prompts and defaults to
+   the strongest model, which is too slow for a pick that the new session waits for.
 3. The model gets:
    - the handoff text, cut to its first 6,000 characters;
    - the project's folder name;
