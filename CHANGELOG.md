@@ -6,6 +6,7 @@ GitHub release. Keep each bullet to one short line.
 ## Unreleased
 
 - Telegram message text no longer shows in the process list: curl now reads it on stdin
+- Autonomous jobs no longer queue a reworded copy of work that was done in the last 30 days
 
 ## 1.0.0 - 2026-11-26
 

@@ -258,6 +258,9 @@ fn follows_recommendation(question: &str, reply: &str) -> bool {
     reply == rec.to_lowercase() || number.is_some_and(|n| reply == n || reply == format!("option {n}"))
 }
 
+/// How long done work still counts when [`Store::has_similar`] compares reworded titles: 30 days.
+pub const RECENT_DONE_SECS: f64 = 30.0 * 86_400.0;
+
 /// A title's meaningful words: lowercase, 3+ letters, without filler.
 pub fn title_words(t: &str) -> std::collections::BTreeSet<String> {
     const FILLER: [&str; 12] = ["the", "and", "for", "with", "when", "into", "from", "that", "this", "add", "fix", "once"];
@@ -503,14 +506,21 @@ impl Store {
     }
 
     /// Whether the product already has this task: the same title (ignoring case and punctuation)
-    /// anywhere, or a title sharing most of its words with a task still open.
-    pub fn has_similar(&self, product: &str, title: &str) -> anyhow::Result<bool> {
+    /// anywhere, or a title sharing most of its words with a task still open or with work done in
+    /// the last [`RECENT_DONE_SECS`]. The done work counts too, so that an improvement job does not
+    /// queue a reworded copy of a fix that has just landed.
+    pub fn has_similar(&self, product: &str, title: &str, now: f64) -> anyhow::Result<bool> {
         let norm = |t: &str| t.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
         let want = norm(title);
         let words = title_words(title);
-        let mut st = self.conn.prepare("SELECT title, status FROM tasks WHERE product = ?1 AND status != 'failed'")?;
-        let rows = st.query_map([product], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
-        Ok(rows.iter().any(|(t, status)| norm(t) == want || (status != "done" && overlap(&words, &title_words(t)) >= 0.6)))
+        let mut st = self.conn.prepare("SELECT title, status, kind, updated FROM tasks WHERE product = ?1 AND status != 'failed'")?;
+        let rows = st
+            .query_map([product], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, f64>(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows.iter().any(|(t, status, kind, updated)| {
+            let recent_work = kind == "work" && now - updated <= RECENT_DONE_SECS;
+            norm(t) == want || ((status != "done" || recent_work) && overlap(&words, &title_words(t)) >= 0.6)
+        }))
     }
 
     /// Queued tasks of a product.
@@ -716,10 +726,15 @@ mod tests {
         assert_eq!(s.bump_attempts(a).unwrap(), 1);
         assert!(s.set_status(a, "nonsense", None, None, 7.0).is_err());
         assert_eq!(s.counts().unwrap(), vec![("done".into(), 1), ("queued".into(), 2)]);
-        assert!(s.has_similar("shop", "HIGH, newer!").unwrap() && !s.has_similar("shop", "high newest").unwrap());
+        assert!(s.has_similar("shop", "HIGH, newer!", 9.0).unwrap() && !s.has_similar("shop", "high newest", 9.0).unwrap());
         s.add_task(&NewTask { product: "shop", role: "e", title: "CLI: map PasswordTooLongError to exit code 2", ..Default::default() }, 9.0).unwrap();
-        assert!(s.has_similar("shop", "Map PasswordTooLongError and invalid UTF-8 to exit code 2 in the CLI").unwrap(), "a rewording of an open task");
-        assert!(!s.has_similar("shop", "Document the exit codes in the README").unwrap());
+        assert!(s.has_similar("shop", "Map PasswordTooLongError and invalid UTF-8 to exit code 2 in the CLI", 9.0).unwrap(), "a rewording of an open task");
+        assert!(!s.has_similar("shop", "Document the exit codes in the README", 9.0).unwrap());
+        let fixed = s.add_task(&NewTask { product: "shop", role: "e", title: "Reject empty passwords in the signup form", ..Default::default() }, 9.0).unwrap();
+        s.set_status(fixed, "done", Some("merged"), None, 10.0).unwrap();
+        let reworded = "Signup form: reject empty passwords";
+        assert!(s.has_similar("shop", reworded, 11.0).unwrap(), "a rewording of work that just landed");
+        assert!(!s.has_similar("shop", reworded, 10.0 + RECENT_DONE_SECS + 1.0).unwrap(), "done work counts only while it is recent");
         assert_eq!(s.queued("shop").unwrap(), 3);
         assert_eq!(s.task(a).unwrap().unwrap().spec, "", "an empty brief is an empty spec");
         assert!(s.add_task(&NewTask { product: "shop", role: "x", title: "y", kind: "deploy", ..Default::default() }, 8.0).is_err());

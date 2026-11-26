@@ -55,3 +55,5 @@ the fix.
 - Run marsad's own risk hook inside the container, so a worker's risky commands are checked even
   in bypass mode.
 - A launchd unit for the supervisor and the bridge, so they survive a reboot.
+- Bump the Claude Code version that `assets/jazari/Dockerfile` pins (`CLAUDE_CODE_VERSION`, now
+  2.1.332) from time to time. Workers stay on that version until someone changes it.
