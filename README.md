@@ -153,11 +153,27 @@ work) and pass it to `jazari build handoff`. `install` registers this as a synch
 reaches a long turn between tool calls. The warning comes back after a compact or `/clear` brings
 the context below the threshold.
 
+At **90%**, the handoff is required. The guard hook (`jazari guard --hook`) refuses every tool
+call except these:
+
+- Reading and searching files (Read, Grep, Glob and similar tools).
+- `git status`, `git diff` and `git log`.
+- `jazari watch context`, `status`, `system` and `say`.
+- The handoff itself: `jazari build handoff <<'EOF'`, with the delimiter in quotes.
+
+The refusal tells Claude what to do next, with the exact commands. Subagents are not blocked,
+because their context is their own. If you want the session to keep going, tell it so. It then
+runs `jazari watch context --allow <session>`, which asks for your yes first. The allowance lasts
+until the next compact or `/clear`.
+
 ```sh
 jazari watch context              # this session: context used, left, and the warning threshold
 jazari watch context --session 1fe6 --format json
 jazari watch context --warn 70    # warn at 70% instead
 jazari watch context --warn off
+jazari watch context --block 95   # require the handoff at 95% instead of 90%
+jazari watch context --block off  # never refuse tool calls; only warn
+jazari watch context --allow 1fe6 # let this session go past the block until its next compact (asks first)
 ```
 
 Inside Claude Code (a Bash tool call or a hook), `jazari watch context` finds its own session; elsewhere
@@ -178,8 +194,8 @@ jazari build handoff <<'EOF'          # the prompt on stdin (or --file handoff.m
 Goal: ...
 EOF
 jazari build handoff --terminal tmux  # only this terminal (warp, iterm, terminal, ghostty, wezterm, kitty, windows-terminal, default)
-jazari build handoff --close          # also end this session 5 s after the new one opens
-jazari build handoff --auto-close on  # end the old session by default (`--keep` keeps it once)
+jazari build handoff --keep           # keep this session running (by default it ends 5 s after the new one opens)
+jazari build handoff --auto-close off # keep the old session by default (`--close` ends it once)
 jazari build handoff --no-launch      # only save it
 jazari build handoff list             # saved handoffs, newest first
 jazari build handoff resume <id>      # start a saved handoff in this terminal

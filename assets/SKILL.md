@@ -101,11 +101,17 @@ EOF
 
 It saves the prompt and opens a new terminal (this terminal, else the system default, else a
 detached tmux session) running `claude` with it in the session's folder. Then tell the user where the
-new session is and stop working in this one. With `--close` (or `--auto-close on`) jazari ends this
-session 5 s later, so stop as soon as the command succeeds. If no terminal opens, it prints the
+new session is and stop working in this one. By default jazari ends this session 5 s later
+(`--keep` keeps it), so stop as soon as the command succeeds. If no terminal opens, it prints the
 `jazari build handoff resume <id>` command for the user to run. `jazari build handoff list` shows saved
 handoffs. `jazari watch context --warn <pct|off>` changes the threshold. Don't hand off on your own when
 the user asked you to keep going in this session.
+
+At 90% (`--block <pct|off>`), jazari refuses every tool call except reading, searching, `git
+status|diff|log`, `jazari watch context|status|system|say` and the handoff. Write the handoff as one
+Bash call in the form shown in the previous code block, with the quoted `'EOF'`. Only if the user told you to keep going here, run
+`"{{JAZARI_EXE}}" watch context --allow <session>`. It asks the user first, and it lasts until the
+next compact.
 
 ## Several sessions in one repo
 
