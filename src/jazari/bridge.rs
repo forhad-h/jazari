@@ -114,7 +114,7 @@ pub const HELP: &str = "jazari commands:
 /status – sessions and usage limits
 /tell <session> <message> – message a session (it reads it at its next step)
 /stop <session> – stop a session before its next tool call
-/pause [30m|2h|1d] – hold what marsad does on its own
+/pause [30m|2h|1d] – hold what jazari does on its own
 /resume – turn it back on
 Sessions are named by the first letters of their id, as /status shows them.";
 
@@ -176,7 +176,7 @@ pub fn pick<'a>(sessions: &'a HashMap<String, crate::model::Session>, prefix: &s
     }
 }
 
-/// The real machine: marsad's sessions, pause and inbox.
+/// The real machine: jazari's sessions, pause and inbox.
 pub struct Machine;
 
 fn pct(w: Option<crate::model::RateWindow>) -> String {
@@ -208,18 +208,18 @@ impl Ops for Machine {
             out.push_str(&format!("\n\nUsage: 5h {} · 7d {}", pct(five), pct(seven)));
         }
         if crate::act::paused() {
-            out.push_str("\nmarsad is paused.");
+            out.push_str("\njazari is paused.");
         }
         out
     }
 
     fn pause(&self, duration: Option<&str>) -> anyhow::Result<String> {
         let label = crate::act::pause(duration)?;
-        Ok(format!("Paused{label}: marsad won't interrupt or end sessions, clean up or update on its own."))
+        Ok(format!("Paused{label}: jazari won't interrupt or end sessions, clean up or update on its own."))
     }
 
     fn resume(&self) -> anyhow::Result<String> {
-        Ok(if crate::act::resume()? { "Resumed: marsad acts on its own again." } else { "marsad wasn't paused." }.into())
+        Ok(if crate::act::resume()? { "Resumed: jazari acts on its own again." } else { "jazari wasn't paused." }.into())
     }
 
     fn tell(&self, session: &str, text: &str) -> anyhow::Result<String> {
@@ -243,7 +243,7 @@ impl Ops for Machine {
 
     fn new_product(&self, name: &str, idea: &str) -> anyhow::Result<String> {
         let (repo, id) = super::create_product(&super::open()?, name, idea)?;
-        Ok(format!("Created {name} in {}. Task #{id}: the Chief of Staff turns the idea into a plan. Run `marsad jazari run` if the supervisor isn't running.", repo.display()))
+        Ok(format!("Created {name} in {}. Task #{id}: the Chief of Staff turns the idea into a plan. Run `jazari build run` if the supervisor isn't running.", repo.display()))
     }
 
     fn tasks(&self) -> anyhow::Result<String> {
@@ -329,10 +329,10 @@ pub fn wait_for_code<T: Transport>(bot: &Bot<T>, code: &str, mut offset: Option<
                 return Ok((u.chat_id, offset));
             }
             wrong += 1;
-            anyhow::ensure!(wrong < PAIR_TRIES, "{PAIR_TRIES} wrong codes; run `marsad jazari telegram pair` again");
+            anyhow::ensure!(wrong < PAIR_TRIES, "{PAIR_TRIES} wrong codes; run `jazari build telegram pair` again");
         }
     }
-    anyhow::bail!("no code arrived in {} minutes; run `marsad jazari telegram pair` again", PAIR_SECS / 60.0)
+    anyhow::bail!("no code arrived in {} minutes; run `jazari build telegram pair` again", PAIR_SECS / 60.0)
 }
 
 pub fn pair<T: Transport>(bot: &Bot<T>, dir: &Path) -> anyhow::Result<()> {
@@ -345,13 +345,13 @@ pub fn pair<T: Transport>(bot: &Bot<T>, dir: &Path) -> anyhow::Result<()> {
     super::secrets::set(super::secrets::TELEGRAM_CHAT, &chat.to_string())?;
     save_offset(dir, offset);
     bot.send(chat, "Paired. Only this chat can control jazari now. Send /help for the commands.")?;
-    println!("Paired with that chat. `marsad jazari bridge` starts listening for commands.");
+    println!("Paired with that chat. `jazari build bridge` starts listening for commands.");
     Ok(())
 }
 
 // ---------- the bridge loop ----------
 
-/// The text sent for a session's `marsad say --attention`.
+/// The text sent for a session's `jazari watch say --attention`.
 pub fn attention_text(ev: &serde_json::Value, project: Option<&str>) -> Option<String> {
     if ev["hook_event_name"] != crate::channel::SAID_EVENT || ev["attention"] != true {
         return None;

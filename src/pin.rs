@@ -65,9 +65,9 @@ pub fn text(sessions: &[&Session], ctx: Option<ContextInfo>, limits: Option<(Opt
     let waiting = live.iter().filter(|s| s.status.needs_user()).count();
     let active = live.iter().filter(|s| s.status == Status::Active).count();
     let mut out = match (waiting, active) {
-        (0, 0) => format!("marsad · {} idle", live.len()),
-        (0, n) => format!("marsad · {n} working"),
-        (n, _) => format!("marsad · {n} need{} you", if n == 1 { "s" } else { "" }),
+        (0, 0) => format!("jazari · {} idle", live.len()),
+        (0, n) => format!("jazari · {n} working"),
+        (n, _) => format!("jazari · {n} need{} you", if n == 1 { "s" } else { "" }),
     };
     out.push('\n');
     let mut gauges = Vec::new();
@@ -142,11 +142,11 @@ mod tests {
         let ctx = ContextInfo { used: 18_000, window: 200_000, limit: 100_000, estimated: false };
         let text = text(&[&a, &b, &c], Some(ctx), limits);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "marsad · 1 needs you");
+        assert_eq!(lines[0], "jazari · 1 needs you");
         assert_eq!(lines[1], "[ok]ctx 18%[/] · 82.0k left · [warn]5h 64%[/]", "the 7-day limit is left out");
         assert_eq!(lines[2], "Which database should we us…  web             QUESTION ?");
         assert_eq!(lines[3], "Dark mode                     web               ACTIVE ◐");
         assert_eq!(lines.len(), 4, "ended sessions are left out");
-        assert_eq!(super::text(&[], None, None), "marsad · 0 idle\nno live sessions\n");
+        assert_eq!(super::text(&[], None, None), "jazari · 0 idle\nno live sessions\n");
     }
 }

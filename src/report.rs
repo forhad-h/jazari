@@ -1,4 +1,4 @@
-//! `marsad report` and `marsad sql`: usage history for humans and for Claude.
+//! `jazari watch report` and `jazari watch sql`: usage history for humans and for Claude.
 
 use crate::store::{self, QueryResult};
 use clap::{Args, ValueEnum};
@@ -56,7 +56,7 @@ pub struct ReportArgs {
 
 #[derive(Args)]
 pub struct SqlArgs {
-    /// A read-only SQL query against the usage database (see `marsad schema`).
+    /// A read-only SQL query against the usage database (see `jazari watch schema`).
     query: String,
     #[arg(long, value_enum, default_value = "table")]
     format: Format,

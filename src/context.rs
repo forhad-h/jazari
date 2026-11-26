@@ -1,4 +1,4 @@
-//! `marsad context`: how full a session's context is, so a session can decide to hand off before
+//! `jazari watch context`: how full a session's context is, so a session can decide to hand off before
 //! auto-compact. With `--hook` it is also the UserPromptSubmit and PostToolUse hook that tells a
 //! session, once per crossing, that its context passed the warning threshold and how to hand off.
 
@@ -88,8 +88,8 @@ pub fn run(a: ContextArgs) -> anyhow::Result<()> {
 
 fn warning_label(pct: Option<u32>) -> String {
     match pct {
-        Some(p) => format!("Handoff warning at {p}% of the auto-compact point (`marsad context --warn <pct|off>`)."),
-        None => "Handoff warning is off (`marsad context --warn 80` turns it on).".into(),
+        Some(p) => format!("Handoff warning at {p}% of the auto-compact point (`jazari watch context --warn <pct|off>`)."),
+        None => "Handoff warning is off (`jazari watch context --warn 80` turns it on).".into(),
     }
 }
 
@@ -133,7 +133,7 @@ pub(crate) fn find_session<'a>(
             return Ok(s);
         }
     }
-    anyhow::bail!("not running inside a Claude Code session marsad knows; pass --session <id>")
+    anyhow::bail!("not running inside a Claude Code session jazari knows; pass --session <id>")
 }
 
 // ---------- the UserPromptSubmit hook ----------
@@ -174,7 +174,7 @@ fn hook() -> Option<String> {
     } else if was_warned && !warned {
         let _ = std::fs::remove_file(&marker);
     }
-    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "marsad".into());
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "jazari".into());
     emit.then(|| {
         json!({
             "hookSpecificOutput": {
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn transcript_tail_finds_the_latest_main_agent_call() {
-        let dir = std::env::temp_dir().join(format!("marsad-context-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-context-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("t.jsonl");

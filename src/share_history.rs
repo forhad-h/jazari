@@ -79,7 +79,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marsad-share-history-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-share-history-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

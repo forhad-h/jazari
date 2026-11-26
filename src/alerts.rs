@@ -75,7 +75,7 @@ fn notification(s: &Session) -> (String, String) {
         (_, true) => "Has a question for you".to_string(),
         (_, false) => s.detail.clone(),
     };
-    (format!("marsad · {}", s.project()), body)
+    (format!("jazari · {}", s.project()), body)
 }
 
 /// Starts `cmd` detached from the terminal and reaps it in the background.
@@ -181,8 +181,8 @@ mod tests {
         b.detail = "Which database?".into();
         let alerts = d.observe([&a, &b]);
         assert_eq!(alerts.attention, [
-            ("marsad · a".to_string(), "Approve: Bash: rm -rf target".to_string()),
-            ("marsad · b".to_string(), "Which database?".to_string()),
+            ("jazari · a".to_string(), "Approve: Bash: rm -rf target".to_string()),
+            ("jazari · b".to_string(), "Which database?".to_string()),
         ]);
         assert!(!alerts.done);
         assert!(d.observe([&a, &b]).attention.is_empty(), "announced once");

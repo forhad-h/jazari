@@ -1,4 +1,4 @@
-//! `marsad guard`: a background watcher that checks the disk every 20 seconds while Claude Code
+//! `jazari guard`: a background watcher that checks the disk every 20 seconds while Claude Code
 //! sessions run, whether or not the dashboard is open. It sends a desktop notification (and, when
 //! set, a phone notification) once per level crossing, interrupts sessions at the emergency level,
 //! and keeps an optional ballast file that it deletes to give a full disk room to recover.
@@ -83,7 +83,7 @@ pub struct Env {
     pub clean: Box<dyn FnMut(Level)>,
     /// Memory and CPU pressure now, with a description for the notification.
     pub pressure: Box<dyn FnMut() -> Option<(crate::pressure::Level, String)>>,
-    /// The largest items `marsad clean` could remove (tiers A and B), largest first.
+    /// The largest items `jazari watch clean` could remove (tiers A and B), largest first.
     pub suggest: Box<dyn FnMut() -> Vec<(String, u64)>>,
     /// Whether this pid is still a process that looks like Claude Code.
     /// Whether the pid is still a Claude Code process that started by the given time, so a reused
@@ -160,7 +160,7 @@ impl Watcher {
                 } else {
                     format!("{what}. Sessions are told to hold off heavy work.")
                 };
-                (env.alert)(&format!("marsad · machine {}", level.key()), &body);
+                (env.alert)(&format!("jazari · machine {}", level.key()), &body);
             }
         }
         if sessions.is_empty() {
@@ -198,16 +198,16 @@ fn alert_text(level: Level, r: &Reading, free: &[(String, u64)]) -> (String, Str
         String::new()
     } else {
         let top: Vec<String> = free.iter().take(2).map(|(what, n)| format!("{what} {}", crate::clean::fmt_bytes(*n))).collect();
-        format!(" Can be freed: {}; open marsad, key D.", top.join(", "))
+        format!(" Can be freed: {}; open jazari, key D.", top.join(", "))
     };
-    (format!("marsad · disk {}", level.key()), format!("The disk is {}.{what}{free}", crate::disk::fmt_reading(r)))
+    (format!("jazari · disk {}", level.key()), format!("The disk is {}.{what}{free}", crate::disk::fmt_reading(r)))
 }
 
 // ---------- phone notifications ----------
 
 /// The text a phone notification carries: no project names or paths.
 fn phone_text(level: Level, r: &Reading) -> String {
-    format!("marsad: disk {}, {:.0}% full, {:.1} GB free", level.key(), r.used_pct(), r.free_gb())
+    format!("jazari: disk {}, {:.0}% full, {:.1} GB free", level.key(), r.used_pct(), r.free_gb())
 }
 
 /// The `curl` argument lists for this level's phone notifications; none below warning.
@@ -226,7 +226,7 @@ fn phone_requests(s: &Settings, level: Level, r: &Reading) -> Vec<Vec<String>> {
     if let Some(url) = &s.ntfy {
         let priority = if level >= Level::Critical { "urgent" } else { "high" };
         out.push(base(url, vec![
-            "--header".into(), format!("Title: marsad: disk {}", level.key()),
+            "--header".into(), format!("Title: jazari: disk {}", level.key()),
             "--header".into(), format!("Priority: {priority}"),
             "--data-raw".into(), text.clone(),
         ]));
@@ -312,7 +312,7 @@ fn pid_path(dir: &Path) -> PathBuf {
 }
 
 /// Held while the watcher runs. The lock is on its own file, because Windows blocks reading a
-/// locked file and `marsad disk` reads the pid file.
+/// locked file and `jazari watch disk` reads the pid file.
 pub struct Lock {
     _file: std::fs::File,
     pid_file: PathBuf,
@@ -338,9 +338,9 @@ pub fn acquire(dir: &Path) -> Option<Lock> {
     Some(Lock { _file: file, pid_file })
 }
 
-/// The running watcher's pid: the pid file's, when that process is still a marsad.
-pub fn running_pid(dir: &Path, is_marsad: impl Fn(u32) -> bool) -> Option<u32> {
-    std::fs::read_to_string(pid_path(dir)).ok()?.trim().parse().ok().filter(|p| is_marsad(*p))
+/// The running watcher's pid: the pid file's, when that process is still a jazari.
+pub fn running_pid(dir: &Path, is_jazari: impl Fn(u32) -> bool) -> Option<u32> {
+    std::fs::read_to_string(pid_path(dir)).ok()?.trim().parse().ok().filter(|p| is_jazari(*p))
 }
 
 /// The sessions to stop for an emergency on `full`: all of them when it is the home volume, whose
@@ -392,8 +392,8 @@ pub(crate) fn is_claude_process(pid: u32) -> bool {
     process(pid).is_some_and(|p| p.is_claude())
 }
 
-fn is_marsad(pid: u32) -> bool {
-    process(pid).is_some_and(|p| p.name.to_lowercase().contains("marsad"))
+fn is_jazari(pid: u32) -> bool {
+    process(pid).is_some_and(|p| p.name.to_lowercase().contains("jazari"))
 }
 
 /// Claude Code runs as `claude`, as `node` running Claude Code's script (npm installs), or as a
@@ -435,7 +435,7 @@ pub(crate) fn interrupt_session(pid: u32, since: f64) -> bool {
 
 /// Starts the watcher, detached, unless one is already running.
 pub fn ensure_running() {
-    if running_pid(&crate::claude_data_dir(), is_marsad).is_some() {
+    if running_pid(&crate::claude_data_dir(), is_jazari).is_some() {
         return;
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -507,7 +507,7 @@ impl Env {
     }
 }
 
-/// `marsad guard`: runs the watcher until no session has run for ten minutes.
+/// `jazari guard`: runs the watcher until no session has run for ten minutes.
 pub fn run() -> anyhow::Result<()> {
     let Some(_lock) = acquire(&crate::claude_data_dir()) else { return Ok(()) };
     let mut env = Env::real();
@@ -518,7 +518,7 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What `marsad disk` shows about the watcher.
+/// What `jazari watch disk` shows about the watcher.
 pub struct Status {
     pub pid: Option<u32>,
     pub settings: Settings,
@@ -528,7 +528,7 @@ pub struct Status {
 
 pub fn status() -> Status {
     Status {
-        pid: running_pid(&crate::claude_data_dir(), is_marsad),
+        pid: running_pid(&crate::claude_data_dir(), is_jazari),
         settings: Settings::load(),
         ballast_on_disk: std::fs::metadata(ballast_path()).map(|m| m.len()).ok(),
     }
@@ -612,7 +612,7 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marsad-watch-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-watch-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -630,15 +630,15 @@ mod tests {
         }
         let seen = f.seen.borrow();
         assert_eq!(seen.alerts, [
-            "marsad · disk notice",
-            "marsad · disk warning",
-            "marsad · disk critical",
-            "marsad · disk emergency",
+            "jazari · disk notice",
+            "jazari · disk warning",
+            "jazari · disk critical",
+            "jazari · disk emergency",
             // 97 stays within 2 points of 98; 95.5 re-arms it.
-            "marsad · disk emergency",
+            "jazari · disk emergency",
         ]);
         let phone: Vec<&str> = seen.curls.iter().map(|a| a.iter().find(|x| x.starts_with("Title:")).unwrap().as_str()).collect();
-        assert_eq!(phone, ["Title: marsad: disk warning", "Title: marsad: disk critical", "Title: marsad: disk emergency", "Title: marsad: disk emergency"]);
+        assert_eq!(phone, ["Title: jazari: disk warning", "Title: jazari: disk critical", "Title: jazari: disk emergency", "Title: jazari: disk emergency"]);
         assert_eq!(seen.cleans.first(), Some(&Level::Warning), "cleanup starts from warning");
         assert_eq!(seen.cleans.len(), 8);
     }
@@ -751,7 +751,7 @@ mod tests {
     fn one_watcher_holds_the_lock_and_a_stale_pid_file_is_replaced() {
         let dir = temp("lock");
         std::fs::write(pid_path(&dir), "999999").unwrap();
-        // A pid that is gone or isn't marsad doesn't count as running.
+        // A pid that is gone or isn't jazari doesn't count as running.
         assert_eq!(running_pid(&dir, |_| false), None);
         assert_eq!(running_pid(&dir, |p| p == 999999), Some(999999));
 
@@ -776,10 +776,10 @@ mod tests {
         assert_eq!(ntfy[ntfy.len() - 2..], ["--url".to_string(), "https://ntfy.sh/topic".to_string()]);
         assert!(ntfy.contains(&"Priority: high".to_string()));
         let text = &ntfy[ntfy.iter().position(|a| a == "--data-raw").unwrap() + 1];
-        assert_eq!(text, "marsad: disk warning, 91% full, 89.6 GB free");
+        assert_eq!(text, "jazari: disk warning, 91% full, 89.6 GB free");
         let hook = &reqs[1];
         let body: Value = serde_json::from_str(&hook[hook.iter().position(|a| a == "--data-raw").unwrap() + 1]).unwrap();
-        assert_eq!(body, json!({ "level": "warning", "used_pct": 91.0, "free_gb": 89.6, "text": "marsad: disk warning, 91% full, 89.6 GB free" }));
+        assert_eq!(body, json!({ "level": "warning", "used_pct": 91.0, "free_gb": 89.6, "text": "jazari: disk warning, 91% full, 89.6 GB free" }));
         assert!(reqs.iter().flatten().all(|a| !a.contains("secret-project")));
         assert!(phone_requests(&s, Level::Emergency, &r)[0].contains(&"Priority: urgent".to_string()));
     }
@@ -839,7 +839,7 @@ mod tests {
         let r = pct(91.0);
         let free = vec![("Docker build cache".to_string(), 30_000_000_000), ("npm cache".to_string(), 7_200_000_000), ("Yarn cache".to_string(), 1)];
         let (_, body) = alert_text(Level::Warning, &r, &free);
-        assert!(body.ends_with("Can be freed: Docker build cache 30.0 GB, npm cache 7.2 GB; open marsad, key D."), "{body}");
+        assert!(body.ends_with("Can be freed: Docker build cache 30.0 GB, npm cache 7.2 GB; open jazari, key D."), "{body}");
         assert!(!alert_text(Level::Notice, &r, &[]).1.contains("freed"));
     }
 
@@ -855,7 +855,7 @@ mod tests {
             w.tick(&mut env);
         }
         let alerts = f.seen.borrow().alerts.clone();
-        assert_eq!(alerts, ["marsad · machine strained", "marsad · machine critical", "marsad · machine strained"]);
+        assert_eq!(alerts, ["jazari · machine strained", "jazari · machine critical", "jazari · machine strained"]);
         std::fs::remove_dir_all(dir).ok();
     }
 }

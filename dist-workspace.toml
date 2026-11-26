@@ -20,7 +20,3 @@ install-updater = false
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-15"
 
-# The installer adds the system's other names as aliases of the one binary: argv[0] picks the part
-# that answers (see src/entry.rs). Hard links or symlinks on Unix, copies on Windows.
-[dist.bin-aliases]
-marsad = ["jazari", "mamal"]

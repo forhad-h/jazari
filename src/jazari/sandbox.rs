@@ -13,7 +13,7 @@ pub const IMAGE: &str = "jazari-worker:2";
 /// Where the product's work folder is inside the container.
 pub const WORK: &str = "/work";
 /// The label that records which host folder a container mounts.
-const WORK_LABEL: &str = "marsad.jazari.work";
+const WORK_LABEL: &str = "jazari.jazari.work";
 
 /// A path inside the container for an item of the work folder: always `/`-joined.
 pub fn inside(item: &str) -> String {
@@ -32,7 +32,7 @@ pub fn run_args(product: &str, repo: &str) -> Vec<String> {
     a.extend(
         [
             "--memory", "2g", "--cpus", "2", "--pids-limit", "512", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-            "--label", "marsad.jazari=1", "--label",
+            "--label", "jazari.jazari=1", "--label",
         ]
         .map(String::from),
     );
@@ -97,9 +97,9 @@ mod tests {
 
     #[test]
     fn the_container_sees_only_the_repo_and_has_limits() {
-        let a = run_args("shop", r"C:\Users\me\.marsad\jazari\work\shop");
+        let a = run_args("shop", r"C:\Users\me\.jazari\jazari\work\shop");
         let has = |k: &str, v: &str| a.windows(2).any(|w| w[0] == k && w[1] == v);
-        assert!(has("--name", "jazari-shop") && has("--volume", r"C:\Users\me\.marsad\jazari\work\shop:/work") && has("--label", r"marsad.jazari.work=C:\Users\me\.marsad\jazari\work\shop") && has("--cap-drop", "ALL"));
+        assert!(has("--name", "jazari-shop") && has("--volume", r"C:\Users\me\.jazari\jazari\work\shop:/work") && has("--label", r"jazari.jazari.work=C:\Users\me\.jazari\jazari\work\shop") && has("--cap-drop", "ALL"));
         assert!(has("--memory", "2g") && has("--pids-limit", "512") && has("--security-opt", "no-new-privileges"));
         assert_eq!(a.iter().filter(|x| *x == "--volume").count(), 1);
         assert_eq!(a.last().unwrap(), IMAGE);

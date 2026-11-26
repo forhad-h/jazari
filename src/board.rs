@@ -457,12 +457,12 @@ Shared by all Claude Code sessions in this repo. One-line anchored edits only. N
 
     /// A fresh temp dir holding a repo at `<root>/repo` with one commit.
     fn repo(name: &str) -> (PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!("marsad-board-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-board-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
-        git(&repo, &["config", "user.name", "marsad test"]);
+        git(&repo, &["config", "user.name", "jazari test"]);
         git(&repo, &["config", "user.email", "test@example.com"]);
         git(&repo, &["config", "commit.gpgsign", "false"]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
@@ -494,7 +494,7 @@ Shared by all Claude Code sessions in this repo. One-line anchored edits only. N
 
     #[test]
     fn a_non_git_dir_uses_itself() {
-        let root = std::env::temp_dir().join(format!("marsad-board-plain-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-board-plain-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         assert_eq!(resolve(s(&root)), Root::Board(root.join(FILE)));
         std::fs::remove_dir_all(root).ok();
@@ -551,7 +551,7 @@ Shared by all Claude Code sessions in this repo. One-line anchored edits only. N
 
     #[test]
     fn resolution_falls_back_without_git() {
-        let root = std::env::temp_dir().join(format!("marsad-board-inject-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-board-inject-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let fake = PathBuf::from("/x/main/.git");
         assert_eq!(resolve_with(s(&root), |_| Some(fake.clone())), Root::Board(PathBuf::from("/x/main").join(FILE)));
@@ -568,7 +568,7 @@ Shared by all Claude Code sessions in this repo. One-line anchored edits only. N
 
     #[test]
     fn a_large_board_is_truncated() {
-        let root = std::env::temp_dir().join(format!("marsad-board-big-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-board-big-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join(FILE);
         std::fs::write(&path, "x".repeat(2 * 1024 * 1024)).unwrap();
@@ -583,7 +583,7 @@ Shared by all Claude Code sessions in this repo. One-line anchored edits only. N
 
     #[test]
     fn only_a_regular_file_is_read() {
-        let root = std::env::temp_dir().join(format!("marsad-board-fifo-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-board-fifo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("dir")).unwrap();
         assert_eq!(read(&root.join("dir")).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
@@ -600,7 +600,7 @@ Shared by all Claude Code sessions in this repo. One-line anchored edits only. N
 
     #[test]
     fn git_output_must_be_one_path() {
-        let root = std::env::temp_dir().join(format!("marsad-board-out-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-board-out-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".git")).unwrap();
         let real = root.canonicalize().unwrap();

@@ -1,6 +1,6 @@
-//! `marsad statusline`: Claude Code's status line command.
+//! `jazari statusline`: Claude Code's status line command.
 //! Saves the exact context-window and rate-limit figures for the dashboard, then prints
-//! either the user's original status line (if marsad wrapped one) or a compact default.
+//! either the user's original status line (if jazari wrapped one) or a compact default.
 
 use crate::model::{Level, RateWindow, StatusSnapshot, auto_compact_window, context_info, fmt_tokens};
 use serde_json::{Value, json};
@@ -13,7 +13,7 @@ pub fn status_dir() -> PathBuf {
     crate::claude_data_dir().join("status")
 }
 
-/// Where `marsad install` keeps a pre-existing statusLine setting it replaced.
+/// Where `jazari install` keeps a pre-existing statusLine setting it replaced.
 pub fn original_path() -> PathBuf {
     crate::claude_data_dir().join("statusline-original.json")
 }

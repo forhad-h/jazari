@@ -577,7 +577,7 @@ fn variant_notice(i: usize, n: usize) -> String {
 }
 
 /// Opens `text` in `$VISUAL`, `$EDITOR`, or `vi` (`notepad` on Windows), and returns what was saved.
-/// The temp file is named `marsad-<kind>-…<ext>`, so the editor picks the right mode.
+/// The temp file is named `jazari-<kind>-…<ext>`, so the editor picks the right mode.
 pub fn edit_in_editor(text: &str, kind: &str, ext: &str) -> Result<String, String> {
     let editor = ["VISUAL", "EDITOR"]
         .iter()
@@ -588,7 +588,7 @@ pub fn edit_in_editor(text: &str, kind: &str, ext: &str) -> Result<String, Strin
     let program = parts.next().ok_or("no editor is set")?;
     // A fresh file that must not exist yet, so a planted file or symlink in the shared temp dir is never written through.
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let path = std::env::temp_dir().join(format!("marsad-{kind}-{}-{nanos:x}{ext}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("jazari-{kind}-{}-{nanos:x}{ext}", std::process::id()));
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -617,7 +617,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marsad-share-view-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-share-view-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -663,7 +663,7 @@ mod tests {
                 }
                 Draft::line(line)
             }),
-            card_path: Arc::new(move |s| dir.join(format!("marsad-{}.png", s.date))),
+            card_path: Arc::new(move |s| dir.join(format!("jazari-{}.png", s.date))),
             copy: Arc::new(move |text| {
                 c.lock().unwrap().push(text.to_string());
                 copied
@@ -711,7 +711,7 @@ mod tests {
         drop(v);
 
         let (mut v, preview_fake) = preview(&dir);
-        assert_eq!(v.on_key(key(KeyCode::Char('q'))), Outcome::Close, "q cancels the share, not marsad");
+        assert_eq!(v.on_key(key(KeyCode::Char('q'))), Outcome::Close, "q cancels the share, not jazari");
         drop(v);
         assert_eq!(files(&dir), 0);
         for f in [fake, preview_fake] {
@@ -878,7 +878,7 @@ mod tests {
         let Screen::Done(done) = v.screen() else { panic!("not done") };
         let steps = done.steps();
         assert_eq!(steps[0].0, "card");
-        assert!(steps[0].2.contains("marsad-2026-10-24.png"));
+        assert!(steps[0].2.contains("jazari-2026-10-24.png"));
         assert_eq!((steps[1].0, steps[1].1), ("clipboard", Mark::Failed));
         assert!(steps[1].2.contains("by hand"));
     }

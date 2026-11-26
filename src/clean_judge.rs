@@ -1,7 +1,7 @@
 //! Claude's opinion on cleanup items that hold data (backups, unused Docker volumes, worktrees):
 //! keep, suggest or safe, with a one-line reason. One isolated `claude -p` call per batch, set up
 //! like the prompt generator (`--safe-mode`, no tools, no transcript, `MARKER_ENV`), given only a
-//! redacted description: names, sizes and ages, never file contents. Claude only advises; marsad
+//! redacted description: names, sizes and ages, never file contents. Claude only advises; jazari
 //! deletes, and only after the user confirms each item.
 
 use crate::clean::{Action, DirKind, Item, Tier};
@@ -161,7 +161,7 @@ fn models() -> Vec<Option<String>> {
     list
 }
 
-/// The items Claude is asked about: data-holding ones marsad could remove.
+/// The items Claude is asked about: data-holding ones jazari could remove.
 pub fn candidates(items: &[Item]) -> Vec<&Item> {
     items.iter().filter(|i| i.tier == Tier::C && i.action != Action::None).collect()
 }
@@ -171,7 +171,7 @@ pub fn judge(items: &[&Item]) -> Result<Vec<(String, Verdict)>, String> {
     if items.is_empty() {
         return Ok(Vec::new());
     }
-    let program = std::env::var_os("MARSAD_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into());
+    let program = std::env::var_os("JAZARI_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into());
     let home = dirs::home_dir().unwrap_or_default();
     let input = describe(items, &home).to_string();
     let dir = crate::data_dir().join("generator");

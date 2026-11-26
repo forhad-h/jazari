@@ -205,7 +205,7 @@ impl CleanView {
                 }
             }
             KeyCode::Enter | KeyCode::Char('x') if !self.busy() => match self.items.get(self.selected) {
-                Some(item) if item.action == crate::clean::Action::None => self.log = vec![format!("{}: marsad only reports this ({})", item.what, item.note)],
+                Some(item) if item.action == crate::clean::Action::None => self.log = vec![format!("{}: jazari only reports this ({})", item.what, item.note)],
                 Some(_) => self.confirm = Some(Confirm::One(self.selected)),
                 None => {}
             },

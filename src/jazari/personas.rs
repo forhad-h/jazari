@@ -1,5 +1,5 @@
 //! The roles jazari's workers take, from `assets/jazari/personas.md`, or from
-//! `~/.marsad/jazari/personas.md` when the founder keeps their own (`rubrics.md` likewise). Each
+//! `~/.jazari/build/personas.md` when the founder keeps their own (`rubrics.md` likewise). Each
 //! run gets the shared worker rules plus its role's mandate, and the role's tier picks the model.
 
 use super::limits::Profile;

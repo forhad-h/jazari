@@ -386,7 +386,7 @@ pub struct Session {
     pub transcript_path: Option<PathBuf>,
     pub status: Status,
     pub status_since: f64,
-    /// When marsad first saw the session; a stable tie-breaker for sorting.
+    /// When jazari first saw the session; a stable tie-breaker for sorting.
     pub started: f64,
     pub last_event: f64,
     /// Time of the latest hook event from the main agent (not a subagent).
@@ -404,15 +404,15 @@ pub struct Session {
     pub model: Option<String>,
     pub title: Option<String>,
     pub pid: Option<u32>,
-    /// Why marsad's guard stopped the session and how to resume it, until it is resumed.
+    /// Why jazari's guard stopped the session and how to resume it, until it is resumed.
     pub halted: Option<String>,
     /// The command check's latest finding in this turn, e.g. "asked (download-exec): …".
     pub flag: Option<String>,
-    /// The latest status line the session posted with `marsad say`.
+    /// The latest status line the session posted with `jazari watch say`.
     pub said: Option<String>,
-    /// Messages queued with `marsad tell` that the session hasn't picked up yet.
+    /// Messages queued with `jazari watch tell` that the session hasn't picked up yet.
     pub waiting: usize,
-    /// A stop request from marsad waits for the session's next tool call.
+    /// A stop request from jazari waits for the session's next tool call.
     pub stop_requested: bool,
     pub subagents: BTreeMap<String, Subagent>,
     pub stats: TranscriptStats,

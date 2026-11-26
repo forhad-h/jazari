@@ -1,4 +1,4 @@
-//! The prompts a Claude Code session can start with: the ones marsad ships (coordination, output
+//! The prompts a Claude Code session can start with: the ones jazari ships (coordination, output
 //! hygiene) and the user's own `.md` files in `<data dir>/prompts/`.
 //!
 //! `claude` reads only the last `--append-system-prompt-file` it is given, so a chosen set is merged
@@ -28,7 +28,7 @@ pub struct Rule {
     pub title: String,
     pub summary: String,
     body: String,
-    /// The user's own prompt or skill, not one marsad ships.
+    /// The user's own prompt or skill, not one jazari ships.
     pub own: bool,
     pub kind: Kind,
 }
@@ -70,7 +70,7 @@ struct Builtin {
     body: &'static str,
 }
 
-/// The prompts marsad ships, listed and merged before the user's own. Add new ones at the end.
+/// The prompts jazari ships, listed and merged before the user's own. Add new ones at the end.
 const BUILTIN: &[Builtin] = &[
     Builtin {
         key: COORDINATION,
@@ -85,10 +85,10 @@ const BUILTIN: &[Builtin] = &[
         body: include_str!("../assets/OUTPUT-HYGIENE.md"),
     },
     Builtin {
-        key: "marsad",
-        title: "Working with marsad",
-        summary: "the session reads marsad's messages, reports with `marsad say`, and checks the machine before heavy work",
-        body: include_str!("../assets/MARSAD.md"),
+        key: "jazari",
+        title: "Working with jazari",
+        summary: "the session reads jazari's messages, reports with `jazari watch say`, and checks the machine before heavy work",
+        body: include_str!("../assets/JAZARI.md"),
     },
 ];
 
@@ -105,7 +105,7 @@ const TEAMMATE_PREFIX: &str = "teammate-";
 const MAX_NAME_KEYS: usize = 60;
 
 /// Files at paths earlier versions printed (in the legacy dir), with the built-in keys each holds.
-/// Kept current while they exist, so saved commands and aliases keep working. `marsad
+/// Kept current while they exist, so saved commands and aliases keep working. `jazari
 /// coordination` prints the first, in the data dir. To be dropped in a later release.
 const LEGACY_FILES: &[(&str, &[&str])] = &[
     ("coordination.md", &[COORDINATION]),
@@ -225,7 +225,7 @@ fn with_skills(mut lib: Vec<Rule>, skills: Vec<Rule>) -> Vec<Rule> {
     lib
 }
 
-/// The prompts marsad ships.
+/// The prompts jazari ships.
 #[cfg(test)]
 pub(crate) fn builtin_rules() -> Vec<Rule> {
     builtin_library()
@@ -248,7 +248,7 @@ pub(crate) fn library_in(dir: &Path) -> Vec<Rule> {
         let Some(key) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
             continue;
         };
-        // `-x` would read as a flag in `marsad rules -x`.
+        // `-x` would read as a flag in `jazari build rules -x`.
         if key == "all" || key.starts_with('-') || rules.iter().any(|r| r.key == key) {
             continue;
         }
@@ -692,11 +692,11 @@ pub(crate) fn write_if_changed(path: &Path, content: &str) -> anyhow::Result<()>
 /// can't be removed doesn't stop the rest.
 /// Nothing in the legacy dir is removed.
 pub fn prune() -> anyhow::Result<usize> {
-    prune_in(&crate::data_dir(), &crate::legacy_dir(), SystemTime::now())
+    prune_in(&crate::data_dir(), SystemTime::now())
 }
 
-fn prune_in(data: &Path, legacy: &Path, now: SystemTime) -> anyhow::Result<usize> {
-    let refreshed = refresh_legacy(data).and(refresh_legacy(legacy));
+fn prune_in(data: &Path, now: SystemTime) -> anyhow::Result<usize> {
+    let refreshed = refresh_legacy(data);
     let mut removed = 0;
     if let Ok(entries) = std::fs::read_dir(launch_dir(data)) {
         for entry in entries.filter_map(Result::ok) {
@@ -777,10 +777,10 @@ pub fn launch_command(path: &Path) -> String {
     format!("claude --append-system-prompt-file {}", quote_arg(&path.to_string_lossy()))
 }
 
-/// The `marsad rules …` command that prints the same launch command.
+/// The `jazari build rules …` command that prints the same launch command.
 pub fn cli_command(chosen: &[&Rule], mode: Mode) -> String {
     // Keys never start with `-` (see `library_in`), so they can't read as flags.
-    let mut parts = vec!["marsad rules".to_string()];
+    let mut parts = vec!["jazari build rules".to_string()];
     parts.extend(chosen.iter().map(|r| quote_arg(&r.key)));
     if mode == Mode::Team {
         parts.push("--team".into());
@@ -808,7 +808,7 @@ pub struct CoordinationArgs {
     format: crate::report::Format,
 }
 
-/// `marsad rules [keys…] [--team]`: lists the prompts, or writes the chosen set's file and prints the command that loads it.
+/// `jazari build rules [keys…] [--team]`: lists the prompts, or writes the chosen set's file and prints the command that loads it.
 pub fn run(args: RulesArgs) -> anyhow::Result<()> {
     let _ = prune();
     let lib = library();
@@ -828,7 +828,7 @@ pub fn run(args: RulesArgs) -> anyhow::Result<()> {
     print_command(&chosen, mode, args.format)
 }
 
-/// `marsad coordination`: the command for the coordination rules alone, at a stable path, so a
+/// `jazari build coordination`: the command for the coordination rules alone, at a stable path, so a
 /// saved command or alias keeps working across upgrades.
 pub fn run_coordination(args: CoordinationArgs) -> anyhow::Result<()> {
     let _ = prune();
@@ -861,11 +861,11 @@ fn render_list(format: crate::report::Format, lib: &[Rule], dir: &Path) -> Strin
             let mut out: Vec<String> =
                 lib.iter().map(|r| format!("{:<width$}  {:<10}  {:<6}  {}", r.key, if r.own { "[yours]" } else { "[built-in]" }, r.kind.noun(), r.summary)).collect();
             out.push(String::new());
-            out.push("`marsad rules <name>…` prints the command that starts Claude Code with them, e.g.".into());
-            out.push(format!("marsad rules {}", lib.iter().map(|r| quote_arg(&r.key)).collect::<Vec<_>>().join(" ")));
+            out.push("`jazari build rules <name>…` prints the command that starts Claude Code with them, e.g.".into());
+            out.push(format!("jazari build rules {}", lib.iter().map(|r| quote_arg(&r.key)).collect::<Vec<_>>().join(" ")));
             out.push("Add --team to start the lead of an agent team that passes them to its teammates,".into());
             out.push("or --path to print only the file's path, to paste into a session that is already running.".into());
-            out.push("Write your own with `marsad prompt new \"<rough idea>\"`, or add .md files to".into());
+            out.push("Write your own with `jazari build prompt new \"<rough idea>\"`, or add .md files to".into());
             out.push(dir.display().to_string());
             out.join("\n")
         }
@@ -915,7 +915,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marsad-rules-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-rules-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -965,7 +965,7 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "not a prompt").unwrap();
         let lib = library_in(&dir);
         let keys: Vec<_> = lib.iter().map(|r| r.key.as_str()).collect();
-        assert_eq!(keys, ["coordination", "output-hygiene", "marsad", "a-plain", "review-style"]);
+        assert_eq!(keys, ["coordination", "output-hygiene", "jazari", "a-plain", "review-style"]);
         assert!(!lib[0].own && !lib[2].own && lib[3].own);
         assert_eq!(lib[0].title, "Coordination", "the built-in wins a name clash");
         assert_eq!((lib[4].title.as_str(), lib[4].summary.as_str()), ("Review style", "Keep reviews short and kind."));
@@ -980,7 +980,7 @@ mod tests {
         assert_eq!(keys(parse(&lib, &["output-hygiene", "coordination"]).unwrap()), ["coordination", "output-hygiene"]);
         assert_eq!(keys(parse(&lib, &["all"]).unwrap()).len(), 3);
         let err = parse(&lib, &["nope"]).unwrap_err().to_string();
-        assert!(err.contains("coordination, output-hygiene, marsad"), "{err}");
+        assert!(err.contains("coordination, output-hygiene, jazari"), "{err}");
         assert_eq!(keys(known(&lib, &["retired", "output-hygiene"])), ["output-hygiene"]);
         assert_eq!(titles(&known(&lib, &["coordination", "output-hygiene"])), "coordination + output hygiene");
     }
@@ -1057,8 +1057,8 @@ mod tests {
         std::fs::create_dir_all(launch_dir(&data).join("stray.md")).unwrap();
 
         let soon = SystemTime::now() + Duration::from_secs(60);
-        assert_eq!(prune_in(&data, &data, soon).unwrap(), 0, "all recently copied");
-        assert_eq!(prune_in(&data, &data, soon + KEEP_FOR).unwrap(), 2, "a week unused, the session's and lead's go");
+        assert_eq!(prune_in(&data, soon).unwrap(), 0, "all recently copied");
+        assert_eq!(prune_in(&data, soon + KEEP_FOR).unwrap(), 2, "a week unused, the session's and lead's go");
         assert!(!session.exists() && !lead.exists());
         let left = names(&launch_dir(&data));
         assert_eq!(left.len(), 2, "{left:?}");
@@ -1073,7 +1073,7 @@ mod tests {
     fn legacy_paths_are_kept_current_not_deleted() {
         let data = temp_dir("legacy");
         std::fs::write(data.join("coordination+output-hygiene.md"), "old").unwrap();
-        prune_in(&data, &data, SystemTime::now()).unwrap();
+        prune_in(&data, SystemTime::now()).unwrap();
         let lib = builtins();
         assert_eq!(std::fs::read_to_string(data.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["coordination", "output-hygiene"])));
         assert!(!data.join("coordination.md").exists(), "only files that exist are rewritten");
@@ -1130,7 +1130,7 @@ mod tests {
 
     #[test]
     fn quoting_follows_the_platform_shell() {
-        assert_eq!(quote_for("/Users/me/.marsad/launch/session-coordination+output-hygiene-0123abcd.md", false), "/Users/me/.marsad/launch/session-coordination+output-hygiene-0123abcd.md");
+        assert_eq!(quote_for("/Users/me/.jazari/launch/session-coordination+output-hygiene-0123abcd.md", false), "/Users/me/.jazari/launch/session-coordination+output-hygiene-0123abcd.md");
         assert_eq!(quote_for("/Users/Jane Doe/x.md", false), "'/Users/Jane Doe/x.md'");
         assert_eq!(quote_for("/Users/o'neil/x.md", false), "'/Users/o'\\''neil/x.md'");
         assert_eq!(quote_for("C:/Users/me/x.md", true), "C:/Users/me/x.md");
@@ -1140,13 +1140,13 @@ mod tests {
 
     #[test]
     fn commands_quote_their_arguments() {
-        let cmd = launch_command(Path::new("/srv/marsad/launch/a.md"));
-        assert_eq!(cmd, "claude --append-system-prompt-file /srv/marsad/launch/a.md");
+        let cmd = launch_command(Path::new("/srv/jazari/launch/a.md"));
+        assert_eq!(cmd, "claude --append-system-prompt-file /srv/jazari/launch/a.md");
         assert!(!cmd.ends_with('\n'));
         let lib = builtins();
         let mine = Rule { key: "my rules".into(), title: "x".into(), summary: String::new(), body: "x".into(), own: true, kind: Kind::Prompt };
         let chosen = vec![&lib[1], &mine];
-        assert_eq!(cli_command(&chosen, Mode::Team), format!("marsad rules output-hygiene {} --team", quote_arg("my rules")));
+        assert_eq!(cli_command(&chosen, Mode::Team), format!("jazari build rules output-hygiene {} --team", quote_arg("my rules")));
     }
 
     #[test]
@@ -1325,23 +1325,6 @@ mod tests {
         assert!(name.starts_with(&format!("session-{}-", "é".repeat(60))), "{name}");
         let odd = own("my notes: v2?", "x");
         assert!(launch_name("session", &[&odd], "x").starts_with("session-my-notes--v2-"));
-    }
-
-    #[test]
-    fn the_legacy_dir_is_kept_current_and_never_pruned() {
-        let data = temp_dir("legacy-data");
-        let legacy = temp_dir("legacy-old");
-        std::fs::write(legacy.join("coordination+output-hygiene.md"), "old").unwrap();
-        std::fs::create_dir_all(launch_dir(&legacy)).unwrap();
-        let stale = launch_dir(&legacy).join("0123456789abcdef.md");
-        std::fs::write(&stale, "a session file from 0.10").unwrap();
-        let later = SystemTime::now() + KEEP_FOR + KEEP_FOR;
-        prune_in(&data, &legacy, later).unwrap();
-        let lib = builtins();
-        assert_eq!(std::fs::read_to_string(legacy.join("coordination+output-hygiene.md")).unwrap(), merge(&known(&lib, &["coordination", "output-hygiene"])));
-        assert!(stale.exists(), "nothing in the legacy dir is removed");
-        let _ = std::fs::remove_dir_all(&data);
-        let _ = std::fs::remove_dir_all(&legacy);
     }
 
     #[test]

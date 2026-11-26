@@ -1,4 +1,4 @@
-//! jazari's state in SQLite (`~/.marsad/jazari/jazari.db`): products, the task queue, every worker
+//! jazari's state in SQLite (`~/.jazari/build/jazari.db`): products, the task queue, every worker
 //! run, and small values such as the last usage-limit reading.
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -370,7 +370,7 @@ impl Store {
     }
 
     pub fn add_task(&self, t: &NewTask, now: f64) -> anyhow::Result<i64> {
-        anyhow::ensure!(self.product(t.product)?.is_some(), "no product called {}; add it with `marsad jazari product add`", t.product);
+        anyhow::ensure!(self.product(t.product)?.is_some(), "no product called {}; add it with `jazari build product add`", t.product);
         anyhow::ensure!(!t.title.trim().is_empty(), "the task needs a title");
         let kind = if t.kind.is_empty() { "work" } else { t.kind };
         anyhow::ensure!(KINDS.contains(&kind), "not a task kind: {kind}");

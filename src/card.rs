@@ -272,7 +272,7 @@ pub fn svg(d: &CardData) -> String {
 
     let _ = write!(s, "<rect x=\"{TEXT_X}\" y=\"504\" width=\"{TEXT_W}\" height=\"1.5\" fill=\"{}\"/>", hex(rule));
     line(&mut s, "date", TEXT_X, 545.0, FAMILY, 17.0, 0.0, muted, &fmt_date(&d.date), TEXT_W / 2.0);
-    let _ = write!(s, "<text id=\"footer\" x=\"{}\" y=\"545\" font-size=\"17\" text-anchor=\"end\" fill=\"{}\">via <tspan font-family=\"{BOLD}\" fill=\"{}\">marsad</tspan></text>", TEXT_X + TEXT_W, hex(muted), hex(accent));
+    let _ = write!(s, "<text id=\"footer\" x=\"{}\" y=\"545\" font-size=\"17\" text-anchor=\"end\" fill=\"{}\">via <tspan font-family=\"{BOLD}\" fill=\"{}\">jazari</tspan></text>", TEXT_X + TEXT_W, hex(muted), hex(accent));
     s.push_str("</svg>");
     s
 }
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn card_shows_every_stat_and_the_date() {
         let s = svg(&real());
-        for want in ["Expert", "Forhad Hosain", "386.2M", "198M", "340M", "11.3M", "PER DAY", "212.5M", "Subagents", "24 October 2026", "AI-ASSISTED ENGINEERING \u{b7} RANK 5 OF 7", "marsad"] {
+        for want in ["Expert", "Forhad Hosain", "386.2M", "198M", "340M", "11.3M", "PER DAY", "212.5M", "Subagents", "24 October 2026", "AI-ASSISTED ENGINEERING \u{b7} RANK 5 OF 7", "jazari"] {
             assert!(s.contains(want), "card lacks {want}");
         }
         assert!(!s.contains("TODAY"), "today is gone from the card");
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn write_at_creates_the_folder_and_the_file() {
-        let dir = std::env::temp_dir().join(format!("marsad-card-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-card-{}", std::process::id()));
         let path = dir.join("nested").join("card.png");
         write_at(&real(), &path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), png(&real()).unwrap());

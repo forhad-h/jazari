@@ -1,4 +1,4 @@
-//! The command check: before Claude Code runs a tool call, `marsad guard --hook` looks for
+//! The command check: before Claude Code runs a tool call, `jazari guard --hook` looks for
 //! well-known dangerous shapes (deleting the home folder, sending secrets out, piping a download
 //! into a shell, persistence, look-alike package names) and asks the user or refuses the call.
 //! It is one layer of pattern matching, not a sandbox: disguised code can get past it.
@@ -1441,7 +1441,7 @@ pub fn assess_write(path: &str, content: &str) -> Option<Finding> {
 
 // ---------- settings ----------
 
-/// Local malware scanners marsad can hand a file to.
+/// Local malware scanners jazari can hand a file to.
 pub const SCANNERS: &[&str] = &["clamdscan", "clamscan"];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1641,19 +1641,19 @@ pub fn check(cfg: &Config, tool: &str, input: &Value, cwd: &Path, env: &Env) -> 
 
 // ---------- the hook ----------
 
-/// The event marsad logs when the command check asks about or refuses a tool call.
-pub const FLAGGED_EVENT: &str = "MarsadFlagged";
+/// The event jazari logs when the command check asks about or refuses a tool call.
+pub const FLAGGED_EVENT: &str = "JazariFlagged";
 
 /// The hook output for a finding, with the disk note (if any) added to Claude's context.
 fn verdict_json(f: &Finding, note: Option<&str>) -> Value {
     let mut out = match f.severity {
         Severity::Block => json!({
-            "systemMessage": format!("marsad refused a tool call: {}", f.reason),
+            "systemMessage": format!("jazari refused a tool call: {}", f.reason),
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
                 "permissionDecisionReason": format!(
-                    "[marsad] Refused ({}): {}. Don't retry it or work around the check; tell the user what you were trying to do.",
+                    "[jazari] Refused ({}): {}. Don't retry it or work around the check; tell the user what you were trying to do.",
                     f.rule, f.reason
                 ),
             },
@@ -1662,7 +1662,7 @@ fn verdict_json(f: &Finding, note: Option<&str>) -> Value {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "ask",
-                "permissionDecisionReason": format!("marsad ({}): {}", f.rule, f.reason),
+                "permissionDecisionReason": format!("jazari ({}): {}", f.rule, f.reason),
             },
         }),
     };
@@ -1703,7 +1703,7 @@ pub fn hook(raw: &Value, session: &str, note: Option<&str>) -> Option<Value> {
     Some(verdict_json(&f, note))
 }
 
-// ---------- marsad risk ----------
+// ---------- jazari watch risk ----------
 
 #[derive(Args)]
 pub struct RiskArgs {
@@ -2150,7 +2150,7 @@ mod tests {
 
     #[test]
     fn the_scanner_checks_only_fresh_files_a_command_runs() {
-        let dir = std::env::temp_dir().join(format!("marsad-risk-scan-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-risk-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("install.sh"), "echo hi").unwrap();
@@ -2198,16 +2198,16 @@ mod tests {
         assert!(out.get("continue").is_none(), "only the call is refused, not the session");
 
         let f = ask("download-exec", "piping into `sh` runs code downloaded from the internet");
-        let out = verdict_json(&f, Some("[marsad] The disk is 91% full"));
+        let out = verdict_json(&f, Some("[jazari] The disk is 91% full"));
         assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "ask");
-        assert_eq!(out["hookSpecificOutput"]["permissionDecisionReason"], "marsad (download-exec): piping into `sh` runs code downloaded from the internet");
-        assert_eq!(out["hookSpecificOutput"]["additionalContext"], "[marsad] The disk is 91% full");
+        assert_eq!(out["hookSpecificOutput"]["permissionDecisionReason"], "jazari (download-exec): piping into `sh` runs code downloaded from the internet");
+        assert_eq!(out["hookSpecificOutput"]["additionalContext"], "[jazari] The disk is 91% full");
         assert!(out.get("systemMessage").is_none());
     }
 
     #[test]
     fn recent_findings_come_from_both_logs() {
-        let dir = std::env::temp_dir().join(format!("marsad-risk-log-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-risk-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let ev = |n: u32| json!({ "ts": n, "session_id": "s", "hook_event_name": FLAGGED_EVENT, "rule": format!("r{n}") }).to_string();

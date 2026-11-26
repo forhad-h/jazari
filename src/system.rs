@@ -1,4 +1,4 @@
-//! Disk, memory and CPU in one reading, for the dashboard's meters and `marsad system`, so a
+//! Disk, memory and CPU in one reading, for the dashboard's meters and `jazari watch system`, so a
 //! session (or the user) can tell whether the machine has room for heavy work.
 
 use crate::disk::{Level, Reading};
@@ -24,10 +24,10 @@ pub struct Snapshot {
     /// 1, 5 and 15 minute load averages (all 0 where the platform has none).
     pub load: [f64; 3],
     pub cores: usize,
-    /// marsad's own process: CPU (percent of one core) and resident memory in bytes.
+    /// jazari's own process: CPU (percent of one core) and resident memory in bytes.
     pub own_cpu: Option<f32>,
     pub own_mem: u64,
-    /// Size of marsad's data folder on disk, re-measured every minute.
+    /// Size of jazari's data folder on disk, re-measured every minute.
     pub own_data: Option<u64>,
 }
 
@@ -173,7 +173,7 @@ pub struct SystemArgs {
     timeout: u64,
 }
 
-/// `marsad system --wait`: returns once memory and CPU are back under strain, or fails after the
+/// `jazari watch system --wait`: returns once memory and CPU are back under strain, or fails after the
 /// timeout so the caller can decide (wait again, or go on with light work).
 fn wait(timeout: u64) -> anyhow::Result<()> {
     let limits = crate::pressure::Limits::load();
@@ -229,7 +229,7 @@ pub fn run(a: SystemArgs) -> anyhow::Result<()> {
                     "swap_used_gib": round(snap.swap_used as f64 / GIB),
                     "swap_total_gib": round(snap.swap_total as f64 / GIB),
                 },
-                "marsad_data_bytes": snap.own_data,
+                "jazari_data_bytes": snap.own_data,
                 "cpu": {
                     "used_pct": snap.cpu_pct.map(|c| round(c as f64)),
                     "load": snap.load.map(round),
@@ -265,7 +265,7 @@ pub fn run(a: SystemArgs) -> anyhow::Result<()> {
                 None => println!("Disk    unknown"),
             }
             if let Some(n) = snap.own_data {
-                println!("marsad  data folder {}", crate::clean::fmt_bytes(n));
+                println!("jazari  data folder {}", crate::clean::fmt_bytes(n));
             }
             if concerns.is_empty() {
                 println!("OK: room for heavy work.");

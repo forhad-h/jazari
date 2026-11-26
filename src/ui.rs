@@ -313,8 +313,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         FooterNote::Error(e) => (format!("{e} "), Color::Red),
         FooterNote::Info(i) => (i.to_string(), Color::Green),
         FooterNote::Badge(a) => (format!("★ {a} "), Color::Green),
-        FooterNote::Update(Notice::Available(v)) => (format!("v{v} available · run `marsad update` "), Color::Yellow),
-        FooterNote::Update(Notice::Installed(v)) => (format!("updated to v{v} · restart marsad "), Color::Yellow),
+        FooterNote::Update(Notice::Available(v)) => (format!("v{v} available · run `jazari update` "), Color::Yellow),
+        FooterNote::Update(Notice::Installed(v)) => (format!("updated to v{v} · restart jazari "), Color::Yellow),
     });
     if let Some(note) = &app.copy_note {
         draw_copy_note(f, copy_note, note);
@@ -361,7 +361,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, visible: &[&Session]) {
     let waiting = visible.iter().filter(|s| s.status.needs_user()).count();
     let active = visible.iter().filter(|s| s.status == Status::Active).count();
     let mut left = vec![
-        Span::styled(" marsad ", Style::new().fg(Color::Black).bg(ACCENT).bold()),
+        Span::styled(" jazari ", Style::new().fg(Color::Black).bg(ACCENT).bold()),
         Span::raw(format!("  {} sessions", visible.len())),
         Span::styled(format!(" · {active} active"), Style::new().fg(Color::Green)),
     ];
@@ -507,7 +507,7 @@ fn system_lines(s: &crate::system::Snapshot, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-/// What marsad itself uses: its CPU, memory and data folder.
+/// What jazari itself uses: its CPU, memory and data folder.
 fn own_line(s: &crate::system::Snapshot) -> Line<'static> {
     let mut text = String::new();
     if let Some(cpu) = s.own_cpu {
@@ -517,10 +517,10 @@ fn own_line(s: &crate::system::Snapshot) -> Line<'static> {
     if let Some(n) = s.own_data {
         text.push_str(&format!(" · data {}", crate::clean::fmt_bytes(n)));
     }
-    Line::from(vec![label("marsad"), dim(text)])
+    Line::from(vec![label("jazari"), dim(text)])
 }
 
-/// The bottom-right panel: the machine's CPU, memory, swap and disk, then marsad's own share.
+/// The bottom-right panel: the machine's CPU, memory, swap and disk, then jazari's own share.
 fn draw_system(f: &mut Frame, area: Rect, snap: Option<&crate::system::Snapshot>) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -662,9 +662,9 @@ fn draw_empty(f: &mut Frame, area: Rect, app: &App) {
         ]
     } else {
         vec![
-            Line::from("marsad hooks are not installed.".bold()),
+            Line::from("jazari hooks are not installed.".bold()),
             Line::from(""),
-            Line::from(vec!["Run ".fg(MUTED), "marsad install".fg(ACCENT).bold(), ", then restart your Claude Code sessions.".fg(MUTED)]),
+            Line::from(vec!["Run ".fg(MUTED), "jazari install".fg(ACCENT).bold(), ", then restart your Claude Code sessions.".fg(MUTED)]),
         ]
     };
     let block = Block::bordered().border_type(BorderType::Rounded).border_style(FRAME).title_style(TITLE);
@@ -767,7 +767,7 @@ fn draw_rules_picker(f: &mut Frame, area: Rect, picker: &crate::app::RulesPicker
                 }
                 let tick = if picker.ticked[i] { "[x]" } else { "[ ]" };
                 let digit = if i < 9 { format!("{}", i + 1) } else { " ".into() };
-                // Every prompt says whose it is: built into marsad, or the user's own file.
+                // Every prompt says whose it is: built into jazari, or the user's own file.
                 let tag = if rule.own { Span::styled("  [yours]", Style::new().fg(Color::Green)) } else { Span::styled("  [built-in]", Style::new().fg(MUTED)) };
                 lines.push(row(i == picker.cursor, format!("{digit} {tick} "), rule.title.clone(), Some(tag)));
                 // The highlighted skill shows its whole description: when Claude loads it, and when not.
@@ -1399,7 +1399,7 @@ fn draw_board(f: &mut Frame, area: Rect, app: &App) {
                     Line::from(""),
                     Line::from(dim("Sessions started with the coordination rules create it when they begin work.")),
                     Line::from(vec![dim("Press "), "c".bold(), dim(" and tick Coordination to copy the command that starts one, or run:")]),
-                    Line::from("marsad coordination".fg(ACCENT)),
+                    Line::from("jazari build coordination".fg(ACCENT)),
                 ]
             }
         };
@@ -1777,9 +1777,9 @@ fn session_lines(s: &Session, tick: u64) -> Vec<Line<'static>> {
     lines
 }
 
-/// What the session last posted with `marsad say`, and what marsad has waiting for it.
+/// What the session last posted with `jazari watch say`, and what jazari has waiting for it.
 fn channel_line(s: &Session) -> Option<Line<'static>> {
-    let mut spans = vec![label("marsad")];
+    let mut spans = vec![label("jazari")];
     if let Some(said) = &s.said {
         spans.push(Span::raw(format!("says: {said}")));
     }

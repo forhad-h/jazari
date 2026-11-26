@@ -12,7 +12,6 @@ mod clean_view;
 mod clipboard;
 mod context;
 mod disk;
-mod entry;
 mod events;
 mod handoff;
 mod hook;
@@ -20,7 +19,6 @@ mod install;
 mod jazari;
 mod jsonl;
 mod live;
-mod migrate;
 mod model;
 mod pin;
 mod portable;
@@ -50,37 +48,85 @@ mod watch;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// A live dashboard for every Claude Code session on this machine.
+/// jazari runs an AI software company on your Claude subscription, and watches every Claude Code
+/// session on this machine. `jazari` alone opens the dashboard.
 #[derive(Parser)]
-#[command(
-    version,
-    about,
-    after_help = "marsad watches and protects. To build products, write prompts and skills, or hand off a session, use `jazari --help` (or `marsad jazari --help`)."
-)]
+#[command(version, about)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Option<Cmd>,
+    top: Option<Top>,
 }
 
 #[derive(Subcommand)]
-enum Cmd {
-    /// Hook entrypoint called by Claude Code (reads hook JSON on stdin).
-    Hook,
-    /// Status line entrypoint called by Claude Code (reads status JSON on stdin).
-    Statusline,
-    /// Register marsad hooks (and status line) in ~/.claude/settings.json.
+enum Top {
+    /// Watch and protect: the dashboard (alone), sessions, usage, disk, memory and risky commands.
+    Watch {
+        #[command(subcommand)]
+        cmd: Option<Cmd>,
+    },
+    /// Build: products and tasks, Telegram, handoff, prompts and skills.
+    #[command(subcommand)]
+    Build(jazari::JazariCmd),
+    /// Register jazari's hooks (and status line) in ~/.claude/settings.json.
     Install {
         /// Don't install the status line; context size is then estimated from transcripts.
         #[arg(long)]
         no_statusline: bool,
     },
-    /// Remove marsad hooks from ~/.claude/settings.json.
+    /// Remove jazari's hooks from ~/.claude/settings.json.
+    Uninstall,
+    /// Update jazari to the latest release (or turn automatic updates on/off with --auto).
+    Update(update::UpdateArgs),
+    /// Hook entrypoint called by Claude Code (reads hook JSON on stdin).
+    #[command(hide = true)]
+    Hook,
+    /// Status line entrypoint called by Claude Code (reads status JSON on stdin).
+    #[command(hide = true)]
+    Statusline,
+    /// Background disk watcher (started by the SessionStart hook), or with --hook the synchronous
+    /// hook that checks the disk and risky commands before each tool call and prompt.
+    #[command(hide = true)]
+    Guard {
+        #[arg(long)]
+        hook: bool,
+    },
+}
+
+impl Top {
+    /// The command to run; None opens the dashboard.
+    fn into_cmd(self) -> Option<Cmd> {
+        match self {
+            Top::Watch { cmd } => cmd,
+            Top::Build(c) => Some(Cmd::Build(c)),
+            Top::Install { no_statusline } => Some(Cmd::Install { no_statusline }),
+            Top::Uninstall => Some(Cmd::Uninstall),
+            Top::Update(a) => Some(Cmd::Update(a)),
+            Top::Hook => Some(Cmd::Hook),
+            Top::Statusline => Some(Cmd::Statusline),
+            Top::Guard { hook } => Some(Cmd::Guard { hook }),
+        }
+    }
+}
+
+/// `jazari watch …`. The top-level commands run through the same dispatch, hidden here.
+#[derive(Subcommand)]
+enum Cmd {
+    #[command(hide = true)]
+    Hook,
+    #[command(hide = true)]
+    Statusline,
+    #[command(hide = true)]
+    Install {
+        #[arg(long)]
+        no_statusline: bool,
+    },
+    #[command(hide = true)]
     Uninstall,
     /// Index new transcript data into the usage history.
     Sync,
     /// Show or set how many days of usage history are kept (default 30).
     Retention(report::RetentionArgs),
-    /// Total tokens used since marsad started counting, including days no longer kept.
+    /// Total tokens used since jazari started counting, including days no longer kept.
     Total(report::TotalArgs),
     /// Show your rank and achievement levels, with progress to the next.
     Badges(badges::BadgesArgs),
@@ -94,12 +140,12 @@ enum Cmd {
     Schema,
     /// Show live sessions: status, current activity, context left, and usage limits.
     Status(live::StatusArgs),
-    /// Write all marsad data (day counter, history, settings) to one file, to back up or move it.
+    /// Write all jazari data (day counter, history, settings) to one file, to back up or move it.
     Export {
-        /// Output file (default: marsad-export-YYYY-MM-DD.json).
+        /// Output file (default: jazari-export-YYYY-MM-DD.json).
         file: Option<PathBuf>,
     },
-    /// Merge a `marsad export` file into this machine's data; importing twice never double counts.
+    /// Merge a `jazari watch export` file into this machine's data; importing twice never double counts.
     Import {
         file: PathBuf,
         /// The file is this machine's own earlier data (a reinstall with the old transcripts still
@@ -109,25 +155,13 @@ enum Cmd {
     },
     /// How full this session's context is, and the automatic handoff warning (--warn).
     Context(context::ContextArgs),
-    // These moved to jazari (`jazari handoff`, `jazari rules` …). They stay here, hidden, because
-    // Claude sessions and scripts run the `marsad` spelling.
-    #[command(hide = true)]
-    Handoff(handoff::HandoffArgs),
-    #[command(hide = true)]
-    Rules(rules::RulesArgs),
-    #[command(subcommand, hide = true)]
-    Prompt(prompt_gen::PromptCmd),
-    #[command(subcommand, hide = true)]
-    Skill(prompt_gen::SkillCmd),
-    #[command(hide = true)]
-    Coordination(rules::CoordinationArgs),
     /// Free disk space and the levels at which sessions are warned and stopped (--guard on/off).
     Disk(disk::DiskArgs),
     /// Find caches, build output and Docker data that can be rebuilt, and remove them safely.
     Clean(clean::CleanArgs),
     /// Send a running session a message, or stop (--stop) or interrupt (--interrupt) it.
     Tell(channel::TellArgs),
-    /// From inside a session: post what it is doing to marsad (--attention: it needs the user).
+    /// From inside a session: post what it is doing to jazari (--attention: it needs the user).
     Say(channel::SayArgs),
     /// Disk, memory, swap and CPU in one reading, with what to be careful about before heavy work.
     System(system::SystemArgs),
@@ -141,40 +175,40 @@ enum Cmd {
         #[arg(long)]
         hook: bool,
     },
-    /// Update marsad to the latest release (or turn automatic updates on/off with --auto).
+    #[command(hide = true)]
     Update(update::UpdateArgs),
-    /// Hold what marsad does on its own (interrupting or ending sessions, cleaning up, updating).
+    /// Hold what jazari does on its own (interrupting or ending sessions, cleaning up, updating).
     Pause(act::PauseArgs),
-    /// Turn marsad's own actions back on after `marsad pause`.
+    /// Turn jazari's own actions back on after `jazari watch pause`.
     Resume,
-    /// What marsad did, refused or held: messages, stops, cleanups, setting changes and more.
+    /// What jazari did, refused or held: messages, stops, cleanups, setting changes and more.
     Actions(act::ActionsArgs),
-    /// The old spelling of `jazari …`.
-    #[command(subcommand, hide = true)]
-    Jazari(jazari::JazariCmd),
+    /// Never parsed: `jazari build …` reaches it through [`Top::Build`] only, so no `watch` spelling
+    /// of a build command slips past the command check.
+    #[command(skip)]
+    Build(jazari::JazariCmd),
 }
 
-/// The folder `MARSAD_HOME` names, which replaces both `data_dir` and `legacy_dir`.
+/// An environment setting, `JAZARI_<name>`. An empty value counts as unset.
+pub fn env(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(format!("JAZARI_{name}")).filter(|v| !v.is_empty())
+}
+
+/// The folder `JAZARI_HOME` names, used instead of `~/.jazari`.
 pub fn home_override() -> Option<PathBuf> {
-    std::env::var_os("MARSAD_HOME").filter(|d| !d.is_empty()).map(PathBuf::from)
+    env("HOME").map(PathBuf::from)
 }
 
-/// Where marsad keeps its data: `~/.marsad`, or `MARSAD_HOME`. What every coding tool shares (the
+/// Where jazari keeps its data: `~/.jazari`, or `JAZARI_HOME`. What every coding tool shares (the
 /// settings, usage history, prompts and launch files) is at the top; each tool's own files are in
-/// a subfolder named after it.
+/// a subfolder named after it, and the build part's are in `build/`.
 pub fn data_dir() -> PathBuf {
-    home_override().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".marsad"))
+    home_override().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".jazari"))
 }
 
 /// Claude Code's own files: the hook event log, status line reports and context-warning markers.
 pub fn claude_data_dir() -> PathBuf {
     data_dir().join("claude")
-}
-
-/// Where versions before 0.11 kept the data (`~/.claude/marsad`, or `MARSAD_HOME`). It still holds
-/// the files at the paths they printed, which are kept current.
-pub fn legacy_dir() -> PathBuf {
-    home_override().unwrap_or_else(|| claude_dir().join("marsad"))
 }
 
 pub fn claude_dir() -> PathBuf {
@@ -188,45 +222,9 @@ pub fn now() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// jazari's own command line: `jazari …`, or `mamal build …`.
-#[derive(Parser)]
-#[command(version, about = "jazari acts and builds: products and tasks, Telegram, handoff, prompts and skills.")]
-struct JazariCli {
-    #[command(subcommand)]
-    cmd: jazari::JazariCmd,
-}
-
 fn main() -> anyhow::Result<()> {
-    let argv: Vec<String> = std::env::args().collect();
-    let (entry, tip) = entry::route(&argv);
-    // Only a person at a terminal sees the tip: sessions read stderr as an error.
-    if let Some(tip) = tip
-        && std::io::IsTerminal::is_terminal(&std::io::stderr())
-    {
-        eprintln!("{tip}");
-    }
-    let cmd = match entry {
-        entry::Entry::Marsad(args) => Cli::parse_from(args).cmd,
-        entry::Entry::Jazari(args) => Some(Cmd::Jazari(JazariCli::parse_from(args).cmd)),
-    };
-    // Before anything reads or writes data. The hooks and the status line must stay quiet.
+    let cmd = Cli::parse().top.and_then(Top::into_cmd);
     let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_) | Cmd::Guard { .. }));
-    // Claude Code waits on the guard hook before every tool call: it never copies data, which can
-    // take longer than the hook may. Any other marsad run does that.
-    let sync_hook = matches!(cmd, Some(Cmd::Guard { hook: true }));
-    let outcome = if sync_hook { migrate::Outcome::Idle } else { migrate::from_legacy(if quiet { migrate::HOOK_WAIT } else { migrate::WAIT }, !quiet) };
-    match outcome {
-        migrate::Outcome::Busy if !quiet => {
-            anyhow::bail!("marsad's data is being copied to {} by another marsad; try again in a moment", data_dir().display())
-        }
-        _ => {}
-    }
-    // The dashboard shows it in its footer.
-    if !quiet && cmd.is_some()
-        && let Some(note) = migrate::take_notice()
-    {
-        eprintln!("{note}");
-    }
     act::set_origin(match &cmd {
         None => act::Origin::Dashboard,
         Some(Cmd::Guard { hook: false }) => act::Origin::Watcher,
@@ -265,12 +263,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
             Ok(())
         }
         Some(Cmd::Status(args)) => live::status(args),
-        Some(Cmd::Handoff(args)) => handoff::run(args),
         Some(Cmd::Context(args)) => context::run(args),
-        Some(Cmd::Rules(args)) => rules::run(args),
-        Some(Cmd::Prompt(cmd)) => prompt_gen::run(cmd),
-        Some(Cmd::Skill(cmd)) => prompt_gen::run_skill(cmd),
-        Some(Cmd::Coordination(args)) => rules::run_coordination(args),
         Some(Cmd::Export { file }) => portable::export(file),
         Some(Cmd::Import { file, restore }) => portable::import(&file, restore),
         Some(Cmd::Disk(args)) => disk::run(args),
@@ -295,7 +288,148 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
         Some(Cmd::Pause(args)) => act::run_pause(args),
         Some(Cmd::Resume) => act::run_resume(),
         Some(Cmd::Actions(args)) => act::run_actions(args),
-        Some(Cmd::Jazari(cmd)) => jazari::run(cmd),
+        Some(Cmd::Build(cmd)) => jazari::run(cmd),
         None => app::run(),
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    /// The docs that sessions and people read, with every command line in them checked.
+    const DOCS: [(&str, &str); 7] = [
+        ("assets/SKILL.md", include_str!("../assets/SKILL.md")),
+        ("assets/JAZARI.md", include_str!("../assets/JAZARI.md")),
+        ("assets/COORDINATION.md", include_str!("../assets/COORDINATION.md")),
+        ("assets/OUTPUT-HYGIENE.md", include_str!("../assets/OUTPUT-HYGIENE.md")),
+        ("assets/PROMPT-GENERATOR.md", include_str!("../assets/PROMPT-GENERATOR.md")),
+        ("assets/SKILL-GENERATOR.md", include_str!("../assets/SKILL-GENERATOR.md")),
+        ("README.md", include_str!("../README.md")),
+    ];
+
+    /// A command line as the shell splits it: quotes group words, and a heredoc, a pipe or a
+    /// comment ends the command.
+    fn words(line: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut quote: Option<char> = None;
+        let mut started = false;
+        for c in line.chars() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), c) => cur.push(c),
+                (None, '"' | '\'') => {
+                    quote = Some(c);
+                    started = true;
+                }
+                (None, c) if c.is_whitespace() => {
+                    if started || !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                    started = false;
+                }
+                (None, c) => cur.push(c),
+            }
+        }
+        if started || !cur.is_empty() {
+            out.push(cur);
+        }
+        out
+    }
+
+    /// Every `jazari …` command line in the docs: in code blocks and in inline code, with the
+    /// installed path written as `jazari`. Lines with a placeholder list (`a|b`, `…`, `[…]`) are
+    /// left out; `<name>` placeholders become a plain value.
+    fn commands() -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        for (file, text) in DOCS {
+            let mut in_code = false;
+            for raw in text.lines() {
+                if raw.trim_start().starts_with("```") {
+                    in_code = !in_code;
+                    continue;
+                }
+                let line = raw.replace("\"{{JAZARI_EXE}}\"", "jazari");
+                let mut spans: Vec<String> = if in_code {
+                    vec![line.trim().to_string()]
+                } else {
+                    line.split('`').enumerate().filter(|(i, _)| i % 2 == 1).map(|(_, s)| s.to_string()).collect()
+                };
+                // A picture of the dashboard, not a command.
+                spans.retain(|s| !s.contains('·') && !s.contains("   "));
+                for span in spans {
+                    let span = span.trim();
+                    if !span.starts_with("jazari ") {
+                        continue;
+                    }
+                    let mut cmd = span.to_string();
+                    for end in [" #", "<<", " | ", " && ", "; ", " > "] {
+                        if let Some(i) = cmd.find(end) {
+                            cmd.truncate(i);
+                        }
+                    }
+                    if cmd.contains(['|', '…', '[', '{', '(']) || cmd.contains("...") {
+                        continue;
+                    }
+                    let mut plain = String::new();
+                    let mut in_angle = false;
+                    for c in cmd.chars() {
+                        match c {
+                            '<' => in_angle = true,
+                            '>' if in_angle => {
+                                in_angle = false;
+                                plain.push('1');
+                            }
+                            _ if in_angle => {}
+                            c => plain.push(c),
+                        }
+                    }
+                    found.push((file.to_string(), plain.trim().to_string()));
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_command_line_in_the_docs_parses() {
+        let found = commands();
+        assert!(found.len() > 50, "the docs hold many commands, found {}", found.len());
+        let failures: Vec<String> = found
+            .iter()
+            .filter_map(|(file, line)| match Cli::try_parse_from(words(line)) {
+                Ok(_) => None,
+                // Help, or a command named in prose without its arguments: the command itself exists.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        clap::error::ErrorKind::DisplayHelp
+                            | clap::error::ErrorKind::DisplayVersion
+                            | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                            | clap::error::ErrorKind::MissingRequiredArgument
+                    ) =>
+                {
+                    None
+                }
+                Err(e) => Some(format!("{file}: `{line}`: {}", e.to_string().lines().next().unwrap_or(""))),
+            })
+            .collect();
+        assert!(failures.is_empty(), "{} doc command lines don't parse:\n{}", failures.len(), failures.join("\n"));
+        assert!(found.iter().any(|(_, l)| l.starts_with("jazari build handoff")), "the handoff line is checked");
+    }
+
+    #[test]
+    fn build_commands_are_reachable_only_through_build() {
+        assert!(Cli::try_parse_from(["jazari", "build", "handoff", "--close"]).is_ok());
+        assert!(Cli::try_parse_from(["jazari", "watch", "jazari", "handoff", "--close"]).is_err());
+        assert!(Cli::try_parse_from(["jazari", "watch", "build", "tasks"]).is_err());
+        assert!(Cli::try_parse_from(["jazari", "handoff"]).is_err(), "no top-level handoff");
+    }
+
+    #[test]
+    fn words_follow_shell_quoting() {
+        assert_eq!(words(r#"jazari watch say "two words" 'and three here'"#), vec!["jazari", "watch", "say", "two words", "and three here"]);
+        assert_eq!(words("jazari watch say \"\""), vec!["jazari", "watch", "say", ""]);
     }
 }

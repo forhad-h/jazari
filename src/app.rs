@@ -203,7 +203,7 @@ pub struct CopyNote {
     pub headline: &'static str,
     pub command: String,
     pub path: String,
-    /// The `marsad rules …` command that prints the same launch command.
+    /// The `jazari build rules …` command that prints the same launch command.
     pub cli: String,
 }
 
@@ -484,7 +484,7 @@ impl App {
             events::apply(&mut sessions, &ev);
         }
         let hooks_installed = std::fs::read_to_string(crate::claude_dir().join("settings.json"))
-            .is_ok_and(|s| s.contains("marsad") && s.contains(" hook"));
+            .is_ok_and(|s| s.contains("jazari") && s.contains(" hook"));
         Self {
             sessions,
             selected: None,
@@ -502,7 +502,7 @@ impl App {
             update: None,
             alerts_on: crate::settings::alerts(),
             error: None,
-            info: crate::migrate::take_notice(),
+            info: None,
             note_shown: None,
             copy_note: None,
             rules_picker: None,
@@ -620,7 +620,7 @@ impl App {
                 let kind = view.kind();
                 self.prompt_view = None;
                 let noun = kind.noun();
-                // An edited skill also reaches the copy marsad installed for Claude Code, unless
+                // An edited skill also reaches the copy jazari installed for Claude Code, unless
                 // someone changed that copy by hand.
                 let installed = match (kind == crate::rules::Kind::Skill).then(|| crate::skills::sync_installed(&key)).flatten() {
                     Some(Ok(report)) => format!(" · {}", report.message()),
@@ -1271,7 +1271,7 @@ type Tui = ratatui::Terminal<crate::term::Aligned<ratatui::backend::CrosstermBac
 
 /// ratatui's terminal setup (raw mode, alternate screen, panic hook), drawing through
 /// `term::Aligned` so complex-script text can't shift a row's columns. Mouse capture sends the wheel
-/// to marsad, so the terminal doesn't scroll its own history behind the dashboard.
+/// to jazari, so the terminal doesn't scroll its own history behind the dashboard.
 fn init_terminal() -> std::io::Result<Tui> {
     drop(ratatui::init());
     static RELEASE_MOUSE_ON_PANIC: std::sync::Once = std::sync::Once::new();
@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn the_board_view_follows_the_file() {
-        let root = std::env::temp_dir().join(format!("marsad-app-board-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-app-board-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let cwd = root.to_str().unwrap();
@@ -1436,7 +1436,7 @@ mod tests {
 
     #[test]
     fn the_board_view_resets_when_the_session_moves() {
-        let root = std::env::temp_dir().join(format!("marsad-app-move-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-app-move-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (a, b) = (root.join("a"), root.join("b"));
         std::fs::create_dir_all(&a).unwrap();

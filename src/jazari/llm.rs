@@ -20,7 +20,7 @@ pub struct Ask<'a> {
 pub const SMALL: &str = "claude-haiku-5-5";
 
 pub fn claude(a: &Ask) -> anyhow::Result<Value> {
-    let program = std::env::var_os("MARSAD_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into());
+    let program = std::env::var_os("JAZARI_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into());
     let args = [
         "-p", "--no-session-persistence", "--tools", "", "--max-turns", "3", "--model", a.model, "--effort", a.effort, "--output-format", "json",
         "--json-schema", a.schema, "--append-system-prompt", a.system,

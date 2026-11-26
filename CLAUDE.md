@@ -1,4 +1,4 @@
-# marsad
+# jazari
 
 Rust TUI dashboard and CLI for Claude Code sessions (ratatui, rusqlite with bundled SQLite, resvg).
 User-facing reference: `README.md`. Product and terms: `PRODUCT.md`, `CONCEPTS.md`.
@@ -8,8 +8,8 @@ User-facing reference: `README.md`. Product and terms: `PRODUCT.md`, `CONCEPTS.m
 ```sh
 cargo test                                    # all tests; they live in-module under #[cfg(test)]
 cargo clippy --all-targets                    # must stay warning-free
-MARSAD_HOME=/tmp/marsad-dev cargo run         # dashboard against a scratch data dir
-MARSAD_HOME=/tmp/marsad-dev cargo run -- <subcommand>
+JAZARI_HOME=/tmp/jazari-dev cargo run         # dashboard against a scratch data dir
+JAZARI_HOME=/tmp/jazari-dev cargo run -- <subcommand>
 ```
 
 CI runs `cargo test --locked` and `cargo build --release --locked` on Linux, macOS and Windows:
@@ -19,8 +19,8 @@ commit `Cargo.lock`, and give every `cfg`-gated platform path a fallback.
 
 - Never run `cargo fmt`. The code is not rustfmt-clean, and a format pass rewrites every file.
   Match the surrounding style by hand.
-- Anything that writes data during development uses `MARSAD_HOME=<scratch dir>`. Never write to
-  `~/.claude/marsad`, and don't run `marsad install`/`uninstall`, which edit
+- Anything that writes data during development uses `JAZARI_HOME=<scratch dir>`. Never write to
+  `~/.jazari`, and don't run `jazari install`/`uninstall`, which edit
   `~/.claude/settings.json`.
 - Tests never touch the clipboard, browser, file manager, network or `claude -p`. Those side effects
   go through injectable functions (`share_view::Env`, `share::Desktop::for_tests()`, `run`
@@ -36,7 +36,7 @@ commit `Cargo.lock`, and give every `cfg`-gated platform path a fallback.
 ## Every user-visible change also updates
 
 - `README.md`: the key list near the top and the relevant section.
-- `CHANGELOG.md` under `## Unreleased`: one short line per bullet, shown by `marsad update`.
+- `CHANGELOG.md` under `## Unreleased`: one short line per bullet, shown by `jazari update`.
 - `assets/SKILL.md`, when a CLI command or its output changes.
 - The footer key hints in `ui.rs` and `ShareView::keys()`.
 

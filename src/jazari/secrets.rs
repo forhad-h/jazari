@@ -1,15 +1,15 @@
 //! Secrets jazari needs (the Telegram bot token, the paired chat, the Claude login token for
 //! workers). On macOS they live in the login Keychain; anywhere else, and to override the
-//! Keychain, in environment variables. They are never written to marsad's own files.
+//! Keychain, in environment variables. They are never written to jazari's own files.
 
 use std::process::{Command, Stdio};
 
-pub const TELEGRAM_TOKEN: &str = "marsad-jazari-telegram-token";
-pub const TELEGRAM_CHAT: &str = "marsad-jazari-telegram-chat";
-pub const CLAUDE_TOKEN: &str = "marsad-jazari-claude-token";
+pub const TELEGRAM_TOKEN: &str = "jazari-telegram-token";
+pub const TELEGRAM_CHAT: &str = "jazari-telegram-chat";
+pub const CLAUDE_TOKEN: &str = "jazari-claude-token";
 
 /// The environment variable that overrides a Keychain service:
-/// `marsad-jazari-telegram-token` → `MARSAD_JAZARI_TELEGRAM_TOKEN`.
+/// `jazari-telegram-token` → `JAZARI_TELEGRAM_TOKEN`.
 pub fn env_name(service: &str) -> String {
     service.to_ascii_uppercase().replace('-', "_")
 }
@@ -38,7 +38,7 @@ fn keychain_get(_service: &str) -> Option<String> {
 /// user with `security add-generic-password … -w`, so they never pass through a command line.
 pub fn set(service: &str, value: &str) -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
-        let user = std::env::var("USER").unwrap_or_else(|_| "marsad".into());
+        let user = std::env::var("USER").unwrap_or_else(|_| "jazari".into());
         let ok = Command::new("security")
             .args(["add-generic-password", "-U", "-a", &user, "-s", service, "-w", value])
             .stdout(Stdio::null())
@@ -48,7 +48,7 @@ pub fn set(service: &str, value: &str) -> anyhow::Result<()> {
         anyhow::ensure!(ok, "couldn't save {service} in the Keychain");
         return Ok(());
     }
-    anyhow::bail!("no Keychain on this system: set {}={value} in the environment that runs marsad", env_name(service))
+    anyhow::bail!("no Keychain on this system: set {}={value} in the environment that runs jazari", env_name(service))
 }
 
 /// Removes a value from the Keychain. Returns whether there was one to remove; a missing one, or
@@ -66,7 +66,7 @@ pub fn how_to_add(service: &str) -> String {
     if cfg!(target_os = "macos") {
         format!("run `security add-generic-password -a \"$USER\" -s {service} -w` in a terminal and paste it when asked")
     } else {
-        format!("set {} in the environment that runs marsad", env_name(service))
+        format!("set {} in the environment that runs jazari", env_name(service))
     }
 }
 
@@ -76,8 +76,8 @@ mod tests {
 
     #[test]
     fn each_service_has_an_environment_override() {
-        assert_eq!(env_name(TELEGRAM_TOKEN), "MARSAD_JAZARI_TELEGRAM_TOKEN");
-        assert_eq!(env_name(CLAUDE_TOKEN), "MARSAD_JAZARI_CLAUDE_TOKEN");
-        assert!(how_to_add(TELEGRAM_TOKEN).contains(if cfg!(target_os = "macos") { TELEGRAM_TOKEN } else { "MARSAD_JAZARI_TELEGRAM_TOKEN" }));
+        assert_eq!(env_name(TELEGRAM_TOKEN), "JAZARI_TELEGRAM_TOKEN");
+        assert_eq!(env_name(CLAUDE_TOKEN), "JAZARI_CLAUDE_TOKEN");
+        assert!(how_to_add(TELEGRAM_TOKEN).contains(if cfg!(target_os = "macos") { TELEGRAM_TOKEN } else { "JAZARI_TELEGRAM_TOKEN" }));
     }
 }

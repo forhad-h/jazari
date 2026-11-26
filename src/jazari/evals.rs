@@ -407,7 +407,7 @@ pub fn canary(store: &Store, role: &str, current: &str) -> anyhow::Result<Option
     )))
 }
 
-/// The JSON `marsad jazari evals --format json` prints.
+/// The JSON `jazari build evals --format json` prints.
 pub fn report_json(r: &Report) -> Value {
     json!({
         "blocking": r.blocking(),

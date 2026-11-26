@@ -1,9 +1,9 @@
-//! Usage history in SQLite (`~/.marsad/usage.db`).
+//! Usage history in SQLite (`~/.jazari/usage.db`).
 //!
 //! Built from Claude Code transcripts, re-reading a file only when its size or mtime
 //! changes. Tokens are bucketed by the local day each API call happened; skill runs by
 //! the day they started. Rows outlive their transcripts (Claude Code deletes those after
-//! `cleanupPeriodDays`). Session and skill detail is kept for `marsad retention` days (30 by
+//! `cleanupPeriodDays`). Session and skill detail is kept for `jazari watch retention` days (30 by
 //! default); `token_days` is the permanent counter and is never pruned. Versions before 0.4
 //! folded pruned days into one `lifetime` row; that sum lives on in `legacy_totals`.
 
@@ -99,14 +99,14 @@ CREATE TABLE IF NOT EXISTS badge_best (   -- highest value ever computed per bad
     key         TEXT PRIMARY KEY,   -- e.g. 'rank', 'streak', 'skills', 'subagents', 'busiest_day'
     value       INTEGER
 );
-CREATE TABLE IF NOT EXISTS cleanups (     -- every cleanup action marsad ran, never pruned
+CREATE TABLE IF NOT EXISTS cleanups (     -- every cleanup action jazari ran, never pruned
     at          REAL,       -- Unix seconds
     item        TEXT,       -- the action's id, e.g. 'npm-cache' or 'build:/path/.next'
     tier        TEXT,       -- 'A' (rebuilt automatically) or 'B' (slow to get back)
     path        TEXT,
     estimated   INTEGER,    -- bytes measured before running
     freed       INTEGER,    -- growth in available disk space across the action (Docker may give it back later)
-    auto        INTEGER     -- 1 when marsad ran it on its own
+    auto        INTEGER     -- 1 when jazari ran it on its own
 );
 CREATE INDEX IF NOT EXISTS usage_daily_day ON usage_daily(day);
 CREATE INDEX IF NOT EXISTS token_days_day ON token_days(day);
@@ -207,7 +207,7 @@ pub fn install_id(conn: &Connection) -> anyhow::Result<String> {
 }
 
 /// Legacy rows whose days stay out of the day counter: this install's own, and those restored
-/// with `marsad import --restore`. Another machine's merged legacy sum covers only its sessions,
+/// with `jazari watch import --restore`. Another machine's merged legacy sum covers only its sessions,
 /// so it never blocks this machine's days.
 pub(crate) const BLOCKING_LEGACY: &str = "l.since IS NOT NULL AND l.through IS NOT NULL
     AND (l.source = (SELECT value FROM meta WHERE key = 'install_id')
@@ -231,7 +231,7 @@ pub fn open_readonly() -> anyhow::Result<Connection> {
 
 fn open_readonly_at(path: &Path) -> anyhow::Result<Connection> {
     let readonly = || Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY);
-    let mut conn = readonly().context("no usage history yet; run `marsad sync` first")?;
+    let mut conn = readonly().context("no usage history yet; run `jazari watch sync` first")?;
     // A database from an older version is migrated before its first read.
     if schema_version(&conn) < SCHEMA_VERSION {
         drop(conn);
@@ -255,7 +255,7 @@ pub fn day_n_ago(n: u32) -> String {
         .to_string()
 }
 
-/// Days of history to keep unless `marsad retention` says otherwise.
+/// Days of history to keep unless `jazari watch retention` says otherwise.
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 
 /// Days of history to keep; None keeps everything.
@@ -493,7 +493,7 @@ fn prune(conn: &mut Connection, cutoff: &str) -> anyhow::Result<usize> {
     Ok(pruned)
 }
 
-// ---------- queries shared by the TUI and `marsad report` ----------
+// ---------- queries shared by the TUI and `jazari watch report` ----------
 
 /// Highest value ever stored per badge stat.
 /// Each project folder with the latest time a session ran in it.
@@ -767,7 +767,7 @@ pub fn session_days(conn: &Connection, session_id: &str) -> anyhow::Result<Vec<(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-// ---------- generic query output for `marsad report` / `marsad sql` ----------
+// ---------- generic query output for `jazari watch report` / `jazari watch sql` ----------
 
 pub struct QueryResult {
     pub columns: Vec<String>,
@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     fn sync_indexes_prunes_and_skips_unchanged() {
-        let root = std::env::temp_dir().join(format!("marsad-store-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let proj = root.join("projects").join("-p-web");
         std::fs::create_dir_all(proj.join("s1").join("subagents")).unwrap();
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn sync_handles_corrupt_appended_and_rewritten_transcripts() {
-        let root = std::env::temp_dir().join(format!("marsad-store-inc-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-store-inc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let proj = root.join("projects").join("-p-api");
         std::fs::create_dir_all(&proj).unwrap();
@@ -888,7 +888,7 @@ mod tests {
 
     #[test]
     fn unreadable_or_emptied_transcript_keeps_counted_tokens() {
-        let root = std::env::temp_dir().join(format!("marsad-store-empty-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-store-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let proj = root.join("projects").join("-p-gone");
         std::fs::create_dir_all(&proj).unwrap();
@@ -914,7 +914,7 @@ mod tests {
 
     #[test]
     fn without_retention_history_outlives_deleted_transcripts() {
-        let root = std::env::temp_dir().join(format!("marsad-store-keep-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-store-keep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let proj = root.join("projects").join("-p-old");
         std::fs::create_dir_all(&proj).unwrap();
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn growing_the_retention_brings_detail_back_without_double_counting() {
-        let root = std::env::temp_dir().join(format!("marsad-store-grow-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-store-grow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let proj = root.join("projects").join("-p-grow");
         std::fs::create_dir_all(&proj).unwrap();
@@ -1025,12 +1025,12 @@ mod tests {
 
     #[test]
     fn upgrade_keeps_the_all_time_total() {
-        let root = std::env::temp_dir().join(format!("marsad-upgrade-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-upgrade-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let db = root.join("usage.db");
         pre_upgrade_db(&db);
 
-        // Covers AE2. Read-only first, as `marsad total --no-sync` would.
+        // Covers AE2. Read-only first, as `jazari watch total --no-sync` would.
         assert_eq!(lifetime(&open_readonly_at(&db).unwrap()).unwrap().total, 57);
         let conn = open_at(&db).unwrap();
         let all = lifetime(&conn).unwrap();
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     fn days_inside_a_legacy_sum_are_not_counted_again() {
-        let root = std::env::temp_dir().join(format!("marsad-store-legacy-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-store-legacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let proj = root.join("projects").join("-p-legacy");
         std::fs::create_dir_all(&proj).unwrap();
@@ -1098,7 +1098,7 @@ mod tests {
 
     #[test]
     fn v1_database_migrates_to_v2_once() {
-        let root = std::env::temp_dir().join(format!("marsad-v2-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-v2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let db = root.join("usage.db");
         v1_db(&db);
@@ -1119,7 +1119,7 @@ mod tests {
 
     #[test]
     fn skills_seen_outlives_retention_and_reindexing() {
-        let root = std::env::temp_dir().join(format!("marsad-store-skills-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-store-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let proj = root.join("projects").join("-p-skills");
         std::fs::create_dir_all(&proj).unwrap();
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn readonly_connection_rejects_every_write() {
-        let root = std::env::temp_dir().join(format!("marsad-ro-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("jazari-ro-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let db = root.join("usage.db");
         assert!(open_readonly_at(&db).is_err(), "no database yet");

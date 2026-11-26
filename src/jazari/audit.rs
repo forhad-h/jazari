@@ -1,6 +1,6 @@
-//! An append-only record of what jazari did (`~/.marsad/jazari/audit.jsonl`). Each entry carries
+//! An append-only record of what jazari did (`~/.jazari/build/audit.jsonl`). Each entry carries
 //! the hash of the one before it, so an edited or removed entry breaks the chain and
-//! `marsad jazari audit` finds it.
+//! `jazari build audit` finds it.
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn the_chain_catches_an_edited_or_removed_entry() {
-        let dir = std::env::temp_dir().join(format!("marsad-audit-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-audit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("audit.jsonl");
         assert_eq!(verify(&path), Ok(0));
