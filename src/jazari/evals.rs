@@ -370,48 +370,16 @@ pub fn check(store: &Store, roster: &[Persona], force: bool, prod_model: &str, j
 /// The longest one calibration call may take.
 const JUDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// One batched calibration call to `claude -p` on the host: no tools, no session saved, hidden
-/// from the dashboard, and stopped after [`JUDGE_TIMEOUT`].
+/// One batched calibration call to `claude -p` on the host, stopped after [`JUDGE_TIMEOUT`].
 pub fn claude_judge(call: &Call) -> anyhow::Result<Value> {
-    use std::io::{Read, Write};
-    let program = std::env::var_os("MARSAD_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into());
-    let args = [
-        "-p", "--no-session-persistence", "--tools", "", "--max-turns", "3", "--model", &call.model, "--effort", call.effort,
-        "--output-format", "json", "--json-schema", VERDICTS_SCHEMA, "--append-system-prompt", &call.system,
-    ];
-    let mut child = std::process::Command::new(program)
-        .args(args)
-        .env(crate::prompt_gen::MARKER_ENV, "1")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-    child.stdin.take().expect("stdin is piped").write_all(call.prompt.as_bytes())?;
-    // Read stdout on a thread so a full pipe can't stall the wait below.
-    let mut stdout = child.stdout.take().expect("stdout is piped");
-    let reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = stdout.read_to_end(&mut buf);
-        buf
-    });
-    let started = std::time::Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
-        }
-        if started.elapsed() > JUDGE_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            anyhow::bail!("the judge took longer than {} seconds", JUDGE_TIMEOUT.as_secs());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    let out = reader.join().unwrap_or_default();
-    let v: Value = serde_json::from_slice(&out).map_err(|_| anyhow::anyhow!("the judge gave no JSON (is `claude` installed and logged in?)"))?;
-    anyhow::ensure!(v["is_error"] != true, "the judge failed: {}", v["result"].as_str().unwrap_or("unknown error"));
-    let s = &v["structured_output"];
-    anyhow::ensure!(s.is_object(), "the judge gave no verdicts");
-    Ok(s.clone())
+    super::llm::claude(&super::llm::Ask {
+        system: &call.system,
+        prompt: &call.prompt,
+        schema: VERDICTS_SCHEMA,
+        model: &call.model,
+        effort: call.effort,
+        timeout: JUDGE_TIMEOUT,
+    })
 }
 
 // ---------- tier 2: canary ----------

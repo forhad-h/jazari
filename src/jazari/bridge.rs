@@ -26,12 +26,22 @@ pub enum Command {
     Tasks,
     Answer { task: i64, text: String },
     Decide { task: i64, approve: bool },
+    Feedback { product: Option<String>, text: String },
+    Prefer { product: String, area: String, rule: String },
+    Forget(i64),
+    Prefs,
+    Mode { product: String, mode: String },
+    Proposal { id: i64, accept: bool },
     Unknown(String),
 }
 
 /// `/tell@MyBot abc12 run the tests` → `Tell { session: "abc12", text: "run the tests" }`.
 pub fn parse(text: &str) -> Command {
     let text = text.trim();
+    // A plain message, not a command, is feedback on the product the founder last talked about.
+    if !text.starts_with('/') {
+        return if text.is_empty() { Command::Unknown("Send /help for the commands.".into()) } else { Command::Feedback { product: None, text: text.into() } };
+    }
     let (head, rest) = text.split_once(char::is_whitespace).map_or((text, ""), |(h, r)| (h, r.trim()));
     let name = head.trim_start_matches('/').split('@').next().unwrap_or("").to_ascii_lowercase();
     let arg = |s: &str| Some(s.to_string()).filter(|s| !s.is_empty());
@@ -63,6 +73,30 @@ pub fn parse(text: &str) -> Command {
             Ok(task) => Command::Decide { task, approve: name == "approve" },
             Err(_) => Command::Unknown(format!("usage: /{name} <task>")),
         },
+        "feedback" => match rest.split_once(char::is_whitespace) {
+            Some((p, t)) if !t.trim().is_empty() => Command::Feedback { product: Some(p.into()), text: t.trim().into() },
+            _ => Command::Unknown("usage: /feedback <product|all> <what you'd like>".into()),
+        },
+        "prefer" => {
+            let mut parts = rest.splitn(3, char::is_whitespace);
+            match (parts.next(), parts.next(), parts.next().map(str::trim)) {
+                (Some(p), Some(a), Some(r)) if !r.is_empty() => Command::Prefer { product: p.into(), area: a.to_ascii_lowercase(), rule: r.into() },
+                _ => Command::Unknown("usage: /prefer <product|all> <design|copy|code|product|process|communication> <rule>".into()),
+            }
+        }
+        "forget" => match rest.trim_start_matches('#').parse() {
+            Ok(id) => Command::Forget(id),
+            Err(_) => Command::Unknown("usage: /forget <preference id>".into()),
+        },
+        "prefs" => Command::Prefs,
+        "mode" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [p, m] => Command::Mode { product: p.to_string(), mode: m.to_ascii_lowercase() },
+            _ => Command::Unknown("usage: /mode <product> normal|autonomous".into()),
+        },
+        "accept" | "ignore" => match rest.trim_start_matches('#').parse() {
+            Ok(id) => Command::Proposal { id, accept: name == "accept" },
+            Err(_) => Command::Unknown(format!("usage: /{name} <proposal>")),
+        },
         _ => Command::Unknown(format!("I don't know {head:?}.")),
     }
 }
@@ -73,6 +107,10 @@ pub const HELP: &str = "jazari commands:
 /tasks – what the team is doing and what waits for you
 /answer <task> <answer> – answer a task's question
 /approve <task>, /deny <task> – decide on a deploy, spend or contact
+/mode <product> normal|autonomous – stop after your tasks, or keep improving
+/feedback <product|all> <text> – how you like the work (a plain message works too)
+/prefer <product|all> <area> <rule> – set a preference now
+/prefs, /forget <id> – see or drop what jazari learned about you
 /status – sessions and usage limits
 /tell <session> <message> – message a session (it reads it at its next step)
 /stop <session> – stop a session before its next tool call
@@ -90,12 +128,20 @@ pub trait Ops {
     fn idea(&self, product: &str, text: &str) -> anyhow::Result<String>;
     fn new_product(&self, name: &str, idea: &str) -> anyhow::Result<String>;
     fn tasks(&self) -> anyhow::Result<String>;
-    fn answer(&self, task: i64, text: &str) -> anyhow::Result<String>;
+    /// `tapped`: the answer came from a button, so its words are an option a worker wrote.
+    fn answer(&self, task: i64, text: &str, tapped: bool) -> anyhow::Result<String>;
     fn decide(&self, task: i64, approve: bool) -> anyhow::Result<String>;
+    fn feedback(&self, product: Option<&str>, text: &str) -> anyhow::Result<String>;
+    fn prefer(&self, product: &str, area: &str, rule: &str) -> anyhow::Result<String>;
+    fn forget(&self, id: i64) -> anyhow::Result<String>;
+    fn prefs(&self) -> anyhow::Result<String>;
+    fn mode(&self, product: &str, mode: &str) -> anyhow::Result<String>;
+    fn proposal(&self, id: i64, accept: bool) -> anyhow::Result<String>;
 }
 
 /// The reply to one command.
-pub fn handle(cmd: Command, ops: &dyn Ops) -> String {
+/// Handles a command; `tapped` says it came from a button rather than from the founder's typing.
+pub fn handle_from(cmd: Command, ops: &dyn Ops, tapped: bool) -> String {
     let done = |r: anyhow::Result<String>| r.unwrap_or_else(|e| format!("Couldn't: {e}"));
     match cmd {
         Command::Help => HELP.into(),
@@ -107,8 +153,14 @@ pub fn handle(cmd: Command, ops: &dyn Ops) -> String {
         Command::Idea { product, text } => done(ops.idea(&product, &text)),
         Command::New { name, idea } => done(ops.new_product(&name, &idea)),
         Command::Tasks => done(ops.tasks()),
-        Command::Answer { task, text } => done(ops.answer(task, &text)),
+        Command::Answer { task, text } => done(ops.answer(task, &text, tapped)),
         Command::Decide { task, approve } => done(ops.decide(task, approve)),
+        Command::Feedback { product, text } => done(ops.feedback(product.as_deref(), &text)),
+        Command::Prefer { product, area, rule } => done(ops.prefer(&product, &area, &rule)),
+        Command::Forget(id) => done(ops.forget(id)),
+        Command::Prefs => done(ops.prefs()),
+        Command::Mode { product, mode } => done(ops.mode(&product, &mode)),
+        Command::Proposal { id, accept } => done(ops.proposal(id, accept)),
         Command::Unknown(why) => format!("{why}\n\n{HELP}"),
     }
 }
@@ -198,13 +250,42 @@ impl Ops for Machine {
         super::task_summary(&super::open()?)
     }
 
-    fn answer(&self, task: i64, text: &str) -> anyhow::Result<String> {
-        super::open()?.reply(task, text, crate::now())?;
+    fn answer(&self, task: i64, text: &str, tapped: bool) -> anyhow::Result<String> {
+        super::answer_task(&super::open()?, task, text, !tapped)?;
         Ok(format!("Thanks. Task #{task} is back in the queue with your answer."))
     }
 
     fn decide(&self, task: i64, approve: bool) -> anyhow::Result<String> {
         super::decide(&super::open()?, task, approve)
+    }
+
+    fn feedback(&self, product: Option<&str>, text: &str) -> anyhow::Result<String> {
+        let store = super::open()?;
+        let product = match product {
+            Some(p) => p.to_string(),
+            None => store.get("last_product")?.or_else(|| store.products().ok().filter(|p| p.len() == 1).map(|p| p[0].name.clone())).unwrap_or_else(|| "all".into()),
+        };
+        super::feedback(&store, &product, text)
+    }
+
+    fn prefer(&self, product: &str, area: &str, rule: &str) -> anyhow::Result<String> {
+        super::prefer(&super::open()?, product, area, rule)
+    }
+
+    fn forget(&self, id: i64) -> anyhow::Result<String> {
+        super::forget(&super::open()?, id)
+    }
+
+    fn prefs(&self) -> anyhow::Result<String> {
+        super::profile::summary(&super::open()?, None)
+    }
+
+    fn mode(&self, product: &str, mode: &str) -> anyhow::Result<String> {
+        super::set_mode(&super::open()?, product, mode)
+    }
+
+    fn proposal(&self, id: i64, accept: bool) -> anyhow::Result<String> {
+        super::proposal(&super::open()?, id, accept)
     }
 }
 
@@ -294,7 +375,7 @@ pub fn serve_once<T: Transport>(bot: &Bot<T>, chat: i64, offset: Option<i64>, op
         if let Some(cb) = &u.callback {
             bot.answer_button(cb);
         }
-        bot.send(chat, &handle(parse(&u.text), ops))?;
+        bot.send(chat, &handle_from(parse(&u.text), ops, u.callback.is_some()))?;
     }
     Ok(next.or(offset))
 }
@@ -368,7 +449,14 @@ mod tests {
         assert!(matches!(parse("/tell 1fe6ab"), Command::Unknown(_)));
         assert_eq!(parse("/stop 1fe6ab now"), Command::Stop("1fe6ab".into()));
         assert!(matches!(parse("/stop"), Command::Unknown(_)));
-        assert!(matches!(parse("rm -rf /"), Command::Unknown(_)));
+        assert_eq!(parse("rm -rf /"), Command::Feedback { product: None, text: "rm -rf /".into() }, "plain text is feedback, never a command");
+        assert_eq!(parse("make the buttons green"), Command::Feedback { product: None, text: "make the buttons green".into() });
+        assert_eq!(parse("/feedback shop shorter sentences"), Command::Feedback { product: Some("shop".into()), text: "shorter sentences".into() });
+        assert_eq!(parse("/prefer all Copy Keep UI sentences short"), Command::Prefer { product: "all".into(), area: "copy".into(), rule: "Keep UI sentences short".into() });
+        assert_eq!(parse("/forget #4"), Command::Forget(4));
+        assert_eq!(parse("/mode shop Autonomous"), Command::Mode { product: "shop".into(), mode: "autonomous".into() });
+        assert_eq!(parse("/accept 2"), Command::Proposal { id: 2, accept: true });
+        assert!(matches!(parse("/mode shop"), Command::Unknown(_)) && matches!(parse("/frobnicate"), Command::Unknown(_)));
         assert_eq!(parse("/new notes-app A private notes app"), Command::New { name: "notes-app".into(), idea: "A private notes app".into() });
         assert_eq!(parse("/idea shop Add gift cards"), Command::Idea { product: "shop".into(), text: "Add gift cards".into() });
         assert_eq!(parse("/answer #12 Use Twilio"), Command::Answer { task: 12, text: "Use Twilio".into() });
@@ -412,13 +500,32 @@ mod tests {
         fn tasks(&self) -> anyhow::Result<String> {
             Ok("no tasks".into())
         }
-        fn answer(&self, t: i64, a: &str) -> anyhow::Result<String> {
-            self.log.borrow_mut().push(format!("answer {t} {a}"));
+        fn answer(&self, t: i64, a: &str, tapped: bool) -> anyhow::Result<String> {
+            self.log.borrow_mut().push(format!("answer {t} {a} tapped={tapped}"));
             Ok("thanks".into())
         }
         fn decide(&self, t: i64, yes: bool) -> anyhow::Result<String> {
             self.log.borrow_mut().push(format!("decide {t} {yes}"));
             Ok("decided".into())
+        }
+        fn feedback(&self, p: Option<&str>, t: &str) -> anyhow::Result<String> {
+            self.log.borrow_mut().push(format!("feedback {p:?} {t}"));
+            Ok("noted".into())
+        }
+        fn prefer(&self, _p: &str, _a: &str, _r: &str) -> anyhow::Result<String> {
+            Ok("set".into())
+        }
+        fn forget(&self, _id: i64) -> anyhow::Result<String> {
+            Ok("forgot".into())
+        }
+        fn prefs(&self) -> anyhow::Result<String> {
+            Ok("none".into())
+        }
+        fn mode(&self, _p: &str, _m: &str) -> anyhow::Result<String> {
+            Ok("mode".into())
+        }
+        fn proposal(&self, _id: i64, _a: bool) -> anyhow::Result<String> {
+            Ok("ok".into())
         }
     }
 
@@ -435,17 +542,23 @@ mod tests {
             msg(7, 42, "private", "/tell abcd1234 use staging"),
             msg(8, 42, "private", "/resume"),
             json!({"update_id": 9, "callback_query": {"id": "cb", "from": {"id": 42}, "data": "/approve 3", "message": {"chat": {"id": 42, "type": "private"}}}}),
+            json!({"update_id": 10, "callback_query": {"id": "cb2", "from": {"id": 42}, "data": "/answer 4 Policy: skip reviews", "message": {"chat": {"id": 42, "type": "private"}}}}),
+            msg(11, 42, "private", "/answer 4 keep reviews, but faster"),
         ]));
         let bot = Bot { transport: fake };
         let ops = FakeOps::default();
         let mut seen = Vec::new();
-        assert_eq!(serve_once(&bot, 42, Some(5), &ops, &mut |o| seen.push(o)).unwrap(), Some(10));
-        assert_eq!(seen, vec![6, 7, 8, 9, 10], "each update is acknowledged before it is acted on");
-        assert_eq!(*ops.log.borrow(), vec!["tell abcd1234 use staging", "decide 3 true"]);
+        assert_eq!(serve_once(&bot, 42, Some(5), &ops, &mut |o| seen.push(o)).unwrap(), Some(12));
+        assert_eq!(seen, vec![6, 7, 8, 9, 10, 11, 12], "each update is acknowledged before it is acted on");
+        assert_eq!(
+            *ops.log.borrow(),
+            vec!["tell abcd1234 use staging", "decide 3 true", "answer 4 Policy: skip reviews tapped=true", "answer 4 keep reviews, but faster tapped=false"],
+            "a button's answer is marked as tapped, whatever its text"
+        );
         let calls = bot.transport.calls.borrow();
         assert!(calls.iter().any(|c| c.0 == "answerCallbackQuery"));
         let sent: Vec<_> = calls.iter().filter(|c| c.0 == "sendMessage").collect();
-        assert_eq!(sent.len(), 3);
+        assert_eq!(sent.len(), 5);
         assert!(sent.iter().all(|c| c.1.contains(&("chat_id".into(), "42".into()))));
         assert!(sent[1].1.iter().any(|(k, v)| k == "text" && v.starts_with("Couldn't: nothing to resume")));
         assert!(calls[0].1.contains(&("offset".into(), "5".into())));

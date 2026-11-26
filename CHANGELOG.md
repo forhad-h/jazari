@@ -3,6 +3,16 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- jazari has two modes per product: normal stops after your tasks; autonomous keeps hunting bugs, fixing vulnerable dependencies, red-teaming, auditing UX and performance, and refreshing docs
+- Every message to you is a short Easy English card: what is needed, why, the options with their effect, the recommendation, and buttons
+- Workers push back with evidence when an instruction conflicts with security or the product's decisions; crossing a hard line needs a written override
+- jazari learns your preferences from what you say (3 times, or 2 when firm), adapts when you change your mind, lets unused ones fade, and never learns ones that weaken quality
+- Learned preferences reach only the roles they concern and become critical evaluator criteria; see them with `/prefs` or in `~/.marsad/jazari/FOUNDER.md`
+- Rework leaves lessons for the next workers, and a review criterion that keeps failing is proposed as an automatic check
+- Workers get marsad's skills (Easy English by default, `jazari.skills` for more), and the Easy English checker reports on changed docs
+
 ## 0.23.0 - 2026-11-26
 
 - `marsad jazari`: pair a Telegram chat with a one-time code, then check, message, stop and pause sessions from it
