@@ -602,7 +602,7 @@ impl App {
 
     /// Opens the `c` picker with the prompts chosen last time ticked.
     fn open_rules_picker(&mut self) {
-        let library = crate::rules::library();
+        let library = crate::rules::pickable();
         let saved = crate::settings::rules();
         let ticked = library.iter().map(|r| saved.contains(&r.key)).collect();
         self.rules_picker = Some(RulesPicker { library, ticked, cursor: 0, mode: None, deleting: None, versions: None, restorable: None });
@@ -631,7 +631,7 @@ impl App {
                     Some(picker) => {
                         // A new entry or a copy is ticked; an edit or rename keeps the tick it had.
                         let tick = replaced.is_none_or(|old| picker.chosen().iter().any(|r| r.key == old));
-                        picker.reload(crate::rules::library(), Some(&key), tick);
+                        picker.reload(crate::rules::pickable(), Some(&key), tick);
                         let ticked = if tick { " and ticked it" } else { "" };
                         self.info = Some(format!("saved {key} to your {noun}s{ticked}{installed} "));
                     }
@@ -656,7 +656,7 @@ impl App {
         };
         match removed {
             Ok(_) => {
-                picker.reload(crate::rules::library(), None, false);
+                picker.reload(crate::rules::pickable(), None, false);
                 picker.restorable = Some((key.clone(), kind));
                 self.info = Some(format!("deleted {key} · u brings it back "));
             }
@@ -674,7 +674,7 @@ impl App {
         };
         match restored {
             Ok(v) => {
-                picker.reload(crate::rules::library(), Some(key), false);
+                picker.reload(crate::rules::pickable(), Some(key), false);
                 (picker.versions, picker.restorable) = (None, None);
                 self.info = Some(format!("restored {key} to v{} from {} · the text it replaced is kept as a version ", v.number, v.when()));
             }

@@ -328,9 +328,11 @@ you through jazari.
   `--attention` also marks it as needing you, with the question sound and a notification.
 
 An idle session picks its messages up with your next prompt to it: hooks run only while a session
-works. Start sessions with the **Working with jazari** prompt (`c`, or `jazari build rules jazari`) so
-Claude knows to read jazari's notes, post its progress with `jazari watch say`, wait for resources with
-`jazari watch system --wait`, and stop when asked.
+works. Every session that jazari starts gets the **Working with jazari** prompt: the `c` launch
+command, an agent team's lead and teammates, and a session started from a handoff. It tells Claude to
+read jazari's notes, post its progress with `jazari watch say`, wait for resources with
+`jazari watch system --wait`, and stop when asked. It is always first in the launch file, so it is
+not a choice in the `c` list or in `jazari build rules`.
 
 ### Telegram
 
@@ -852,7 +854,7 @@ jazari build rules coordination easy-english                # a launch command w
 
 Easy English's word lists are the CEFR-J Wordlist 1.5 (Yukio Tono, Tokyo University of Foreign Studies; free for research and commercial use with this citation) and the New General Service List 1.2 (Browne, Culligan and Phillips; CC BY-SA 4.0). They are included unchanged; `assets/skills/easy-english/data/SOURCES.md` has the full credits.
 
-Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.jazari/launch/`, written when the command is copied and named after its role, its prompts and a hash of its text, such as `lead-coordination+output-hygiene-8873230f.md`. A session's or lead's file whose command hasn't been copied for a week is removed (a conversation keeps the prompt it started with); a teammates' file is kept, since a resumed lead still points at it. `jazari build coordination` prints the stable `~/.jazari/coordination.md`.
+Claude Code reads only the last `--append-system-prompt-file` it is given, so the chosen prompts are merged into one file in `~/.jazari/launch/`, written when the command is copied and named after its role, its prompts and a hash of its text, such as `lead-jazari+coordination+output-hygiene-8873230f.md`. Every file starts with "Working with jazari", once, also when a saved choice names it. A session's or lead's file whose command hasn't been copied for a week is removed (a conversation keeps the prompt it started with); a teammates' file is kept, since a resumed lead still points at it. `jazari build coordination` prints the stable `~/.jazari/coordination.md`.
 
 The prompts are added to the session's system prompt, so they survive `/clear` and compaction. They apply to new conversations only: a resumed conversation keeps the system prompt it started with. The coordination rules add about 2k tokens to each request of those sessions.
 
