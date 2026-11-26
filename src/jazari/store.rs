@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS kv (
 ";
 
 /// Columns added after the first schema, so older databases gain them.
-const NEW_COLUMNS: [(&str, &str); 8] = [
+const NEW_COLUMNS: [(&str, &str); 9] = [
     ("kind", "TEXT NOT NULL DEFAULT 'work'"),
     ("owner_role", "TEXT"),
     ("round", "INTEGER NOT NULL DEFAULT 0"),
@@ -67,6 +67,7 @@ const NEW_COLUMNS: [(&str, &str); 8] = [
     ("after_task", "INTEGER"),
     ("landed", "INTEGER NOT NULL DEFAULT 0"),
     ("spec", "TEXT NOT NULL DEFAULT ''"),
+    ("head", "TEXT"),
 ];
 
 /// What a task is: `work` builds; `eval`, `review` and `security` judge a branch before it merges.
@@ -107,6 +108,8 @@ pub struct Task {
     /// The original request and its acceptance criteria, carried through evaluation, review and
     /// fixes.
     pub spec: String,
+    /// For judgments and merges: the exact commit the gates are about.
+    pub head: Option<String>,
 }
 
 /// A task to queue. `kind` defaults to `work`.
@@ -125,6 +128,7 @@ pub struct NewTask<'a> {
     pub after: Option<i64>,
     /// Empty: the brief is the spec.
     pub spec: &'a str,
+    pub head: Option<&'a str>,
 }
 
 /// How a role fares at one gate: (role, stage, judgments, passed, average score).
@@ -189,10 +193,11 @@ fn task_from(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         approval: r.get(15)?,
         after_task: r.get(16)?,
         spec: r.get(17)?,
+        head: r.get(18)?,
     })
 }
 
-const TASK_COLUMNS: &str = "id, product, role, title, brief, priority, status, attempts, summary, branch, kind, parent, owner_role, round, question, approval, after_task, spec";
+const TASK_COLUMNS: &str = "id, product, role, title, brief, priority, status, attempts, summary, branch, kind, parent, owner_role, round, question, approval, after_task, spec, head";
 
 impl Store {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
@@ -249,11 +254,11 @@ impl Store {
         let kind = if t.kind.is_empty() { "work" } else { t.kind };
         anyhow::ensure!(KINDS.contains(&kind), "not a task kind: {kind}");
         self.conn.execute(
-            "INSERT INTO tasks (product, role, title, brief, priority, parent, kind, branch, owner_role, round, after_task, spec, created, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+            "INSERT INTO tasks (product, role, title, brief, priority, parent, kind, branch, owner_role, round, after_task, spec, head, created, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
             params![
                 t.product, t.role, t.title.trim(), t.brief.trim(), t.priority, t.parent, kind, t.branch, t.owner_role, t.round, t.after,
-                if t.spec.trim().is_empty() { t.brief.trim() } else { t.spec.trim() }, now
+                if t.spec.trim().is_empty() { t.brief.trim() } else { t.spec.trim() }, t.head, now
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -288,19 +293,25 @@ impl Store {
 
     /// The queued task to run next: highest priority first, then oldest, among those whose
     /// `after_task` has landed.
+    #[cfg(test)]
     pub fn next_task(&self) -> anyhow::Result<Option<Task>> {
-        Ok(self
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT {TASK_COLUMNS} FROM tasks WHERE status = 'queued'
-                     AND (after_task IS NULL OR after_task IN (SELECT id FROM tasks WHERE landed = 1))
-                     ORDER BY priority DESC, id LIMIT 1"
-                ),
-                [],
-                task_from,
-            )
-            .optional()?)
+        self.next_task_except(&[])
+    }
+
+    /// The next task, skipping the products listed (held after a failure to set them up).
+    pub fn next_task_except(&self, held: &[String]) -> anyhow::Result<Option<Task>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE status = 'queued'
+             AND (after_task IS NULL OR after_task IN (SELECT id FROM tasks WHERE landed = 1))
+             ORDER BY priority DESC, id"
+        ))?;
+        let mut rows = st.query_map([], task_from)?;
+        while let Some(t) = rows.next().transpose()? {
+            if !held.contains(&t.product) {
+                return Ok(Some(t));
+            }
+        }
+        Ok(None)
     }
 
     /// A task's work is on the default branch (or it had nothing to merge).
@@ -471,6 +482,9 @@ mod tests {
         s.land_branch("jazari/task-1").unwrap();
         let t = s.next_task().unwrap().unwrap();
         assert_eq!((t.id, t.after_task), (second, Some(first)));
+        s.add_product("site", "/s", 0.0).unwrap();
+        let other = s.add_task(&NewTask { product: "site", role: "e", title: "landing page", ..Default::default() }, 4.0).unwrap();
+        assert_eq!(s.next_task_except(&["shop".into()]).unwrap().unwrap().id, other, "a held product doesn't block the others");
     }
 
     #[test]

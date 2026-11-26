@@ -1000,6 +1000,7 @@ dependencies = [
  "dirs",
  "libc",
  "ratatui",
+ "regex",
  "resvg",
  "rusqlite",
  "serde",

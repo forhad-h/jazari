@@ -51,12 +51,14 @@ pub fn set(service: &str, value: &str) -> anyhow::Result<()> {
     anyhow::bail!("no Keychain on this system: set {}={value} in the environment that runs marsad", env_name(service))
 }
 
-/// Removes a value from the Keychain; a missing one is not an error.
-pub fn delete(service: &str) -> anyhow::Result<()> {
-    if cfg!(target_os = "macos") {
-        let _ = Command::new("security").args(["delete-generic-password", "-s", service]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+/// Removes a value from the Keychain. Returns whether there was one to remove; a missing one, or
+/// a system without a Keychain, is not an error.
+pub fn delete(service: &str) -> anyhow::Result<bool> {
+    if !cfg!(target_os = "macos") {
+        return Ok(false);
     }
-    Ok(())
+    let removed = Command::new("security").args(["delete-generic-password", "-s", service]).stdout(Stdio::null()).stderr(Stdio::null()).status()?.success();
+    Ok(removed)
 }
 
 /// How to add a token by hand, so it never shows up in a shell history or a chat.

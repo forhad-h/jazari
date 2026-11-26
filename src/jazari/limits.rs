@@ -120,7 +120,8 @@ impl Limits {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Decision {
     Go,
-    Sleep { until: f64, reason: String },
+    /// `key` names the sleep, so it is announced once however often it is decided again.
+    Sleep { until: f64, reason: String, key: String },
 }
 
 /// The week a 7-day window covers, in hours.
@@ -140,13 +141,15 @@ pub fn decide(l: &Limits, p: &Profile, now: f64) -> Decision {
     // A window whose reset time has passed starts again from zero.
     for (name, w, reserve) in windows {
         let Some(w) = w.filter(|w| w.resets_at > now) else { continue };
+        let key = format!("{name}:{:.0}", w.resets_at);
         if !w.allowed {
-            return Decision::Sleep { until: after(w.resets_at), reason: format!("the {name} limit is used up") };
+            return Decision::Sleep { until: after(w.resets_at), reason: format!("the {name} limit is used up"), key };
         }
         if w.used_pct >= 100.0 - reserve {
             return Decision::Sleep {
                 until: after(w.resets_at),
                 reason: format!("{name} usage is {:.0}%, and {reserve:.0}% is kept for you", w.used_pct),
+                key,
             };
         }
     }
@@ -159,6 +162,8 @@ pub fn decide(l: &Limits, p: &Profile, now: f64) -> Decision {
             return Decision::Sleep {
                 until: now + PACE_WAIT,
                 reason: format!("ahead of the weekly pace (7-day usage {:.0}%, pace {:.0}%)", w.used_pct, pace.min(100.0)),
+                // One notice per week: the pace check repeats every few minutes.
+                key: format!("pace:{:.0}", w.resets_at),
             };
         }
     }
@@ -209,7 +214,7 @@ mod tests {
         let p = Plan::Max5.profile();
         let late_week = 5_000.0 + 3600.0;
         assert_eq!(decide(&limits(50.0, 40.0, late_week), &p, 5_000.0), Decision::Go);
-        let Decision::Sleep { until, reason } = decide(&limits(86.0, 40.0, late_week), &p, 5_000.0) else { panic!() };
+        let Decision::Sleep { until, reason, .. } = decide(&limits(86.0, 40.0, late_week), &p, 5_000.0) else { panic!() };
         assert!(until > 10_000.0 && until < 10_300.0 && reason.contains("5-hour"), "{reason}");
         // After the reset time the old reading no longer counts.
         assert_eq!(decide(&limits(99.0, 40.0, late_week), &p, 10_001.0), Decision::Go);
@@ -226,9 +231,11 @@ mod tests {
         // A day into the week: about 11% of the 75% allowance, plus slack.
         let day_in = now + 6.0 * 86_400.0;
         assert_eq!(decide(&limits(0.0, 15.0, day_in), &p, now), Decision::Go);
-        let Decision::Sleep { until, reason } = decide(&limits(0.0, 30.0, day_in), &p, now) else { panic!() };
+        let Decision::Sleep { until, reason, key } = decide(&limits(0.0, 30.0, day_in), &p, now) else { panic!() };
         assert_eq!(until, now + PACE_WAIT);
         assert!(reason.contains("weekly pace"), "{reason}");
+        let Decision::Sleep { key: later, .. } = decide(&limits(0.0, 30.0, day_in), &p, now + 300.0) else { panic!() };
+        assert_eq!(key, later, "the same pace sleep keeps its key, so it is announced once");
         // On the last day the whole allowance is open.
         assert_eq!(decide(&limits(0.0, 70.0, now + 3600.0), &p, now), Decision::Go);
     }

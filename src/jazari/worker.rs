@@ -127,9 +127,9 @@ pub fn args(task: &Task, s: &Setup) -> Vec<String> {
 }
 
 /// Runs a command in a container folder, handing each stdout line to `line`; returns its exit
-/// code.
+/// code. Only a Claude run gets the login token (`with_token`); checks and git never do.
 pub trait Runner {
-    fn run(&self, container: &str, workdir: &str, command: &[String], line: &mut dyn FnMut(&str)) -> anyhow::Result<i32>;
+    fn run(&self, container: &str, workdir: &str, command: &[String], with_token: bool, line: &mut dyn FnMut(&str)) -> anyhow::Result<i32>;
 }
 
 /// `docker exec` into the product's container. The Claude login token reaches docker through
@@ -139,20 +139,23 @@ pub struct Docker {
 }
 
 impl Runner for Docker {
-    fn run(&self, container: &str, workdir: &str, command: &[String], line: &mut dyn FnMut(&str)) -> anyhow::Result<i32> {
+    fn run(&self, container: &str, workdir: &str, command: &[String], with_token: bool, line: &mut dyn FnMut(&str)) -> anyhow::Result<i32> {
         let git = [
             "GIT_AUTHOR_NAME=jazari", "GIT_AUTHOR_EMAIL=jazari@localhost", "GIT_COMMITTER_NAME=jazari", "GIT_COMMITTER_EMAIL=jazari@localhost",
             // The repo is mounted from the host, so its owner differs from the container user.
             "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=*",
         ];
         let mut cmd = Command::new("docker");
-        cmd.args(["exec", "-i", "-w", workdir, "-e", "CLAUDE_CODE_OAUTH_TOKEN"]);
+        cmd.args(["exec", "-i", "-w", workdir]);
+        if with_token {
+            cmd.args(["-e", "CLAUDE_CODE_OAUTH_TOKEN"]).env("CLAUDE_CODE_OAUTH_TOKEN", &self.token);
+        }
         for g in git {
             cmd.args(["-e", g]);
         }
         cmd.arg(container).args(command);
         // stderr joins stdout for checks (`2>&1` is in their command); a worker's stderr is noise.
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", &self.token).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let mut child = cmd.spawn()?;
         if let Some(out) = child.stdout.take() {
             for l in BufReader::new(out).lines().map_while(Result::ok) {
@@ -248,7 +251,7 @@ impl Reader {
 /// Runs one task and reads its outcome. A worker that can't start is a failure, not an error.
 pub fn run(runner: &dyn Runner, task: &Task, s: &Setup) -> Outcome {
     let mut reader = Reader::default();
-    match runner.run(s.container, s.workdir, &args(task, s), &mut |l| reader.line(l)) {
+    match runner.run(s.container, s.workdir, &args(task, s), true, &mut |l| reader.line(l)) {
         Ok(_) => reader.outcome(s.max_follow_ups),
         Err(e) => Outcome::new(Kind::Failed, format!("the worker couldn't start: {e}")),
     }
@@ -272,6 +275,7 @@ pub mod tests {
             summary: String::new(),
             branch: None,
             kind: "work".into(),
+            head: None,
             parent: None,
             owner_role: None,
             round: 0,

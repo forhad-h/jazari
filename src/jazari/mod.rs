@@ -164,8 +164,15 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             Ok(())
         }
         JazariCmd::Telegram(TelegramCmd::Unpair) => {
-            secrets::delete(secrets::TELEGRAM_CHAT)?;
-            println!("Unpaired: no chat can control jazari until you pair again.");
+            let removed = secrets::delete(secrets::TELEGRAM_CHAT)?;
+            let env = secrets::env_name(secrets::TELEGRAM_CHAT);
+            if std::env::var(&env).is_ok_and(|v| !v.trim().is_empty()) {
+                println!("{env} is set, so that chat is still paired: unset it in the environment that runs marsad.");
+            } else if removed {
+                println!("Unpaired: no chat can control jazari until you pair again.");
+            } else {
+                println!("No paired chat was stored here, so nothing changed.");
+            }
             Ok(())
         }
         JazariCmd::Bridge => bridge::run(&bot()?, chat()?, &dir()),
@@ -348,11 +355,16 @@ pub(crate) fn queue_idea(store: &store::Store, product: &str, idea: &str) -> any
     store.add_task(&store::NewTask { product, role: "chief-of-staff", title: &title, brief: &brief, priority: 100, ..Default::default() }, crate::now())
 }
 
-/// Where new products' repos go: `jazari.products_dir`, or `~/jazari-products`.
+/// Where new products' repos go: `jazari.products_dir`, or `products` in jazari's data folder
+/// (so `MARSAD_HOME` moves it too).
 fn products_dir() -> PathBuf {
-    crate::settings::get("jazari")
-        .and_then(|j| j["products_dir"].as_str().map(PathBuf::from))
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("jazari-products"))
+    crate::settings::get("jazari").and_then(|j| j["products_dir"].as_str().map(PathBuf::from)).unwrap_or_else(|| dir().join("products"))
+}
+
+/// A product's work folder: the task clones its container sees, in jazari's data folder.
+pub fn work_dir(product: &str) -> PathBuf {
+    let dir = dir().join("work").join(product);
+    std::path::absolute(&dir).unwrap_or(dir)
 }
 
 /// Makes a git repo for a new product, registers it and queues the idea.
@@ -448,15 +460,27 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
     let token = secrets::get(secrets::CLAUDE_TOKEN)
         .ok_or_else(|| anyhow::anyhow!("no Claude login token for the workers: run `claude setup-token`, then {}", secrets::how_to_add(secrets::CLAUDE_TOKEN)))?;
     let store = open()?;
-    // The team's own checks: free when nothing changed, and matched to the change's size when
-    // something did.
-    let report = evals::check(&store, &personas::all(), false, limits::plan().profile().build_model, &evals::claude_judge)?;
-    if !report.plan.changed.is_empty() || report.blocking() {
-        println!("{}", report.text());
+    // The free lint always gates the start; --skip-evals skips only the paid calibration.
+    let roster = personas::all();
+    let lint: Vec<_> = evals::lint(&roster, &personas::rubrics_text()).into_iter().filter(|i| i.error).collect();
+    if !lint.is_empty() {
+        for i in &lint {
+            eprintln!("✗ {}", i.what);
+        }
+        tell_founder("⛔ jazari won't start: the personas or rubrics are broken. Run `marsad jazari evals` for details.", &[]);
+        anyhow::bail!("fix personas.md or rubrics.md first");
     }
-    if report.blocking() && !skip_evals {
-        tell_founder("⛔ jazari won't start: a persona or judge check failed. Run `marsad jazari evals` for details.", &[]);
-        anyhow::bail!("the team's checks block the supervisor; fix them, or start with --skip-evals");
+    if !skip_evals {
+        // The judges' calibration: free when nothing changed, and matched to the change's size
+        // when something did.
+        let report = evals::check(&store, &roster, false, limits::plan().profile().build_model, &evals::claude_judge)?;
+        if !report.plan.changed.is_empty() || report.blocking() {
+            println!("{}", report.text());
+        }
+        if report.blocking() {
+            tell_founder("⛔ jazari won't start: a judge check failed. Run `marsad jazari evals` for details.", &[]);
+            anyhow::bail!("the judges' checks block the supervisor; fix them, or start with --skip-evals");
+        }
     }
     let requeued = store.requeue_running(crate::now())?;
     if requeued > 0 {
@@ -466,14 +490,28 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
     let audit_path = dir.join("audit.jsonl");
     let now = crate::now;
     let paused = crate::act::paused;
-    let ensure = |p: &str, r: &str| sandbox::ensure(p, r);
+    let ensure = |p: &str, work: &str| sandbox::ensure(p, work);
+    let reset = |name: &str| sandbox::reset(name);
+    let work = |p: &str| work_dir(p);
     let audit = |kind: &str, data: serde_json::Value| {
         if let Err(e) = audit::append(&audit_path, crate::now(), kind, data) {
             eprintln!("[jazari] couldn't write the audit record: {e}");
         }
     };
     let profile = limits::plan().profile();
-    let deps = supervisor::Deps { store: &store, runner: &runner, repo: &supervisor::Git, profile, now: &now, paused: &paused, ensure: &ensure, notify: &tell_founder, audit: &audit };
+    let deps = supervisor::Deps {
+        store: &store,
+        runner: &runner,
+        repo: &supervisor::Git,
+        profile,
+        now: &now,
+        paused: &paused,
+        work: &work,
+        ensure: &ensure,
+        reset: &reset,
+        notify: &tell_founder,
+        audit: &audit,
+    };
     println!("jazari supervisor on ({}). Ctrl-C stops it; a task in progress goes back in the queue next start.", profile.plan.label());
     let mut errors = 0u32;
     loop {
@@ -491,6 +529,10 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
             }
             Ok(supervisor::Tick::Sleeping { until }) if once => {
                 println!("Waiting for usage to free up until {until:.0}.");
+                return Ok(());
+            }
+            Ok(supervisor::Tick::Paused) if once => {
+                println!("marsad is paused (`marsad resume` turns it back on).");
                 return Ok(());
             }
             Ok(supervisor::Tick::Idle | supervisor::Tick::Paused) => 60.0,

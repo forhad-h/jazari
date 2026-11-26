@@ -161,44 +161,73 @@ fn split(text: &str, max: usize) -> Vec<String> {
     parts.into_iter().map(|p| p.trim_end().to_string()).filter(|p| !p.is_empty()).collect()
 }
 
-/// Prefixes of well-known credentials.
-const SECRET_PREFIXES: [&str; 12] =
-    ["sk-ant-", "sk-proj-", "ghp_", "gho_", "ghs_", "ghu_", "github_pat_", "glpat-", "xoxb-", "xoxp-", "AKIA", "AIza"];
-/// Words that, before `=` or `:`, mark the value after them as a secret.
-const SECRET_KEYS: [&str; 6] = ["token", "secret", "password", "passwd", "api_key", "apikey"];
+/// Credential patterns, each with the part to replace: the whole match, or its `secret` group.
+/// They drive both what reaches Telegram and the secret scan of every branch.
+fn patterns() -> &'static [regex::Regex] {
+    static P: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        [
+            // A PEM private key block, whatever its kind.
+            r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)",
+            // Well-known token formats.
+            r"\b(sk-ant-[A-Za-z0-9_-]{12,}|sk-proj-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9]{20,}|[sr]k_live_[A-Za-z0-9]{10,}|pk_live_[A-Za-z0-9]{10,}|gh[poushr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|xox[abprs]-[A-Za-z0-9-]{10,}|xapp-[A-Za-z0-9-]{10,}|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})",
+            // A JSON Web Token.
+            r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
+            // A Telegram bot token.
+            r"\b\d{6,}:[A-Za-z0-9_-]{30,}",
+            // Authorization headers.
+            r"(?i)\b(authorization\s*[:=]\s*)?(bearer|basic|token)\s+(?P<secret>[A-Za-z0-9._~+/=-]{12,})",
+            // Credentials in a URL: scheme://user:pass@host.
+            r"[a-z][a-z0-9+.-]*://[^\s:/@]+:(?P<secret>[^\s@/]+)@",
+            // NAME = value, NAME: value or "name": "value", when the name says it holds a secret.
+            r#"(?i)["']?\b[a-z0-9_.-]*(password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|_key)["']?\s*[:=]\s*["']?(?P<secret>[^\s"',;)}\]]{6,})"#,
+        ]
+        .iter()
+        .map(|p| regex::Regex::new(p).expect("valid credential pattern"))
+        .collect()
+    })
+}
 
-/// Replaces anything that looks like a credential with `[redacted]`: known token prefixes, Telegram
-/// bot tokens, and the value in `KEY=value` when the key names a secret.
+/// Values that look like a secret's but are code: a lookup, a placeholder, a literal.
+fn harmless(value: &str) -> bool {
+    let v = value.trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase();
+    ["true", "false", "none", "null", "undefined", "required", "optional"].contains(&v.as_str())
+        || v.starts_with("os.environ")
+        || v.starts_with("process.env")
+        || v.starts_with("env(")
+        || v.starts_with("getenv")
+        || v.starts_with("os.getenv")
+        || v.starts_with("${")
+        || v.starts_with("$(")
+        || v.starts_with('<')
+        || v.starts_with("[redacted")
+        || v.chars().all(|c| c.is_ascii_digit())
+        || v.contains("example")
+        || v.contains("xxxx")
+        || v.contains("****")
+}
+
+/// Replaces anything that looks like a credential with `[redacted]`.
 pub fn redact(text: &str) -> String {
-    let is_word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.' | '/' | '+' | '=');
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find(is_word) {
-        out.push_str(&rest[..start]);
-        let end = rest[start..].find(|c: char| !is_word(c)).map_or(rest.len(), |e| start + e);
-        out.push_str(&redact_word(&rest[start..end]));
-        rest = &rest[end..];
+    let mut out = text.to_string();
+    for re in patterns() {
+        out = re
+            .replace_all(&out, |c: &regex::Captures| match c.name("secret") {
+                Some(s) if harmless(s.as_str()) => c[0].to_string(),
+                Some(s) => {
+                    let start = c.get(0).expect("a match has group 0").start();
+                    format!("{}[redacted]{}", &c[0][..s.start() - start], &c[0][s.end() - start..])
+                }
+                None => "[redacted]".into(),
+            })
+            .into_owned();
     }
-    out.push_str(rest);
     out
 }
 
-fn redact_word(word: &str) -> String {
-    if let Some(i) = word.find(['=', ':']) {
-        let key = word[..i].to_ascii_lowercase();
-        if i + 1 < word.len() && SECRET_KEYS.iter().any(|k| key.ends_with(k)) {
-            return format!("{}[redacted]", &word[..=i]);
-        }
-    }
-    let secret = SECRET_PREFIXES.iter().any(|p| word.starts_with(p) && word.len() >= p.len() + 12) || is_bot_token(word);
-    if secret { "[redacted]".into() } else { word.to_string() }
-}
-
-/// `123456789:AA…`: a bot id, a colon and a 35-character key.
-fn is_bot_token(word: &str) -> bool {
-    word.split_once(':').is_some_and(|(id, key)| {
-        id.len() >= 6 && id.chars().all(|c| c.is_ascii_digit()) && key.len() >= 30 && key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-    })
+/// Whether the text holds anything that looks like a credential.
+pub fn has_secret(text: &str) -> bool {
+    redact(text) != text
 }
 
 #[cfg(test)]
@@ -248,12 +277,42 @@ pub mod tests {
     #[test]
     fn credentials_are_redacted_and_ordinary_text_is_not() {
         let bot = format!("1234567890:{}", "A".repeat(35));
-        let text = format!("token {bot} and sk-ant-oat01-abcdefghijklmnop, GITHUB_TOKEN=ghx123 password: hunter2 ok");
-        let r = redact(&text);
-        assert!(!r.contains(&bot) && !r.contains("sk-ant-oat01") && !r.contains("ghx123"), "{r}");
-        assert!(r.contains("GITHUB_TOKEN=[redacted]"), "{r}");
-        assert_eq!(redact("5h 8% · resets 14:05, see src/main.rs:12"), "5h 8% · resets 14:05, see src/main.rs:12");
-        assert_eq!(redact("sk-ant-"), "sk-ant-");
+        let leaks = [
+            format!("token {bot}"),
+            "key sk-ant-oat01-abcdefghijklmnop".to_string(),
+            "GITHUB_TOKEN=ghx1234567890".to_string(),
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCY".to_string(),
+            "PRIVATE_KEY = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASC'".to_string(),
+            "api_key = \"a1b2c3d4e5f6g7h8\"".to_string(),
+            "{\"password\": \"hunter2hunter2\"}".to_string(),
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123".to_string(),
+            "DATABASE_URL=postgres://app:s3cretPassw0rd@db.internal:5432/app".to_string(),
+            "openai sk-abcdefghijklmnopqrstuvwxyz0123".to_string(),
+            "stripe sk_live_abcdefghijklmnop rk_live_abcdefghijklmnop".to_string(),
+            "slack xapp-1-ABCDEFGHIJ-123 xoxa-2-abcdefghijkl".to_string(),
+            "gh ghr_abcdefghijklmnopqrstuvwxyz0123".to_string(),
+            "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U".to_string(),
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----".to_string(),
+        ];
+        for leak in &leaks {
+            assert!(has_secret(leak), "missed: {leak}");
+            let r = redact(leak);
+            assert!(r.contains("[redacted]"), "{r}");
+        }
+        assert_eq!(redact("GITHUB_TOKEN=ghx1234567890"), "GITHUB_TOKEN=[redacted]");
+        assert_eq!(redact("postgres://app:s3cretPassw0rd@db:5432"), "postgres://app:[redacted]@db:5432");
+        for fine in [
+            "5h 8% · resets 14:05, see src/main.rs:12",
+            "primary_key=True",
+            "API_KEY = os.environ['API_KEY']",
+            "token = process.env.TOKEN",
+            "password: <your password>",
+            "SECRET_KEY=${SECRET_KEY}",
+            "sk-ant-",
+            "https://github.com/forhad-h/marsad",
+        ] {
+            assert!(!has_secret(fine), "flagged harmless text: {fine}");
+        }
     }
 
     #[test]
