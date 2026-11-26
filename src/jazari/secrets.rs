@@ -34,21 +34,33 @@ fn keychain_get(_service: &str) -> Option<String> {
     None
 }
 
-/// Stores a value that is not itself a credential (the paired chat id). Tokens are added by the
-/// user with `security add-generic-password … -w`, so they never pass through a command line.
+/// Whether `security -i` can take a value as one plain word: letters, digits and `:_-.`.
+fn plain_word(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-' | '.'))
+}
+
+/// The command for `security -i` that stores `value`. It goes on stdin, so the value never
+/// appears in the process list.
+fn add_command(user: &str, service: &str, value: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(plain_word(service) && plain_word(value), "{service} can't be stored: it may hold only letters, digits and :_-.");
+    let user = if plain_word(user) { user } else { "jazari" };
+    Ok(format!("add-generic-password -U -a {user} -s {service} -w {value}\n"))
+}
+
+/// Stores a value in the Keychain through `security -i` on stdin, then reads it back.
 pub fn set(service: &str, value: &str) -> anyhow::Result<()> {
     if cfg!(target_os = "macos") {
         let user = std::env::var("USER").unwrap_or_else(|_| "jazari".into());
-        let ok = Command::new("security")
-            .args(["add-generic-password", "-U", "-a", &user, "-s", service, "-w", value])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?
-            .success();
+        let command = add_command(&user, service, value)?;
+        let mut child = Command::new("security").arg("-i").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            std::io::Write::write_all(&mut stdin, command.as_bytes())?;
+        }
+        let ok = child.wait()?.success() && keychain_get(service).as_deref() == Some(value);
         anyhow::ensure!(ok, "couldn't save {service} in the Keychain");
         return Ok(());
     }
-    anyhow::bail!("no Keychain on this system: set {}={value} in the environment that runs jazari", env_name(service))
+    anyhow::bail!("no Keychain on this system: set {} in the environment that runs jazari", env_name(service))
 }
 
 /// Removes a value from the Keychain. Returns whether there was one to remove; a missing one, or
@@ -73,6 +85,15 @@ pub fn how_to_add(service: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_keychain_command_takes_only_plain_words() {
+        assert_eq!(add_command("forhad", TELEGRAM_CHAT, "-1001234").unwrap(), "add-generic-password -U -a forhad -s jazari-telegram-chat -w -1001234\n");
+        assert_eq!(add_command("a b", TELEGRAM_CHAT, "42").unwrap(), "add-generic-password -U -a jazari -s jazari-telegram-chat -w 42\n");
+        for bad in ["", "two words", "x\nadd-generic-password -s other -w y", "q\"uote"] {
+            assert!(add_command("u", TELEGRAM_CHAT, bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn each_service_has_an_environment_override() {
