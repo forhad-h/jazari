@@ -542,8 +542,10 @@ login token; the checks and git commands don't. A run is stopped after 45 minute
 - **Open network.** The container can reach the internet. Asking before a deploy, a spend or contacting users
   is a rule the workers follow, not something the container enforces. A worker that ignores the rule could
   still use the network on its own.
-- **The audit record has no key.** The hash chain shows an edited or removed entry in the middle. It can't tell
-  if entries were cut from the end, or if someone with access to your Mac rewrote the whole file.
+- **The audit record's check stays on your Mac.** Someone with access to your Mac can rewrite the record and its
+  saved head together, and `jazari build audit` won't notice. A copy that this machine can't change would fix
+  that, and it is planned. A signal (Ctrl-C, or macOS stopping the service) stops the supervisor at once, so the
+  head isn't saved at the end.
 - **The hard-line flag comes from the worker.** A worker marks a question as a hard line, so the written override
   is a courtesy check, not a gate. The gates still stop the real risks: the checks, the reviews, and no production,
   payment or outreach credentials in the container.
@@ -565,6 +567,12 @@ login token; the checks and git commands don't. A run is stopped after 45 minute
 
 **The record.** Every start, finish, merge and sleep is added to `~/.jazari/build/audit.jsonl`. Each entry
 carries the hash of the one before it, so `jazari build audit` finds an edited or deleted entry.
+- The head is the hash of the last entry. The supervisor saves the entry count and the head in
+  `audit-head.json` when it starts, when it stops and every 50 entries.
+- `jazari build audit` fails when the record has fewer entries than that copy, or a different hash at that
+  entry. So it finds entries cut from the end, and a record that was written again. From 50 entries on, a
+  missing copy is an error too.
+- If the record is already broken when the supervisor starts, it tells you on Telegram.
 
 ### Disk cleanup
 

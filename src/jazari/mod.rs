@@ -343,9 +343,12 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             anyhow::ensure!(!report.blocking(), "the team's checks block the supervisor");
             Ok(())
         }
-        JazariCmd::Audit => match audit::verify(&dir().join("audit.jsonl")) {
-            Ok(n) => {
-                println!("The audit record is whole: {n} entries.");
+        JazariCmd::Audit => match audit::check(&dir().join("audit.jsonl")) {
+            Ok(w) => {
+                if let Some(warning) = &w.warning {
+                    println!("⚠️ {warning}.");
+                }
+                println!("The audit record is whole: {} entries, head {}.", w.count, audit::short(&w.head));
                 Ok(())
             }
             Err(e) => anyhow::bail!("the audit record was changed: {e}"),
@@ -741,9 +744,18 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
         let _ = std::fs::write(&founder_md, text);
     };
     let work = |p: &str| work_dir(p);
+    // Read once: the supervisor is the only writer (its lock is held), so it carries the count and head.
+    let audit_tail = std::cell::RefCell::new(audit::tail(&audit_path));
     let audit = |kind: &str, data: serde_json::Value| {
-        if let Err(e) = audit::append(&audit_path, crate::now(), kind, data) {
-            eprintln!("[jazari] couldn't write the audit record: {e}");
+        let mut t = audit_tail.borrow_mut();
+        match audit::append(&audit_path, &mut t, crate::now(), kind, data) {
+            Ok(()) if t.count.is_multiple_of(audit::EVERY) => {
+                if let Err(e) = audit::save_head(&audit_path, t.count, &t.head) {
+                    eprintln!("[jazari] couldn't save the audit head: {e}");
+                }
+            }
+            Ok(()) => {}
+            Err(e) => eprintln!("[jazari] couldn't write the audit record: {e}"),
         }
     };
     let profile = limits::plan().profile();
@@ -764,9 +776,30 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
         audit: &audit,
     };
     println!("jazari supervisor on ({}). Ctrl-C stops it; a task in progress goes back in the queue next start.", profile.plan.label());
+    save_audit_head(&audit_path);
+    let result = supervise(&deps, once);
+    save_audit_head(&audit_path);
+    result
+}
+
+/// Saves the audit record's count and head, so a record cut or written again later doesn't match.
+/// The founder hears about it only when the record is already broken, because then they must act.
+fn save_audit_head(record: &std::path::Path) {
+    match audit::check(record) {
+        Ok(w) => {
+            if let Err(e) = audit::save_head(record, w.count, &w.head) {
+                eprintln!("[jazari] couldn't save the audit head: {e}");
+            }
+        }
+        Err(e) => tell_founder(&format!("⚠️ The audit record was changed: {e}. Run `jazari build audit`."), &[]),
+    }
+}
+
+/// The supervisor's loop: one task at a time until stopped, or one round with `once`.
+fn supervise(deps: &supervisor::Deps, once: bool) -> anyhow::Result<()> {
     let mut errors = 0u32;
     loop {
-        let wait = match supervisor::tick(&deps) {
+        let wait = match supervisor::tick(deps) {
             Ok(supervisor::Tick::Ran { .. }) => {
                 errors = 0;
                 if once {
