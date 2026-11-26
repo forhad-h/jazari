@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 const POLL_SECS: u64 = 25;
 /// How long `pair` waits for the code.
 const PAIR_SECS: f64 = 600.0;
-/// Wrong codes accepted before pairing gives up.
+/// Wrong codes, one per chat, accepted before pairing gives up.
 const PAIR_TRIES: u32 = 5;
 
 #[derive(Debug, PartialEq)]
@@ -309,26 +309,72 @@ fn save_offset(dir: &Path, offset: Option<i64>) {
 
 // ---------- pairing ----------
 
-/// A 6-digit code from the system's random source.
-fn pairing_code() -> String {
-    let mut buf = [0u8; 4];
-    let random = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf)).is_ok();
-    let n = if random { u32::from_le_bytes(buf) } else { (crate::now().fract() * 1e9) as u32 ^ std::process::id().rotate_left(16) };
-    format!("{:06}", n % 1_000_000)
+/// Letters and digits a person can't mix up when typing: no 0/O, 1/I/L.
+const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+/// Characters in a pairing code: 31^10 is about 8 * 10^14 codes, so a few guesses can't hit one.
+const CODE_LEN: usize = 10;
+
+/// Random bytes from the system: /dev/urandom, or the keys that the standard library takes from
+/// the system's random source for each `RandomState`.
+fn random_bytes(buf: &mut [u8]) {
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, buf)).is_ok() {
+        return;
+    }
+    use std::hash::{BuildHasher, Hasher};
+    for chunk in buf.chunks_mut(8) {
+        let n = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        chunk.copy_from_slice(&n.to_le_bytes()[..chunk.len()]);
+    }
 }
 
-/// Waits for `code` in a private chat and returns that chat's id. Wrong codes count against
-/// [`PAIR_TRIES`]; other chats get no reply.
-pub fn wait_for_code<T: Transport>(bot: &Bot<T>, code: &str, mut offset: Option<i64>, deadline: f64, now: impl Fn() -> f64) -> anyhow::Result<(i64, Option<i64>)> {
-    let mut wrong = 0;
+/// A random 10-character code, shown as two groups of 5 (`ABCDE-FGHJK`).
+fn pairing_code() -> String {
+    let mut code = String::new();
+    while code.len() < CODE_LEN {
+        let mut buf = [0u8; 32];
+        random_bytes(&mut buf);
+        // Bytes past the last whole multiple of the alphabet's size are skipped, so every
+        // character is equally likely.
+        let limit = (256 / CODE_ALPHABET.len() * CODE_ALPHABET.len()) as u8;
+        for b in buf.into_iter().filter(|&b| b < limit).take(CODE_LEN - code.len()) {
+            code.push(CODE_ALPHABET[b as usize % CODE_ALPHABET.len()] as char);
+        }
+    }
+    format!("{}-{}", &code[..5], &code[5..])
+}
+
+/// A sent code as it is compared: capital letters and digits only, so case, spaces and dashes
+/// don't matter.
+fn normal_code(text: &str) -> String {
+    text.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
+}
+
+/// Waits for `code` in a private chat and returns that chat's id. Each chat gets one guess: after
+/// a wrong code, that chat is ignored until the window ends. Wrong codes from all chats together
+/// count against [`PAIR_TRIES`]. `note` tells the founder about each wrong code.
+pub fn wait_for_code<T: Transport>(
+    bot: &Bot<T>,
+    code: &str,
+    mut offset: Option<i64>,
+    deadline: f64,
+    now: impl Fn() -> f64,
+    note: &mut dyn FnMut(&str),
+) -> anyhow::Result<(i64, Option<i64>)> {
+    let want = normal_code(code);
+    let mut guessed = std::collections::HashSet::new();
     while now() < deadline {
         let (updates, next) = bot.updates(offset, POLL_SECS)?;
         offset = next.or(offset);
         for u in updates.iter().filter(|u| u.private) {
-            if u.text.trim() == code {
+            if guessed.contains(&u.chat_id) {
+                continue;
+            }
+            if normal_code(&u.text) == want {
                 return Ok((u.chat_id, offset));
             }
-            wrong += 1;
+            guessed.insert(u.chat_id);
+            let wrong = guessed.len() as u32;
+            note(&format!("A wrong code came from Telegram chat {} ({wrong} so far). That chat can't try again until you pair again.", u.chat_id));
             anyhow::ensure!(wrong < PAIR_TRIES, "{PAIR_TRIES} wrong codes; run `jazari build telegram pair` again");
         }
     }
@@ -341,7 +387,7 @@ pub fn pair<T: Transport>(bot: &Bot<T>, dir: &Path) -> anyhow::Result<()> {
     let (_, offset) = bot.updates(Some(-1), 0)?;
     let code = pairing_code();
     println!("Open a private chat with @{name} in Telegram and send this code within 10 minutes:\n\n    {code}\n");
-    let (chat, offset) = wait_for_code(bot, &code, offset, crate::now() + PAIR_SECS, crate::now)?;
+    let (chat, offset) = wait_for_code(bot, &code, offset, crate::now() + PAIR_SECS, crate::now, &mut |line| println!("{line}"))?;
     super::secrets::set(super::secrets::TELEGRAM_CHAT, &chat.to_string())?;
     save_offset(dir, offset);
     bot.send(chat, "Paired. Only this chat can control jazari now. Send /help for the commands.")?;
@@ -591,18 +637,41 @@ mod tests {
     #[test]
     fn pairing_takes_the_code_from_a_private_chat_only() {
         let fake = Fake::default();
-        fake.replies.borrow_mut().extend([json!([msg(1, -5, "group", "123456"), msg(2, 77, "private", "hello")]), json!([msg(3, 42, "private", " 123456 ")])]);
+        fake.replies.borrow_mut().extend([json!([msg(1, -5, "group", "ABCDE-FGHJK"), msg(2, 77, "private", "hello")]), json!([msg(3, 42, "private", " abcde fghjk ")])]);
         let bot = Bot { transport: fake };
-        assert_eq!(wait_for_code(&bot, "123456", None, f64::MAX, || 0.0).unwrap(), (42, Some(4)));
+        let mut notes = Vec::new();
+        assert_eq!(wait_for_code(&bot, "ABCDE-FGHJK", None, f64::MAX, || 0.0, &mut |n| notes.push(n.to_string())).unwrap(), (42, Some(4)));
+        assert_eq!(notes.len(), 1, "the wrong guess from chat 77 is reported: {notes:?}");
+        assert!(notes[0].contains("chat 77"), "{notes:?}");
 
+        // A chat gets one guess: after a wrong code, even the right code from it is ignored.
         let fake = Fake::default();
-        fake.replies.borrow_mut().push(json!((0..5).map(|i| msg(i, 42, "private", "000000")).collect::<Vec<_>>()));
-        let err = wait_for_code(&Bot { transport: fake }, "123456", None, f64::MAX, || 0.0).unwrap_err();
-        assert!(err.to_string().contains("wrong codes"), "{err}");
+        fake.replies.borrow_mut().extend([json!([msg(1, 42, "private", "AAAAA-AAAAA"), msg(2, 42, "private", "ABCDE-FGHJK")]), json!([msg(3, 43, "private", "ABCDE-FGHJK")])]);
+        assert_eq!(wait_for_code(&Bot { transport: fake }, "ABCDE-FGHJK", None, f64::MAX, || 0.0, &mut |_| {}).unwrap(), (43, Some(4)));
 
-        let err = wait_for_code(&Bot { transport: Fake::default() }, "123456", None, 1.0, || 2.0).unwrap_err();
+        // Repeats from one chat don't count. Wrong codes from 5 chats end the window.
+        let fake = Fake::default();
+        fake.replies.borrow_mut().push(json!((0..9).map(|i| msg(i, 40 + i / 2, "private", "AAAAA-AAAAA")).collect::<Vec<_>>()));
+        let mut notes = 0;
+        let err = wait_for_code(&Bot { transport: fake }, "ABCDE-FGHJK", None, f64::MAX, || 0.0, &mut |_| notes += 1).unwrap_err();
+        assert!(err.to_string().contains("wrong codes"), "{err}");
+        assert_eq!(notes, PAIR_TRIES, "one note per chat");
+
+        let err = wait_for_code(&Bot { transport: Fake::default() }, "ABCDE-FGHJK", None, 1.0, || 2.0, &mut |_| {}).unwrap_err();
         assert!(err.to_string().contains("no code arrived"), "{err}");
-        assert_eq!(pairing_code().len(), 6);
+    }
+
+    #[test]
+    fn pairing_codes_are_long_and_easy_to_type() {
+        let codes: Vec<String> = (0..50).map(|_| pairing_code()).collect();
+        for c in &codes {
+            assert_eq!(c.len(), CODE_LEN + 1, "{c}");
+            assert_eq!(c.as_bytes()[5], b'-', "{c}");
+            assert!(c.bytes().filter(|&b| b != b'-').all(|b| CODE_ALPHABET.contains(&b)), "{c}");
+        }
+        let unique: std::collections::HashSet<_> = codes.iter().collect();
+        assert_eq!(unique.len(), codes.len(), "50 random codes are all different");
+        assert_eq!(normal_code(" abcde-fghjk\n"), "ABCDEFGHJK");
     }
 
     #[test]
