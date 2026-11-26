@@ -21,12 +21,25 @@ yes on Telegram. A session can open Chrome again when it needs it.
    > [Close Spotify (0.5 GB)] [Close Preview (0.3 GB)]
    > [Close all] [Not now]
 
-3. Each app has its own button. A tap on one app closes only that app, and its button changes
-   to "Closed" or "Still open". The other buttons stay until the request expires.
-4. On **Close all**, jazari asks each listed app to quit and reports back: "Closed 3 apps. Preview
-   is waiting for you to save a document, so it is still open."
+3. Each app has its own button. A tap on one app closes only that app. jazari then edits the
+   same card: the button changes to "Closed" or "Still open". The other buttons stay until the
+   request expires.
+4. **Close all** closes every listed app except Chrome. Chrome has only its own button, because
+   a Chrome tab can hold a call (see "Rules that keep it safe").
 5. On **Not now**, or if there is no answer in 10 minutes, jazari closes nothing more. It asks
    again only after 60 minutes, and only if memory is still at the warning level.
+
+Telegram gets only messages that need the founder's decision or action (a board Decision). So the
+approval card is the only message that jazari pushes. The results show as edits of that card.
+jazari pushes one more message only when an app stays open with unsaved work, because then the
+founder has to act.
+
+The card needs the Telegram bridge. If the bridge is not running (no background service and no
+bridge started by hand), nobody can answer, so the request expires and closes nothing. Then
+`jazari watch status` and the dashboard show "memory is high; the Telegram bridge is not running".
+
+At the desk, `jazari watch focus` works without Telegram. It shows the same list in the
+terminal, with each app's memory, and asks which apps to close.
 
 ## Opening a closed app again when the work needs it
 
@@ -40,11 +53,14 @@ an app again when a session needs it. jazari opens only apps that it closed itse
   to free memory. Wait 15 seconds, then make the same call again." The next call goes through.
 - **Any other app.** A session runs `jazari watch focus --reopen "<app>"`. The block message
   and the jazari-usage skill name this command.
-- **The founder.** The Telegram report has a [Reopen] button for each closed app.
+- **The founder.** `jazari watch focus --reopen "<app>"`, or the dashboard.
 - When memory is still at the warning level, jazari opens the app anyway, because the work
-  needs it. It tells the founder on Telegram which app it opened and why.
+  needs it. This is no decision for the founder, so jazari does not push it to Telegram. It
+  records it in the actions log.
 
-At the desk, `jazari watch focus` shows the same list in the terminal and asks for a yes there.
+The guard hook is registered with no matcher, so it runs before every tool, MCP tools included.
+The hook must not wait for Chrome: it starts `open -a "Google Chrome"` as a detached process and
+returns the refusal at once.
 
 ## Rules that keep it safe
 
@@ -56,15 +72,30 @@ At the desk, `jazari watch focus` shows the same list in the terminal and asks f
 - **No answer means no close.**
 - **Polite quit only.** On macOS, jazari sends each app the normal Quit request (as ⌘Q does). An
   app with unsaved work asks the founder to save and stays open. jazari never force-kills an app.
+- **The app in front is never closed.** jazari leaves out the frontmost app, which is the app the
+  founder is using right now.
 - **A keep list that jazari never closes:** terminals (Terminal, iTerm2, Warp, Ghostty, WezTerm,
-  kitty), Finder, the Dock and other system processes, Claude, and every app that has a running
-  Claude Code session as a child process. The founder can add apps to this list.
+  kitty), Finder, the Dock and other system processes, and Claude. Call apps are on it too:
+  zoom.us, Microsoft Teams and FaceTime. So is every app that runs a Claude Code session as a child
+  process. The founder can add apps to this list.
+- **Slack is not on the default keep list.** jazari has no reliable way to tell whether Slack is
+  in a huddle, so the founder decides with Slack's own button.
+- **Calls in Chrome.** A Chrome tab can hold a Meet call. macOS has no public command that tells
+  which app plays audio or uses the microphone. So jazari cannot detect such a call. For that
+  reason, Close all leaves Chrome out, and Chrome closes only through its own button.
 - **Chrome stays open while a session uses it.** If a session called a browser tool (any
   `mcp__claude-in-chrome__*` tool) in the last 10 minutes, Chrome is left out of the list.
 - **Only app names go to Telegram.** Window titles can contain private text, so jazari never
   sends them.
 - **`jazari watch pause` holds it**, like every other action that jazari does on its own.
 - **Every request, answer and quit goes to the actions log** (`jazari watch actions`).
+
+## Memory per app
+
+An app's memory includes its helper processes. Chrome runs many "Google Chrome Helper"
+renderers, and Electron apps such as Slack run helpers too. jazari groups processes by the `.app`
+bundle that holds their executable (the outermost `*.app` folder in the path). Without this
+grouping, the numbers would be far too low.
 
 ## Platforms
 
@@ -86,9 +117,14 @@ At the desk, `jazari watch focus` shows the same list in the terminal and asks f
    through injectable functions, so tests never close a real app.
 2. **The request file.** jazari writes `~/.jazari/claude/focus-request.json` with the app list,
    the one-time code and the expiry time. The bridge reads the answer from the button.
-3. **The Telegram part (`src/jazari/bridge.rs`).** jazari-worker-2 owns this folder. The bridge
-   sends the request with two buttons and records the tap. Only one program can read a bot's
-   updates, so the request must go through the bridge.
+3. **The Telegram part (`src/jazari/bridge.rs`).** Only one program can read a bot's updates, so
+   the request must go through the bridge. The bridge part stays small: it sends the card, edits
+   it after a tap, and passes the tap to `src/focus.rs`. All the app logic stays in
+   `src/focus.rs`. Each button's `callback_data` holds the one-time code and the app's number in
+   the list (for example `fc:7f3a9c21:3`), never an app name, because Telegram allows at most
+   64 bytes. Editing a card needs Telegram's `editMessageText`, which the bot module does not have
+   yet. Owner: agent-context-enforce, who claims `bridge.rs` on the board before starting and
+   tells the other agents that work in `src/jazari/`.
 4. **The trigger.** The watcher (`src/watch.rs`) checks memory. At the warning level, with
    `--auto on`, it writes a request at most once every 60 minutes.
 
@@ -101,6 +137,10 @@ At the desk, `jazari watch focus` shows the same list in the terminal and asks f
 - The Telegram text holds app names only.
 
 - A tap on one app's button closes that app only.
+- Close all leaves Chrome and the frontmost app out.
+- A Chrome Helper process counts toward Google Chrome's memory.
+- Each `callback_data` is at most 64 bytes, with 50 apps in the list.
+- With no bridge running, the request expires and closes nothing.
 - A browser tool call with Chrome closed by jazari starts Chrome and refuses that one call with
   the retry text. With Chrome closed by the founder, jazari does not start it.
 - `--reopen` opens only an app in `focus-closed.json`.
@@ -110,3 +150,5 @@ At the desk, `jazari watch focus` shows the same list in the terminal and asks f
 - 2026-11-26: the message has one button per app, as well as Close all and Not now.
 - 2026-11-26: jazari opens a closed app again when a session needs it (the Chrome rule and
   `--reopen`). It does not open every closed app when the work ends.
+- 2026-11-26 (review): the frontmost app and call apps are never closed. Close all leaves Chrome
+  out. Memory counts helper processes. Only the approval card is pushed to Telegram.
