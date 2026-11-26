@@ -77,10 +77,126 @@ fn queue(session: &str, kind: &str, text: &str) -> anyhow::Result<()> {
 }
 
 pub fn tell(session: &str, text: &str) -> anyhow::Result<()> {
+    tell_and_wake(session, text).map(drop)
+}
+
+/// Queues a message and, when the session is idle, wakes it so that it reads the message now.
+/// Returns whether the session was woken. The message itself goes only through the inbox, so the
+/// hook hands it over with the user's authority; the wake-up carries none of its text.
+pub fn tell_and_wake(session: &str, text: &str) -> anyhow::Result<bool> {
+    tell_with(session, text, &wake::Env::real())
+}
+
+fn tell_with(session: &str, text: &str, env: &wake::Env) -> anyhow::Result<bool> {
     let text = clean_text(text);
     anyhow::ensure!(!text.is_empty(), "the message is empty");
     let a = crate::act::Action::new(crate::act::Kind::Message, session).detail(text.as_str());
-    crate::act::run(&a, || queue(session, "message", &text))
+    crate::act::run(&a, || queue(session, "message", &text))?;
+    Ok(wake::wake(env, session))
+}
+
+/// Waking an idle session through Claude Code's cross-session socket. An idle session gets no hook
+/// call, so a queued message would wait until the user types. A short line on the session's socket
+/// starts a turn, and the first tool call of that turn delivers the message. The socket's format is
+/// not documented, and it sends no reply: see
+/// `docs/solutions/integration-issues/claude-code-cross-session-socket.md`.
+mod wake {
+    use serde_json::{Value, json};
+    use std::path::{Path, PathBuf};
+
+    /// What the woken session reads. It carries no part of the message.
+    pub const TEXT: &str =
+        "jazari has a message for you from the user. Run any tool call (for example `jazari watch status`) to receive it.";
+
+    /// Where Claude Code lists its sessions, and the checks and the send, so that tests never
+    /// read the real registry or open a socket.
+    pub struct Env {
+        pub registry: PathBuf,
+        pub alive: fn(i64) -> bool,
+        pub owned_socket: fn(&Path) -> bool,
+        pub send: fn(&Path, &[u8]) -> std::io::Result<()>,
+    }
+
+    impl Env {
+        #[cfg(unix)]
+        pub fn real() -> Env {
+            Env { registry: crate::claude_dir().join("sessions"), alive, owned_socket, send }
+        }
+
+        /// Other platforms use a different transport: the message waits in the inbox.
+        #[cfg(not(unix))]
+        pub fn real() -> Env {
+            Env {
+                registry: PathBuf::new(),
+                alive: |_| false,
+                owned_socket: |_| false,
+                send: |_, _| Err(std::io::ErrorKind::Unsupported.into()),
+            }
+        }
+    }
+
+    /// The socket of `session` when it is idle: only a path from Claude Code's own registry, for a
+    /// live process, on a socket file that the current user owns.
+    fn socket(env: &Env, session: &str) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(&env.registry).ok()?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(v) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else { continue };
+            if v["sessionId"].as_str() != Some(session) || v["status"].as_str() != Some("idle") {
+                continue;
+            }
+            let (Some(pid), Some(sock)) = (v["pid"].as_i64(), v["messagingSocketPath"].as_str()) else { continue };
+            let sock = PathBuf::from(sock);
+            if sock.is_absolute() && (env.alive)(pid) && (env.owned_socket)(&sock) {
+                return Some(sock);
+            }
+        }
+        None
+    }
+
+    pub fn line() -> Vec<u8> {
+        let mut line = json!({ "type": "user", "message": { "role": "user", "content": TEXT } }).to_string().into_bytes();
+        line.push(b'\n');
+        line
+    }
+
+    /// Whether the session was idle and its socket took the wake-up line.
+    pub fn wake(env: &Env, session: &str) -> bool {
+        socket(env, session).is_some_and(|sock| (env.send)(&sock, &line()).is_ok())
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: i64) -> bool {
+        // SAFETY: signal 0 only checks that the process exists; nothing is sent.
+        i32::try_from(pid).is_ok_and(|pid| pid > 0 && unsafe { libc::kill(pid, 0) } == 0)
+    }
+
+    #[cfg(unix)]
+    fn owned_socket(path: &Path) -> bool {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let me = unsafe { libc::getuid() };
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket() && m.uid() == me)
+    }
+
+    /// Sends the line, then waits for Claude Code to close the connection. It writes no reply, so a
+    /// clean close is the only sign that the line was read; any reply or a timeout counts as failed.
+    #[cfg(unix)]
+    fn send(path: &Path, line: &[u8]) -> std::io::Result<()> {
+        use std::io::{Read, Write};
+        let mut s = std::os::unix::net::UnixStream::connect(path)?;
+        let wait = Some(std::time::Duration::from_secs(2));
+        s.set_write_timeout(wait)?;
+        s.set_read_timeout(wait)?;
+        s.write_all(line)?;
+        s.shutdown(std::net::Shutdown::Write)?;
+        match s.read(&mut [0u8; 256])? {
+            0 => Ok(()),
+            _ => Err(std::io::Error::other("unexpected reply")),
+        }
+    }
 }
 
 pub fn request_stop(session: &str) -> anyhow::Result<()> {
@@ -241,8 +357,11 @@ pub fn run_tell(a: TellArgs) -> anyhow::Result<()> {
         request_stop(&s.id)?;
         println!("{name} stops before its next tool call; `claude --resume {}` continues it.", s.id);
     } else {
-        tell(&s.id, &a.message.join(" "))?;
-        println!("Queued for {name}: Claude reads it at the session's next tool call or prompt.");
+        if tell_and_wake(&s.id, &a.message.join(" "))? {
+            println!("Queued for {name}, and sent a wake-up to the idle session.");
+        } else {
+            println!("Queued for {name}: Claude reads it at the session's next tool call or prompt.");
+        }
     }
     Ok(())
 }
@@ -327,5 +446,55 @@ mod tests {
         let err = queue_at(&dir, "s1", "message", "x", None).unwrap_err();
         assert!(err.to_string().contains("already waiting"), "{err}");
         assert!(queue_at(&dir, "../s1", "message", "x", None).is_err());
+    }
+
+    /// A registry with one entry per session: (pid, session, status, socket path). A path that
+    /// starts with `/` is placed under the temp dir, so that it is absolute on every platform.
+    fn registry(name: &str, entries: &[(i64, &str, &str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("jazari-registry-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (pid, id, status, sock) in entries {
+            let sock = match sock.strip_prefix('/') {
+                Some(rest) => std::env::temp_dir().join(rest).to_string_lossy().into_owned(),
+                None => sock.to_string(),
+            };
+            let v = json!({ "pid": pid, "sessionId": id, "status": status, "messagingSocketPath": sock });
+            std::fs::write(dir.join(format!("{pid}.json")), v.to_string()).unwrap();
+        }
+        std::fs::write(dir.join("1.abc.key"), "{}").unwrap();
+        dir
+    }
+
+    fn env(registry: std::path::PathBuf) -> wake::Env {
+        wake::Env { registry, alive: |pid| pid != 666, owned_socket: |p| !p.ends_with("foreign.sock"), send: |_, _| Ok(()) }
+    }
+
+    #[test]
+    fn only_an_idle_live_session_with_its_own_socket_is_woken() {
+        let dir = registry("wake", &[
+            (10, "idle-1", "idle", "/tmp/cc-socks/10.sock"),
+            (11, "busy-1", "busy", "/tmp/cc-socks/11.sock"),
+            (666, "dead-1", "idle", "/tmp/cc-socks/666.sock"),
+            (12, "foreign-1", "idle", "/tmp/cc-socks/foreign.sock"),
+            (13, "relative-1", "idle", "cc-socks/13.sock"),
+        ]);
+        let e = env(dir.clone());
+        assert!(wake::wake(&e, "idle-1"));
+        for id in ["busy-1", "dead-1", "foreign-1", "relative-1", "unknown"] {
+            assert!(!wake::wake(&e, id), "{id} must not be woken");
+        }
+        let failing = wake::Env { send: |_, _| Err(std::io::ErrorKind::TimedOut.into()), ..env(dir) };
+        assert!(!wake::wake(&failing, "idle-1"), "a failed send is not a wake-up");
+        assert!(!wake::wake(&env("/nonexistent/registry".into()), "idle-1"));
+    }
+
+    #[test]
+    fn the_wake_up_line_is_a_user_message_without_the_text() {
+        let line = wake::line();
+        assert_eq!(line.last(), Some(&b'\n'));
+        let v: Value = serde_json::from_slice(&line).unwrap();
+        assert_eq!((v["type"].as_str(), v["message"]["role"].as_str()), (Some("user"), Some("user")));
+        assert_eq!(v["message"]["content"], wake::TEXT);
     }
 }

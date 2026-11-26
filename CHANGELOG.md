@@ -3,6 +3,10 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- `jazari watch tell` and `t` send an idle session a wake-up, so it can read the message now (macOS and Linux)
+
 ## 1.0.4 - 2026-11-26
 
 - Values jazari saves in the Keychain no longer show in the process list while they are saved

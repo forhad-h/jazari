@@ -1044,8 +1044,9 @@ impl App {
             KeyCode::Enter if c.text.trim().is_empty() => {}
             KeyCode::Enter => {
                 let c = self.compose.take().unwrap();
-                match crate::channel::tell(&c.session, &c.text) {
-                    Ok(()) => self.info = Some(format!("queued for {}: Claude reads it at the next tool call or prompt ", c.name)),
+                match crate::channel::tell_and_wake(&c.session, &c.text) {
+                    Ok(true) => self.info = Some(format!("queued for {}, and sent a wake-up to the idle session ", c.name)),
+                    Ok(false) => self.info = Some(format!("queued for {}: Claude reads it at the next tool call or prompt ", c.name)),
                     Err(e) => self.error = Some(format!("couldn't queue the message: {e:#} ")),
                 }
             }
