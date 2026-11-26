@@ -10,6 +10,7 @@ GitHub release. Keep each bullet to one short line.
 - settings.json is written in one step, and its backup is made only the first time
 - `jazari build audit` finds entries cut from the end of the audit record, or a record written again
 - `jazari build service status` shows a running service as running
+- Telegram gets a message only when you must decide or act; ask with /status, /tasks or /prefs for the rest
 
 ## 1.0.2 - 2026-11-26
 

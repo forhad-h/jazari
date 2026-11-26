@@ -383,7 +383,7 @@ pub fn wait_for_code<T: Transport>(
             }
             if !looks_like_code(&sent) {
                 if hinted.insert(u.chat_id) {
-                    let _ = bot.send(u.chat_id, "Send the 10-character code shown in your terminal.");
+                    let _ = bot.send(u.chat_id, "Send the 10-character code shown in your terminal."); // push: a reply to the founder's own message
                 }
                 continue;
             }
@@ -405,7 +405,7 @@ pub fn pair<T: Transport>(bot: &Bot<T>, dir: &Path) -> anyhow::Result<()> {
     let (chat, offset) = wait_for_code(bot, &code, offset, crate::now() + PAIR_SECS, crate::now, &mut |line| println!("{line}"))?;
     super::secrets::set(super::secrets::TELEGRAM_CHAT, &chat.to_string())?;
     save_offset(dir, offset);
-    bot.send(chat, "Paired. Only this chat can control jazari now. Send /help for the commands.")?;
+    bot.send(chat, "Paired. Only this chat can control jazari now. Send /help for the commands.")?; // push: a reply: the pairing the founder started is done
     println!("Paired with that chat. `jazari build bridge` starts listening for commands.");
     Ok(())
 }
@@ -436,7 +436,7 @@ pub fn serve_once<T: Transport>(bot: &Bot<T>, chat: i64, offset: Option<i64>, op
         if let Some(cb) = &u.callback {
             bot.answer_button(cb);
         }
-        bot.send(chat, &handle_from(parse(&u.text), ops, u.callback.is_some()))?;
+        bot.send(chat, &handle_from(parse(&u.text), ops, u.callback.is_some()))?; // push: a reply to the founder's command
     }
     Ok(next.or(offset))
 }
@@ -455,7 +455,6 @@ pub fn run<T: Transport>(bot: &Bot<T>, chat: i64, dir: &Path) -> anyhow::Result<
     // Only notes posted from now on are forwarded.
     let mut events = crate::jsonl::JsonlTail::new(crate::claude_data_dir().join("events.jsonl"));
     events.read_new();
-    bot.send(chat, "jazari bridge is on. Send /help for the commands.")?;
     println!("Listening for commands from the paired chat. Ctrl-C stops the bridge.");
     let mut failures = 0u32;
     loop {
@@ -485,7 +484,7 @@ pub fn run<T: Transport>(bot: &Bot<T>, chat: i64, dir: &Path) -> anyhow::Result<
             for ev in &notes {
                 let project = ev["session_id"].as_str().and_then(|id| sessions.get(id)).map(|s| s.project());
                 if let Some(text) = attention_text(ev, project.as_deref()) {
-                    let _ = bot.send(chat, &text);
+                    let _ = bot.send(chat, &text); // push: a session asked for the founder with --attention
                 }
             }
         }
