@@ -197,6 +197,11 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("q", "quit".into()),
             ]
         }
+        (View::Build, _) if app.build.is_some() => {
+            let build = app.build.as_ref().unwrap();
+            crate::build_ui::draw(f, body, build);
+            build.keys().into_iter().map(|(k, label)| (k, label.to_string())).chain([("q", "quit".to_string())]).collect()
+        }
         (View::Clean, _) if app.clean.is_some() => {
             let clean = app.clean.as_ref().unwrap();
             draw_clean(f, body, clean, app.system.as_ref(), app.tick);
@@ -242,8 +247,13 @@ pub fn draw(f: &mut Frame, app: &App) {
             let ended = if app.show_ended { "hide ended" } else { "show ended" };
             // A prompt waiting for an answer comes first, so a narrow footer still shows it.
             let waiting = app.answers.as_ref().map_or(0, |a| a.count());
-            let answer = if waiting > 0 { vec![("r", format!("answer ({waiting} waiting)"))] } else { Vec::new() };
-            answer.into_iter().chain([
+            let mut first = if waiting > 0 { vec![("r", format!("answer ({waiting} waiting)"))] } else { Vec::new() };
+            // Build questions come next, for the same reason.
+            let build = app.build_watch.as_ref().map_or(0, |w| w.waiting);
+            if build > 0 {
+                first.push(("B", format!("build ({build} question{})", if build == 1 { "" } else { "s" })));
+            }
+            first.into_iter().chain([
                 ("↑↓", "select".into()),
                 ("enter", "details".into()),
                 ("tab", "subagents".into()),
@@ -251,6 +261,7 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("u", "usage".into()),
                 ("t/x", "message/stop".into()),
                 ("D", "disk cleanup".into()),
+                ("B", "build".into()),
                 ("p", "share".into()),
                 ("P", if app.pin.is_some() { "unpin" } else { "pin on top" }.into()),
                 ("b", "board".into()),
@@ -261,6 +272,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("s/S", format!("sort: {}", app.sort.label())),
                 ("q", "quit".into()),
             ])
+            // With questions waiting, the first hints already name `B`.
+            .filter(|(k, label)| !(build > 0 && *k == "B" && label == "build"))
             .collect()
         }
     };

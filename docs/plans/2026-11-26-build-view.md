@@ -71,8 +71,8 @@ The List view opens the Build view with `B`. This key is free in the List view t
 The second press protects against one wrong key press. The status line says what the second press
 will do, for example "Press y again to approve the deploy for #42".
 
-The input box reuses `TextBox` from `src/prompt_view.rs`. Its `of`, `insert` and `on_key` functions
-become `pub(crate)`. No other change to that file.
+The input box reuses `TextBox` from `src/prompt_view.rs`. Its `of` and `on_key` functions become
+`pub(crate)`. No other change to that file.
 
 ## Reads and writes go through the same code as the CLI
 
@@ -100,8 +100,8 @@ founder can fix it.
 Another session can type keys into the dashboard, for example with `tmux send-keys` or an
 `osascript` keystroke. So a key press alone does not prove that the founder is at the machine.
 Before some writes, the view asks for a presence check: Touch ID or the Mac password. The
-dashboard uses the same check for approvals. The view reuses the helper that #131 adds. It
-does not add a second helper.
+dashboard uses the same check for approvals. The view reuses `presence::available()` and
+`presence::confirm(reason)` from `src/presence.rs` (#131). It does not add a second helper.
 
 | Write | Check |
 |---|---|
@@ -135,7 +135,7 @@ Tests:
 
 ## Slow work runs on a thread
 
-The view owns one worker thread with its own `Store` handle (`jazari::open()`):
+The view owns one worker thread with its own store handle (`jazari::dashboard::Db`):
 
 1. Every 2 seconds, and after each action, the thread reads a snapshot and sends it through a
    channel. The snapshot holds the products, the tasks, the limits and the supervisor state.
@@ -177,12 +177,14 @@ already do that.
 
 | File | Change |
 |---|---|
+| `src/jazari/dashboard.rs` (new) | The snapshot, the actions, the presence check before a write, the heartbeat. It is a child of `jazari`, so it uses the private `store`, `limits` and `personas` modules directly. |
 | `src/build_view.rs` (new) | State, keys, the worker thread, the snapshot, the actions |
 | `src/build_ui.rs` (new) | Draws the panes, the details, the input box and the status line |
 | `src/app.rs` | A `View::Build` variant, key `B` in the List view, dispatch to `build_view`, the channel read in `tick()`. A few lines only. |
 | `src/ui.rs` | One match arm that calls `build_ui::draw`, the `B` footer hint and the build question count in the List view |
-| `src/prompt_view.rs` | `TextBox::of`, `insert` and `on_key` become `pub(crate)` |
-| `src/jazari/mod.rs` | `open()` becomes `pub(crate)`. The heartbeat thread in `run_supervisor`. |
+| `src/prompt_view.rs` | `TextBox::of` and `on_key` become `pub(crate)` |
+| `src/jazari/mod.rs` | `pub mod dashboard`. The heartbeat starts and stops in `run_supervisor`. |
+| `src/main.rs` | `mod build_ui;` and `mod build_view;` |
 | `README.md`, `CHANGELOG.md` | The `B` key, a "Build view" section, one line under `## Unreleased` |
 
 `assets/SKILL.md` does not change, because no CLI command changes.
@@ -195,7 +197,7 @@ for the same two files. The session that hardens Telegram holds `src/jazari/mod.
 
 1. `build_view.rs`, `build_ui.rs` and the `TextBox` change, with tests. Nobody else has claimed
    these files.
-2. `open()` and the heartbeat in `src/jazari/mod.rs`, in the order agreed with the sessions that
+2. `dashboard.rs` and the heartbeat in `src/jazari/mod.rs`, in the order agreed with the sessions that
    hold or wait for that file.
 3. After the answer view's PR (#131) is merged, add the presence check. Then add the hooks in
    `app.rs` and `ui.rs`, in the order agreed with the `jazari claude` session.
@@ -224,7 +226,7 @@ The tests use `Store::memory()` and never open the real data folder, Telegram, g
 1. `cargo test` and `cargo clippy --all-targets`.
 2. A throwaway `TestBackend` test at 182×37 and 110×33 with a few products and tasks, deleted after
    the check.
-3. With `MARSAD_HOME=<scratch dir>`:
+3. With `JAZARI_HOME=<scratch dir>`:
    1. Add a product with `jazari build new`.
    2. Block a task by hand in the scratch database.
    3. Answer, approve and deny it from the Build view.
@@ -235,6 +237,10 @@ The tests use `Store::memory()` and never open the real data folder, Telegram, g
 - Preferences, proposals (`accept`, `ignore`) and `feedback`. They can come later, with the same
   pattern.
 - A task role other than `engineer` in the `t` box.
+- Protection against a process that runs as the same user. The presence check stops keys that
+  another session types into the dashboard. But such a process can still write `jazari.db`
+  directly. This is the same limit that jazari has for every file that it owns.
+- The "answered by jazari" mark for Part B of the answer plan. It comes with Part B.
 
 ## Decisions from the review
 
