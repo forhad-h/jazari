@@ -345,6 +345,9 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
         }
         JazariCmd::Audit => match audit::check(&dir().join("audit.jsonl")) {
             Ok(w) => {
+                if let Some(warning) = &w.warning {
+                    println!("⚠️ Check by hand: {warning}.");
+                }
                 println!("The audit record is whole: {} entries.", w.count);
                 println!("The supervisor sends you its count and head on Telegram when it starts, when it stops and every {} entries.", audit::EVERY);
                 println!("If the last such message there isn't this line, the record was changed:\n\n    {}", audit::head_text(w.count, &w.head));
@@ -743,16 +746,21 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
         let _ = std::fs::write(&founder_md, text);
     };
     let work = |p: &str| work_dir(p);
-    let audit = |kind: &str, data: serde_json::Value| match audit::append(&audit_path, crate::now(), kind, data) {
-        Ok((count, head)) if count % audit::EVERY == 0 => {
-            // The head goes off this machine, so a record written again here can't match it.
-            tell_founder(&audit::head_text(count, &head), &[]);
-            if let Err(e) = audit::save_head(&audit_path, count, &head) {
-                eprintln!("[jazari] couldn't save the audit head: {e}");
+    // Read once: the supervisor is the only writer (its lock is held), so it carries the count and head.
+    let audit_tail = std::cell::RefCell::new(audit::tail(&audit_path));
+    let audit = |kind: &str, data: serde_json::Value| {
+        let mut t = audit_tail.borrow_mut();
+        match audit::append(&audit_path, &mut t, crate::now(), kind, data) {
+            Ok(()) if t.count.is_multiple_of(audit::EVERY) => {
+                // The head goes off this machine, so a record written again here can't match it.
+                tell_founder(&audit::head_text(t.count, &t.head), &[]);
+                if let Err(e) = audit::save_head(&audit_path, t.count, &t.head) {
+                    eprintln!("[jazari] couldn't save the audit head: {e}");
+                }
             }
+            Ok(()) => {}
+            Err(e) => eprintln!("[jazari] couldn't write the audit record: {e}"),
         }
-        Ok(_) => {}
-        Err(e) => eprintln!("[jazari] couldn't write the audit record: {e}"),
     };
     let profile = limits::plan().profile();
     let deps = supervisor::Deps {

@@ -20,30 +20,36 @@ fn digest(prev: &str, ts: f64, kind: &str, data: &Value) -> String {
     Sha256::digest(body.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn last_hash(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| t.lines().rev().find(|l| !l.trim().is_empty()).and_then(|l| serde_json::from_str::<Value>(l).ok()))
-        .and_then(|v| v["hash"].as_str().map(String::from))
-        .unwrap_or_else(|| GENESIS.into())
+/// Where the record ends: the number of entries and the last hash. The supervisor reads it once
+/// and carries it, so an append doesn't read the whole record again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tail {
+    pub count: usize,
+    pub head: String,
+}
+
+pub fn tail(path: &Path) -> Tail {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let head = lines.last().and_then(|l| serde_json::from_str::<Value>(l).ok()).and_then(|v| v["hash"].as_str().map(String::from));
+    Tail { count: lines.len(), head: head.unwrap_or_else(|| GENESIS.into()) }
 }
 
 /// How often the head is sent to the founder: every 50 entries.
 pub const EVERY: usize = 50;
 
-/// Appends an entry. Returns the number of entries now in the record, and the new head.
-pub fn append(path: &Path, ts: f64, kind: &str, data: Value) -> anyhow::Result<(usize, String)> {
+/// Appends an entry after `tail`, and moves `tail` to it.
+pub fn append(path: &Path, tail: &mut Tail, ts: f64, kind: &str, data: Value) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    let count = text.lines().filter(|l| !l.trim().is_empty()).count();
-    let prev = last_hash(path);
-    let hash = digest(&prev, ts, kind, &data);
-    let mut line = serde_json::to_vec(&json!({ "ts": ts, "kind": kind, "data": data, "prev": prev, "hash": hash }))?;
+    let hash = digest(&tail.head, ts, kind, &data);
+    let mut line = serde_json::to_vec(&json!({ "ts": ts, "kind": kind, "data": data, "prev": tail.head, "hash": hash }))?;
     line.push(b'\n');
     std::fs::OpenOptions::new().create(true).append(true).open(path)?.write_all(&line)?;
-    Ok((count + 1, hash))
+    tail.count += 1;
+    tail.head = hash;
+    Ok(())
 }
 
 /// The first 16 characters of a head: enough to compare by eye.
@@ -66,23 +72,34 @@ pub fn save_head(record: &Path, count: usize, head: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// A whole record: the number of entries, and the head (the last hash).
+/// A whole record: the number of entries, the head (the last hash), and a caution when there is
+/// no saved head to check it against.
 #[derive(Debug, PartialEq)]
 pub struct Whole {
     pub count: usize,
     pub head: String,
+    pub warning: Option<String>,
 }
+
+const NO_HEAD: &str = "the saved Telegram head is missing; compare the head below with your last 🔏 message";
 
 /// Verifies the chain, then checks it against the last head sent to the founder: the record must
 /// still have that entry, with that hash. Entries cut from the end, or a record written again,
 /// fail here.
 pub fn check(record: &Path) -> Result<Whole, String> {
     let hashes = chain(record)?;
-    let whole = Whole { count: hashes.len(), head: hashes.last().cloned().unwrap_or_else(|| GENESIS.into()) };
-    let Ok(text) = std::fs::read_to_string(head_path(record)) else { return Ok(whole) };
-    let sent: Value = serde_json::from_str(&text).map_err(|_| "audit-head.json can't be read".to_string())?;
-    let (Some(count), Some(head)) = (sent["count"].as_u64(), sent["head"].as_str()) else {
-        return Err("audit-head.json can't be read".into());
+    let mut whole = Whole { count: hashes.len(), head: hashes.last().cloned().unwrap_or_else(|| GENESIS.into()), warning: None };
+    let sent = std::fs::read_to_string(head_path(record)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let Some((count, head)) = sent.as_ref().and_then(|v| Some((v["count"].as_u64()?, v["head"].as_str()?))) else {
+        // A head is sent at least every EVERY entries, so a record this long must have one. Deleting
+        // the copy must not hide a rewrite.
+        if hashes.len() >= EVERY {
+            return Err(NO_HEAD.into());
+        }
+        if !hashes.is_empty() {
+            whole.warning = Some(NO_HEAD.into());
+        }
+        return Ok(whole);
     };
     let count = count as usize;
     if count > hashes.len() {
@@ -121,11 +138,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("jazari-audit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("audit.jsonl");
-        assert_eq!(check(&path), Ok(Whole { count: 0, head: GENESIS.into() }));
+        assert_eq!(check(&path), Ok(Whole { count: 0, head: GENESIS.into(), warning: None }));
+        let mut t = tail(&path);
         for i in 0..3 {
-            let (n, _) = append(&path, i as f64, "task.start", json!({ "task": i })).unwrap();
-            assert_eq!(n, i + 1);
+            append(&path, &mut t, i as f64, "task.start", json!({ "task": i })).unwrap();
+            assert_eq!(t.count, i + 1);
         }
+        assert_eq!(tail(&path), t, "the carried tail matches the file");
         assert_eq!(check(&path).map(|w| w.count), Ok(3));
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, text.replace("\"task\":1", "\"task\":9")).unwrap();
@@ -142,8 +161,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("audit.jsonl");
         let mut heads = Vec::new();
+        let mut t = tail(&path);
         for i in 0..4 {
-            heads.push(append(&path, i as f64, "task.start", json!({ "task": i })).unwrap().1);
+            append(&path, &mut t, i as f64, "task.start", json!({ "task": i })).unwrap();
+            heads.push(t.head.clone());
         }
         save_head(&path, 3, &heads[2]).unwrap();
         let whole = check(&path).unwrap();
@@ -158,10 +179,23 @@ mod tests {
 
         // Written again with other entries: a whole chain, but not the one the founder was sent.
         std::fs::remove_file(&path).unwrap();
+        let mut t = tail(&path);
         for i in 0..4 {
-            append(&path, i as f64, "task.start", json!({ "task": i + 100 })).unwrap();
+            append(&path, &mut t, i as f64, "task.start", json!({ "task": i + 100 })).unwrap();
         }
         assert_eq!(check(&path), Err("entry 3 doesn't match the head sent to you on Telegram: the record was written again".into()));
+
+        // Deleting the saved head too: a caution for a short record, an error from EVERY entries on.
+        std::fs::remove_file(head_path(&path)).unwrap();
+        assert_eq!(check(&path).unwrap().warning.as_deref(), Some(NO_HEAD));
+        std::fs::write(head_path(&path), "not json").unwrap();
+        assert_eq!(check(&path).unwrap().warning.as_deref(), Some(NO_HEAD), "an unreadable copy counts as missing");
+        for i in 4..EVERY {
+            append(&path, &mut t, i as f64, "task.start", json!({ "task": i })).unwrap();
+        }
+        assert_eq!(check(&path), Err(NO_HEAD.into()));
+        save_head(&path, t.count, &t.head).unwrap();
+        assert_eq!(check(&path).map(|w| (w.count, w.warning)), Ok((EVERY, None)));
         assert_eq!(short(&heads[0]).len(), 16);
         assert!(head_text(50, &heads[0]).contains(&format!("50 entries, head {}", short(&heads[0]))));
         std::fs::remove_dir_all(dir).ok();
