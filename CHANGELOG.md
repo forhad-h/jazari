@@ -3,7 +3,7 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 1.0.4 - 2026-11-26
 
 - Values jazari saves in the Keychain no longer show in the process list while they are saved
 - Ctrl-C or stopping the service lets the supervisor save the audit head before it exits; a second Ctrl-C stops it at once
