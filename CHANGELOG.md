@@ -3,7 +3,7 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## 0.1.0 - 2026-11-26
+## 1.0.0 - 2026-11-26
 
 - First release: jazari runs a small AI software company on your Claude subscription, and watches every Claude Code session on your machine
 - `jazari build new <name> <idea>` plans a product (vision, roadmap, ADR, threat model), then builds it task by task with 37 AI roles

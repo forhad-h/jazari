@@ -296,8 +296,8 @@ from your phone. It is off until you set it up, and nothing is sent anywhere bef
 1. Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`), and send it `/setjoingroups`
    → Disable so it can't be added to groups.
 2. Save the bot token where jazari reads it, without it passing through a command line or a chat.
-   - On macOS, use the Keychain: `security add-generic-password -a "$USER" -s jazari-jazari-telegram-token -w`.
-   - Elsewhere, set `JAZARI_JAZARI_TELEGRAM_TOKEN`.
+   - On macOS, use the Keychain: `security add-generic-password -a "$USER" -s jazari-telegram-token -w`.
+   - Elsewhere, set `JAZARI_TELEGRAM_TOKEN`.
 3. Pair your chat: `jazari build telegram pair` shows a one-time code. Send that code to the bot in
    a private chat within 10 minutes. From then on, the bot obeys only that chat. Every other chat
    is ignored and gets no reply.
@@ -343,17 +343,19 @@ jazari build plan max5                                               # pro, max5
 jazari build run                                                     # the supervisor; --once runs at most one task
 jazari build tasks                                                   # the queue, and what waits for you
 jazari build answer 12 "Use Twilio"                                  # answer a task's question
-jazari build approve 14 / deny 14                                    # decide on a deploy, spend or contact
+jazari build approve 14                                              # decide on a deploy, spend or contact
+jazari build deny 14                                                 # or deny it
 jazari build personas                                                # the roles workers take
 jazari build mode notes autonomous                                   # keep improving it after your tasks (or: normal)
 jazari build feedback notes "Keep the screen text short"             # how you like the work; learned after a few times
 jazari build prefer all design "Primary buttons are green"           # a preference that applies at once
-jazari build prefs / forget 4                                        # what jazari learned about you, or drop a rule
+jazari build prefs                                                   # what jazari learned about you
+jazari build forget 4                                                # drop rule #4 (it stays in the history)
 ```
 
 **Before the first run:** save a long-lived Claude login token for the workers. Run `claude setup-token`,
-then on macOS save the token with `security add-generic-password -a "$USER" -s jazari-jazari-claude-token -w`.
-Elsewhere, set `JAZARI_JAZARI_CLAUDE_TOKEN`. Docker must be running. New products' repos go in
+then on macOS save the token with `security add-generic-password -a "$USER" -s jazari-claude-token -w`.
+Elsewhere, set `JAZARI_CLAUDE_TOKEN`. Docker must be running. New products' repos go in
 `~/.jazari/build/products/` (under `JAZARI_HOME` when it is set), or in the folder set by `jazari.products_dir`
 in `settings.json`.
 
@@ -966,7 +968,7 @@ Bump `version` in `Cargo.toml`, rename `## Unreleased` in `CHANGELOG.md` to `## 
 commit, then:
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag v1.0.0 && git push origin v1.0.0
 ```
 
 After changing `dist-workspace.toml`, run `dist generate` to refresh the workflow.

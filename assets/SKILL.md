@@ -94,7 +94,7 @@ context (the goal, what is done, what is left with the next step first, decision
 changed, dead ends, how to check the work) and pass it to `jazari build handoff`:
 
 ```sh
-"{{JAZARI_EXE}}" handoff <<'EOF'
+"{{JAZARI_EXE}}" build handoff <<'EOF'
 Goal: ...
 EOF
 ```

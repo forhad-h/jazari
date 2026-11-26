@@ -417,11 +417,11 @@ mod tests {
             {"tag_name": "v0.24.0", "body": "- old news", "draft": false, "prerelease": false,
              "assets": [{"name": "marsad-installer.sh"}, {"name": "marsad-installer.ps1"}]},
             {"tag_name": "v0.23.0", "body": "- older news", "draft": false, "prerelease": false, "assets": []},
-            {"tag_name": "v0.1.0", "body": "- first jazari", "draft": false, "prerelease": false,
+            {"tag_name": "v1.0.0", "body": "- first jazari", "draft": false, "prerelease": false,
              "assets": [{"name": "jazari-installer.sh"}]},
         ]);
         let releases = parse_releases(&json);
-        assert_eq!(releases.iter().map(|r| r.version.as_str()).collect::<Vec<_>>(), vec!["0.1.0"]);
+        assert_eq!(releases.iter().map(|r| r.version.as_str()).collect::<Vec<_>>(), vec!["1.0.0"]);
         assert!(!whats_new(&releases).iter().any(|l| l.contains("old news")));
     }
 

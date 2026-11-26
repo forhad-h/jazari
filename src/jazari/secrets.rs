@@ -4,12 +4,12 @@
 
 use std::process::{Command, Stdio};
 
-pub const TELEGRAM_TOKEN: &str = "jazari-jazari-telegram-token";
-pub const TELEGRAM_CHAT: &str = "jazari-jazari-telegram-chat";
-pub const CLAUDE_TOKEN: &str = "jazari-jazari-claude-token";
+pub const TELEGRAM_TOKEN: &str = "jazari-telegram-token";
+pub const TELEGRAM_CHAT: &str = "jazari-telegram-chat";
+pub const CLAUDE_TOKEN: &str = "jazari-claude-token";
 
 /// The environment variable that overrides a Keychain service:
-/// `jazari-jazari-telegram-token` → `JAZARI_JAZARI_TELEGRAM_TOKEN`.
+/// `jazari-telegram-token` → `JAZARI_TELEGRAM_TOKEN`.
 pub fn env_name(service: &str) -> String {
     service.to_ascii_uppercase().replace('-', "_")
 }
@@ -76,8 +76,8 @@ mod tests {
 
     #[test]
     fn each_service_has_an_environment_override() {
-        assert_eq!(env_name(TELEGRAM_TOKEN), "JAZARI_JAZARI_TELEGRAM_TOKEN");
-        assert_eq!(env_name(CLAUDE_TOKEN), "JAZARI_JAZARI_CLAUDE_TOKEN");
-        assert!(how_to_add(TELEGRAM_TOKEN).contains(if cfg!(target_os = "macos") { TELEGRAM_TOKEN } else { "JAZARI_JAZARI_TELEGRAM_TOKEN" }));
+        assert_eq!(env_name(TELEGRAM_TOKEN), "JAZARI_TELEGRAM_TOKEN");
+        assert_eq!(env_name(CLAUDE_TOKEN), "JAZARI_CLAUDE_TOKEN");
+        assert!(how_to_add(TELEGRAM_TOKEN).contains(if cfg!(target_os = "macos") { TELEGRAM_TOKEN } else { "JAZARI_TELEGRAM_TOKEN" }));
     }
 }

@@ -812,7 +812,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_planted_link_in_the_work_folder_is_never_followed() {
-        let base = std::env::temp_dir().join(format!("jazari-jazari-link-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("jazari-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let (work, outside) = (base.join("work"), base.join("outside"));
         std::fs::create_dir_all(&work).unwrap();
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn the_chosen_skills_are_written_fresh_into_the_work_folder() {
-        let work = std::env::temp_dir().join(format!("jazari-jazari-skills-{}", std::process::id()));
+        let work = std::env::temp_dir().join(format!("jazari-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(work.join(".skills/old")).unwrap();
         std::fs::write(work.join(".skills/old/SKILL.md"), "changed by a worker").unwrap();

@@ -97,7 +97,7 @@ impl Top {
     fn into_cmd(self) -> Option<Cmd> {
         match self {
             Top::Watch { cmd } => cmd,
-            Top::Build(c) => Some(Cmd::Jazari(c)),
+            Top::Build(c) => Some(Cmd::Build(c)),
             Top::Install { no_statusline } => Some(Cmd::Install { no_statusline }),
             Top::Uninstall => Some(Cmd::Uninstall),
             Top::Update(a) => Some(Cmd::Update(a)),
@@ -183,8 +183,10 @@ enum Cmd {
     Resume,
     /// What jazari did, refused or held: messages, stops, cleanups, setting changes and more.
     Actions(act::ActionsArgs),
-    #[command(subcommand, hide = true)]
-    Jazari(jazari::JazariCmd),
+    /// Never parsed: `jazari build …` reaches it through [`Top::Build`] only, so no `watch` spelling
+    /// of a build command slips past the command check.
+    #[command(skip)]
+    Build(jazari::JazariCmd),
 }
 
 /// An environment setting, `JAZARI_<name>`. An empty value counts as unset.
@@ -286,7 +288,148 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
         Some(Cmd::Pause(args)) => act::run_pause(args),
         Some(Cmd::Resume) => act::run_resume(),
         Some(Cmd::Actions(args)) => act::run_actions(args),
-        Some(Cmd::Jazari(cmd)) => jazari::run(cmd),
+        Some(Cmd::Build(cmd)) => jazari::run(cmd),
         None => app::run(),
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    /// The docs that sessions and people read, with every command line in them checked.
+    const DOCS: [(&str, &str); 7] = [
+        ("assets/SKILL.md", include_str!("../assets/SKILL.md")),
+        ("assets/JAZARI.md", include_str!("../assets/JAZARI.md")),
+        ("assets/COORDINATION.md", include_str!("../assets/COORDINATION.md")),
+        ("assets/OUTPUT-HYGIENE.md", include_str!("../assets/OUTPUT-HYGIENE.md")),
+        ("assets/PROMPT-GENERATOR.md", include_str!("../assets/PROMPT-GENERATOR.md")),
+        ("assets/SKILL-GENERATOR.md", include_str!("../assets/SKILL-GENERATOR.md")),
+        ("README.md", include_str!("../README.md")),
+    ];
+
+    /// A command line as the shell splits it: quotes group words, and a heredoc, a pipe or a
+    /// comment ends the command.
+    fn words(line: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut quote: Option<char> = None;
+        let mut started = false;
+        for c in line.chars() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (Some(_), c) => cur.push(c),
+                (None, '"' | '\'') => {
+                    quote = Some(c);
+                    started = true;
+                }
+                (None, c) if c.is_whitespace() => {
+                    if started || !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                    started = false;
+                }
+                (None, c) => cur.push(c),
+            }
+        }
+        if started || !cur.is_empty() {
+            out.push(cur);
+        }
+        out
+    }
+
+    /// Every `jazari …` command line in the docs: in code blocks and in inline code, with the
+    /// installed path written as `jazari`. Lines with a placeholder list (`a|b`, `…`, `[…]`) are
+    /// left out; `<name>` placeholders become a plain value.
+    fn commands() -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        for (file, text) in DOCS {
+            let mut in_code = false;
+            for raw in text.lines() {
+                if raw.trim_start().starts_with("```") {
+                    in_code = !in_code;
+                    continue;
+                }
+                let line = raw.replace("\"{{JAZARI_EXE}}\"", "jazari");
+                let mut spans: Vec<String> = if in_code {
+                    vec![line.trim().to_string()]
+                } else {
+                    line.split('`').enumerate().filter(|(i, _)| i % 2 == 1).map(|(_, s)| s.to_string()).collect()
+                };
+                // A picture of the dashboard, not a command.
+                spans.retain(|s| !s.contains('·') && !s.contains("   "));
+                for span in spans {
+                    let span = span.trim();
+                    if !span.starts_with("jazari ") {
+                        continue;
+                    }
+                    let mut cmd = span.to_string();
+                    for end in [" #", "<<", " | ", " && ", "; ", " > "] {
+                        if let Some(i) = cmd.find(end) {
+                            cmd.truncate(i);
+                        }
+                    }
+                    if cmd.contains(['|', '…', '[', '{', '(']) || cmd.contains("...") {
+                        continue;
+                    }
+                    let mut plain = String::new();
+                    let mut in_angle = false;
+                    for c in cmd.chars() {
+                        match c {
+                            '<' => in_angle = true,
+                            '>' if in_angle => {
+                                in_angle = false;
+                                plain.push('1');
+                            }
+                            _ if in_angle => {}
+                            c => plain.push(c),
+                        }
+                    }
+                    found.push((file.to_string(), plain.trim().to_string()));
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_command_line_in_the_docs_parses() {
+        let found = commands();
+        assert!(found.len() > 50, "the docs hold many commands, found {}", found.len());
+        let failures: Vec<String> = found
+            .iter()
+            .filter_map(|(file, line)| match Cli::try_parse_from(words(line)) {
+                Ok(_) => None,
+                // Help, or a command named in prose without its arguments: the command itself exists.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        clap::error::ErrorKind::DisplayHelp
+                            | clap::error::ErrorKind::DisplayVersion
+                            | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                            | clap::error::ErrorKind::MissingRequiredArgument
+                    ) =>
+                {
+                    None
+                }
+                Err(e) => Some(format!("{file}: `{line}`: {}", e.to_string().lines().next().unwrap_or(""))),
+            })
+            .collect();
+        assert!(failures.is_empty(), "{} doc command lines don't parse:\n{}", failures.len(), failures.join("\n"));
+        assert!(found.iter().any(|(_, l)| l.starts_with("jazari build handoff")), "the handoff line is checked");
+    }
+
+    #[test]
+    fn build_commands_are_reachable_only_through_build() {
+        assert!(Cli::try_parse_from(["jazari", "build", "handoff", "--close"]).is_ok());
+        assert!(Cli::try_parse_from(["jazari", "watch", "jazari", "handoff", "--close"]).is_err());
+        assert!(Cli::try_parse_from(["jazari", "watch", "build", "tasks"]).is_err());
+        assert!(Cli::try_parse_from(["jazari", "handoff"]).is_err(), "no top-level handoff");
+    }
+
+    #[test]
+    fn words_follow_shell_quoting() {
+        assert_eq!(words(r#"jazari watch say "two words" 'and three here'"#), vec!["jazari", "watch", "say", "two words", "and three here"]);
+        assert_eq!(words("jazari watch say \"\""), vec!["jazari", "watch", "say", ""]);
     }
 }
