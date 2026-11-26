@@ -301,9 +301,11 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether the supervisor must not start: a lint error, or a judge that approved bad work.
+    /// Whether the supervisor must not start: a lint error, a judge that approved bad work, or a
+    /// calibration that couldn't run (no `claude`, not logged in, a timeout), since an unchecked
+    /// judge is no safer than a failing one.
     pub fn blocking(&self) -> bool {
-        self.issues.iter().any(|i| i.error) || self.verdicts.iter().any(Verdict::missed)
+        self.issues.iter().any(|i| i.error) || self.verdicts.iter().any(Verdict::missed) || !self.errors.is_empty()
     }
 
     pub fn text(&self) -> String {
@@ -365,10 +367,13 @@ pub fn check(store: &Store, roster: &[Persona], force: bool, prod_model: &str, j
     Ok(report)
 }
 
+/// The longest one calibration call may take.
+const JUDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// One batched calibration call to `claude -p` on the host: no tools, no session saved, hidden
-/// from the dashboard.
+/// from the dashboard, and stopped after [`JUDGE_TIMEOUT`].
 pub fn claude_judge(call: &Call) -> anyhow::Result<Value> {
-    use std::io::Write;
+    use std::io::{Read, Write};
     let program = std::env::var_os("MARSAD_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into());
     let args = [
         "-p", "--no-session-persistence", "--tools", "", "--max-turns", "3", "--model", &call.model, "--effort", call.effort,
@@ -382,8 +387,27 @@ pub fn claude_judge(call: &Call) -> anyhow::Result<Value> {
         .stderr(std::process::Stdio::null())
         .spawn()?;
     child.stdin.take().expect("stdin is piped").write_all(call.prompt.as_bytes())?;
-    let out = child.wait_with_output()?;
-    let v: Value = serde_json::from_slice(&out.stdout).map_err(|_| anyhow::anyhow!("the judge gave no JSON"))?;
+    // Read stdout on a thread so a full pipe can't stall the wait below.
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let started = std::time::Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if started.elapsed() > JUDGE_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("the judge took longer than {} seconds", JUDGE_TIMEOUT.as_secs());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let out = reader.join().unwrap_or_default();
+    let v: Value = serde_json::from_slice(&out).map_err(|_| anyhow::anyhow!("the judge gave no JSON (is `claude` installed and logged in?)"))?;
     anyhow::ensure!(v["is_error"] != true, "the judge failed: {}", v["result"].as_str().unwrap_or("unknown error"));
     let s = &v["structured_output"];
     anyhow::ensure!(s.is_object(), "the judge gave no verdicts");
@@ -530,6 +554,15 @@ mod tests {
         assert!(r.text().contains("MISSED a planted defect  evaluator on code-sql-injection"), "{}", r.text());
         assert_eq!(store.get("evtext:scoring").unwrap(), None, "nothing is approved while a judge misses");
         assert!(report_json(&r)["blocking"] == true);
+    }
+
+    #[test]
+    fn a_calibration_that_cannot_run_blocks_too() {
+        let store = Store::memory();
+        let unreachable = |_: &Call| -> anyhow::Result<Value> { anyhow::bail!("claude: command not found") };
+        let r = check(&store, &personas::all(), false, "m", &unreachable).unwrap();
+        assert!(r.blocking() && r.text().contains("claude: command not found"), "{}", r.text());
+        assert_eq!(store.get("evtext:scoring").unwrap(), None);
     }
 
     #[test]

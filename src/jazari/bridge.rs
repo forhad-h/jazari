@@ -281,9 +281,12 @@ pub fn attention_text(ev: &serde_json::Value, project: Option<&str>) -> Option<S
 }
 
 /// One round: answer the paired chat's commands, drop everything else. Returns the next offset.
-pub fn serve_once<T: Transport>(bot: &Bot<T>, chat: i64, offset: Option<i64>, ops: &dyn Ops) -> anyhow::Result<Option<i64>> {
+/// Each update is acknowledged (`seen`) before it is acted on, so a reply that fails to send never
+/// makes a command run twice.
+pub fn serve_once<T: Transport>(bot: &Bot<T>, chat: i64, offset: Option<i64>, ops: &dyn Ops, seen: &mut dyn FnMut(i64)) -> anyhow::Result<Option<i64>> {
     let (updates, next) = bot.updates(offset, POLL_SECS)?;
     for u in updates {
+        seen(u.id + 1);
         if u.chat_id != chat || !u.private {
             eprintln!("[jazari] ignored a message from an unpaired chat");
             continue;
@@ -314,7 +317,13 @@ pub fn run<T: Transport>(bot: &Bot<T>, chat: i64, dir: &Path) -> anyhow::Result<
     println!("Listening for commands from the paired chat. Ctrl-C stops the bridge.");
     let mut failures = 0u32;
     loop {
-        match serve_once(bot, chat, offset, &Machine) {
+        let mut seen = offset;
+        let round = serve_once(bot, chat, offset, &Machine, &mut |o| {
+            save_offset(dir, Some(o));
+            seen = Some(o);
+        });
+        offset = seen;
+        match round {
             Ok(next) => {
                 failures = 0;
                 if next != offset {
@@ -429,7 +438,9 @@ mod tests {
         ]));
         let bot = Bot { transport: fake };
         let ops = FakeOps::default();
-        assert_eq!(serve_once(&bot, 42, Some(5), &ops).unwrap(), Some(10));
+        let mut seen = Vec::new();
+        assert_eq!(serve_once(&bot, 42, Some(5), &ops, &mut |o| seen.push(o)).unwrap(), Some(10));
+        assert_eq!(seen, vec![6, 7, 8, 9, 10], "each update is acknowledged before it is acted on");
         assert_eq!(*ops.log.borrow(), vec!["tell abcd1234 use staging", "decide 3 true"]);
         let calls = bot.transport.calls.borrow();
         assert!(calls.iter().any(|c| c.0 == "answerCallbackQuery"));
@@ -438,6 +449,30 @@ mod tests {
         assert!(sent.iter().all(|c| c.1.contains(&("chat_id".into(), "42".into()))));
         assert!(sent[1].1.iter().any(|(k, v)| k == "text" && v.starts_with("Couldn't: nothing to resume")));
         assert!(calls[0].1.contains(&("offset".into(), "5".into())));
+    }
+
+    /// Answers getUpdates from a script and fails every sendMessage.
+    struct NoSend(RefCell<Vec<serde_json::Value>>);
+
+    impl Transport for NoSend {
+        fn call(&self, method: &str, _p: &[(&str, String)], _w: u64) -> anyhow::Result<serde_json::Value> {
+            anyhow::ensure!(method != "sendMessage", "network down");
+            let mut r = self.0.borrow_mut();
+            Ok(if r.is_empty() { json!([]) } else { r.remove(0) })
+        }
+    }
+
+    #[test]
+    fn a_reply_that_fails_to_send_does_not_run_the_command_again() {
+        let bot = Bot { transport: NoSend(RefCell::new(vec![json!([msg(7, 42, "private", "/stop abcd1234")])])) };
+        let ops = FakeOps::default();
+        let mut offset = Some(7);
+        let mut seen = offset;
+        assert!(serve_once(&bot, 42, offset, &ops, &mut |o| seen = Some(o)).is_err());
+        offset = seen;
+        assert_eq!(offset, Some(8), "the update was acknowledged before the reply failed");
+        serve_once(&bot, 42, offset, &ops, &mut |_| {}).unwrap();
+        assert_eq!(*ops.log.borrow(), vec!["stop abcd1234"], "it ran once");
     }
 
     #[test]

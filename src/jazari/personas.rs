@@ -150,10 +150,16 @@ pub fn resolve(role: &str) -> String {
     if all().iter().any(|p| p.key == k) { k } else { "engineer".into() }
 }
 
-/// The persona for a role; an unknown role is a general engineer.
+/// The persona for a role; an unknown role is a general engineer. A founder's roster without an
+/// `engineer` falls back to the built-in one (lint reports the gap, and the supervisor won't start
+/// until it is fixed).
 pub fn find(role: &str) -> Persona {
     let k = resolve(role);
-    all().into_iter().find(|p| p.key == k).expect("resolve names a role in the roster")
+    all()
+        .into_iter()
+        .find(|p| p.key == k)
+        .or_else(|| parse(&ROSTER.replace("\r\n", "\n")).into_iter().find(|p| p.key == "engineer"))
+        .expect("the built-in roster has an engineer")
 }
 
 #[cfg(test)]
