@@ -8,15 +8,20 @@ pub const ROSTER: &str = include_str!("../../assets/jazari/personas.md");
 pub const RULES: &str = include_str!("../../assets/jazari/personas/worker.md");
 pub const RUBRICS: &str = include_str!("../../assets/jazari/rubrics.md");
 
-/// The founder's own copy of a built-in file, when there is one.
+/// The founder's own copy of a built-in file, when there is one. Line endings are made `\n`:
+/// a checkout or an editor on Windows writes `\r\n`, and the sections are found by their
+/// `\n## ` headings.
 fn custom(name: &str, builtin: &'static str) -> std::borrow::Cow<'static, str> {
-    if cfg!(test) {
-        return builtin.into();
-    }
-    match std::fs::read_to_string(super::dir().join(name)) {
-        Ok(text) if !text.trim().is_empty() => text.into(),
-        _ => builtin.into(),
-    }
+    let text = match std::fs::read_to_string(super::dir().join(name)) {
+        Ok(text) if !cfg!(test) && !text.trim().is_empty() => std::borrow::Cow::Owned(text),
+        _ => std::borrow::Cow::Borrowed(builtin),
+    };
+    if text.contains('\r') { text.replace("\r\n", "\n").into() } else { text }
+}
+
+/// The shared worker rules, with `\n` line endings.
+pub fn rules() -> String {
+    RULES.replace("\r\n", "\n")
 }
 
 pub fn roster_text() -> std::borrow::Cow<'static, str> {
@@ -65,7 +70,7 @@ impl Persona {
 
     /// The system prompt a worker in this role gets.
     pub fn system_prompt(&self) -> String {
-        let mut s = format!("{RULES}\n# Your role: {}\n\n{}\n", self.title, self.mandate.trim());
+        let mut s = format!("{}\n# Your role: {}\n\n{}\n", rules(), self.title, self.mandate.trim());
         if self.tier == Tier::Lead {
             s.push_str("\nRoles you can give follow-up tasks to: ");
             s.push_str(&all().iter().map(|p| p.key.as_str()).collect::<Vec<_>>().join(", "));
@@ -183,6 +188,12 @@ mod tests {
         assert!(r.contains("## code") && r.contains("Tests prove the behavior") && !r.contains("## security"));
         assert!(find("red-team").rubric().contains("regression test that fails before the fix"));
         assert!(scoring_rules().contains("5: ready to ship") && !scoring_rules().contains("## all"));
+        let crlf = custom("no-such-file.md", "# t\r\n\r\n## all\r\n- [critical] Scope\r\n");
+        assert_eq!(section_of(&crlf, "all"), "## all\n- [critical] Scope", "Windows line endings parse the same");
+        let roster = parse(&custom("no-such-file.md", "# r\r\n## engineer | Engineer | build | code\r\nShip small changes.\r\n"));
+        assert_eq!((roster.len(), roster[0].key.as_str(), roster[0].rubric.as_str(), roster[0].tier), (1, "engineer", "code", Tier::Build));
+        assert_eq!(roster[0].mandate, "Ship small changes.\n");
+        assert!(!rules().contains('\r'));
     }
 
     #[test]

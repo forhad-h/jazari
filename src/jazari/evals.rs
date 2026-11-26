@@ -177,7 +177,7 @@ pub struct Case {
 }
 
 pub fn cases() -> Vec<Case> {
-    serde_json::from_str(CASES).unwrap_or_default()
+    serde_json::from_str(&CASES.replace("\r\n", "\n")).unwrap_or_default()
 }
 
 /// One batched judge call.
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn the_built_in_roster_and_cases_are_clean() {
-        let issues = lint(&personas::all(), personas::RUBRICS);
+        let issues = lint(&personas::all(), &personas::rubrics_text());
         assert!(issues.iter().all(|i| !i.error), "{issues:?}");
         let cases = cases();
         assert!(cases.len() >= 12);

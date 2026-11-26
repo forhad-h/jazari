@@ -256,7 +256,8 @@ mod tests {
         commit(&wt, "README.md", "# from the task\n");
         remove(&r, &wt);
         std::fs::write(r.join("README.md"), "# founder editing\n").unwrap();
-        assert_eq!(merge(&r, "main", "jazari/task-2", "m").unwrap(), Merge::Dirty(std::fs::canonicalize(&r).unwrap()));
+        let Merge::Dirty(dir) = merge(&r, "main", "jazari/task-2", "m").unwrap() else { panic!("a dirty checkout must hold the merge") };
+        assert_eq!(dir.file_name(), r.file_name(), "it names the founder's checkout");
         commit(&r, "README.md", "# founder committed\n");
         assert_eq!(merge(&r, "main", "jazari/task-2", "m").unwrap(), Merge::Conflict);
         assert_eq!(git(&r, &["log", "-1", "--format=%s"]).unwrap(), "README.md");

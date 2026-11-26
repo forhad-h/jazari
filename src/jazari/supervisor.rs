@@ -621,7 +621,7 @@ mod tests {
             Ok("main".into())
         }
         fn prepare(&self, r: &Path, task: i64, _b: &str, _base: &str) -> anyhow::Result<PathBuf> {
-            Ok(r.join(format!("wt-{task}")))
+            Ok(PathBuf::from(format!("{}/wt-{task}", r.display())))
         }
         fn remove(&self, _r: &Path, _w: &Path) {}
         fn commits_ahead(&self, _r: &Path, _b: &str, _br: &str) -> usize {
