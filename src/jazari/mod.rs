@@ -791,7 +791,7 @@ fn save_audit_head(record: &std::path::Path) {
                 eprintln!("[jazari] couldn't save the audit head: {e}");
             }
         }
-        Err(e) => tell_founder(&format!("⚠️ The audit record was changed: {e}. Run `jazari build audit`."), &[]),
+        Err(e) => tell_founder(&format!("⚠️ The audit record was changed: {e}. Run `jazari build audit`."), &[]), // push: the audit record was changed, and the founder must check it
     }
 }
 

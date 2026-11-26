@@ -979,6 +979,7 @@ mod tests {
             "mod.rs: helper; each caller gives its reason",
             "mod.rs: the supervisor won't start until the founder fixes the personas",
             "mod.rs: the supervisor won't start until the founder fixes a judge check",
+            "mod.rs: the audit record was changed, and the founder must check it",
             "mod.rs: the supervisor keeps failing, and the founder must act",
             "bridge.rs: a reply to the founder's own message",
             "bridge.rs: a reply: the pairing the founder started is done",

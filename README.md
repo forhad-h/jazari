@@ -563,6 +563,7 @@ login token; the checks and git commands don't. A run is stopped after 45 minute
 - a task that keeps failing, or that is set aside until you say how to go on;
 - a proposal to add a check, or a role that got worse after a change;
 - a product on hold, or a supervisor that won't start or keeps failing;
+- an audit record that was changed;
 - a session that asks for you with `--attention`.
 
 News (built, merged, sleeping until a limit resets, preferences learned) is not sent. Ask with `/status`,
