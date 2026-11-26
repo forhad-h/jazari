@@ -95,6 +95,44 @@ The view shows an error from any of these functions in the footer error line, wo
 example is a hard-line answer without `override:`. The input box stays open with the text, so the
 founder can fix it.
 
+## The presence check
+
+Another session can type keys into the dashboard, for example with `tmux send-keys` or an
+`osascript` keystroke. So a key press alone does not prove that the founder is at the machine.
+Before some writes, the view asks for a presence check: Touch ID or the Mac password. The
+dashboard uses the same check for approvals. The view reuses the helper that #131 adds. It
+does not add a second helper.
+
+| Write | Check |
+|---|---|
+| Approve a deploy, spend or contact request | yes |
+| An answer with `override:` (a hard-line question) | yes |
+| A typed answer | yes, because it becomes a founder signal for preference learning |
+| An option picked with a digit | yes, because it answers for the founder |
+| An idea, a task | yes, because an idea becomes a founder signal, and both start paid work |
+| A new product | yes |
+| A mode change | yes |
+| Deny | no |
+| Close a box, or `esc` | no |
+| Reading and moving around | no |
+
+Rules:
+
+1. The check runs on the worker thread, before the write, so the dashboard keeps drawing while the
+   system dialog is open.
+2. If the check fails or the founder cancels it, nothing is written. The footer says "Not sent: the
+   presence check failed", and the input box keeps its text.
+3. On Linux and Windows there is no presence check yet. There the Build view is read-only, and the
+   only write is deny. The keys for the other writes show "needs Touch ID or the Mac password; use
+   `jazari build ...` in a terminal" in the footer.
+
+Tests:
+
+- The presence check is an injected function, so tests never open the system dialog.
+- A failed check writes nothing, for each checked write in the table.
+- Deny works with no check, and on a platform with no check.
+- On a platform with no check, each checked key writes nothing and shows the footer text.
+
 ## Slow work runs on a thread
 
 The view owns one worker thread with its own `Store` handle (`jazari::open()`):
@@ -142,7 +180,7 @@ already do that.
 | `src/build_view.rs` (new) | State, keys, the worker thread, the snapshot, the actions |
 | `src/build_ui.rs` (new) | Draws the panes, the details, the input box and the status line |
 | `src/app.rs` | A `View::Build` variant, key `B` in the List view, dispatch to `build_view`, the channel read in `tick()`. A few lines only. |
-| `src/ui.rs` | One match arm that calls `build_ui::draw`, and the `B` footer hint in the List view |
+| `src/ui.rs` | One match arm that calls `build_ui::draw`, the `B` footer hint and the build question count in the List view |
 | `src/prompt_view.rs` | `TextBox::of`, `insert` and `on_key` become `pub(crate)` |
 | `src/jazari/mod.rs` | `open()` becomes `pub(crate)`. The heartbeat thread in `run_supervisor`. |
 | `README.md`, `CHANGELOG.md` | The `B` key, a "Build view" section, one line under `## Unreleased` |
@@ -157,9 +195,10 @@ for the same two files. The session that hardens Telegram holds `src/jazari/mod.
 
 1. `build_view.rs`, `build_ui.rs` and the `TextBox` change, with tests. Nobody else has claimed
    these files.
-2. When the claim on `src/jazari/mod.rs` is released: `open()` and the heartbeat.
-3. When the answer view's PR is merged, in the order agreed with the `jazari claude` session: the
-   hooks in `app.rs` and `ui.rs`.
+2. `open()` and the heartbeat in `src/jazari/mod.rs`, in the order agreed with the sessions that
+   hold or wait for that file.
+3. After the answer view's PR (#131) is merged, add the presence check. Then add the hooks in
+   `app.rs` and `ui.rs`, in the order agreed with the `jazari claude` session.
 4. README and CHANGELOG, then one PR.
 
 ## Tests
@@ -197,9 +236,11 @@ The tests use `Store::memory()` and never open the real data folder, Telegram, g
   pattern.
 - A task role other than `engineer` in the `t` box.
 
-## Open questions for the review
+## Decisions from the review
 
-- Is `B` the right key, or should the Build view be a tab next to Board and Usage?
-- Is 2 minutes the right age for the heartbeat?
-- Should the List view also show one line with the count of open build questions? An example is
-  "2 build questions wait for you". Then the founder sees them without opening the Build view.
+- The key is `B`. It must be free in every view and mode, and a test checks this.
+- The heartbeat age is 2 minutes.
+- The List view shows a small count of open build questions, for example "2 build questions". The
+  count is not pushed to Telegram.
+- The presence check guards every write that approves or speaks for the founder (see the section
+  "The presence check").
