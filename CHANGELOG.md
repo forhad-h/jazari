@@ -3,7 +3,7 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 1.0.7 - 2026-11-26
 
 - Every session jazari starts gets "Working with jazari" first; it is no longer a choice in `c` or `jazari build rules`
 - Telegram controls only jazari's own work: /tell and /stop are gone, and the sessions you start yourself are controlled at your computer
