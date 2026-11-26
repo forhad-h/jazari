@@ -16,6 +16,7 @@ mod events;
 mod handoff;
 mod hook;
 mod install;
+mod jazari;
 mod jsonl;
 mod live;
 mod migrate;
@@ -143,6 +144,9 @@ enum Cmd {
     Resume,
     /// What marsad did, refused or held: messages, stops, cleanups, setting changes and more.
     Actions(act::ActionsArgs),
+    /// jazari: reach and command marsad from Telegram (pair a chat, run the bridge, notify).
+    #[command(subcommand)]
+    Jazari(jazari::JazariCmd),
 }
 
 /// The folder `MARSAD_HOME` names, which replaces both `data_dir` and `legacy_dir`.
@@ -267,6 +271,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
         Some(Cmd::Pause(args)) => act::run_pause(args),
         Some(Cmd::Resume) => act::run_resume(),
         Some(Cmd::Actions(args)) => act::run_actions(args),
+        Some(Cmd::Jazari(cmd)) => jazari::run(cmd),
         None => app::run(),
     }
 }

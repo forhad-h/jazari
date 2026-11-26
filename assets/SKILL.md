@@ -30,6 +30,7 @@ Live data is not in the usage database; use `marsad status` for it.
 ```sh
 marsad say "what this session is doing"            # shown on this session in marsad's dashboard
 marsad say --attention "what you need from the user" # also notifies the user
+marsad jazari notify "short note for the user"      # send it to the user's paired Telegram chat (if set up)
 marsad tell <session-id> "message"                  # queue a message another session reads at its next step
 marsad tell <session-id> --stop                     # stop that session before its next tool call
 ```

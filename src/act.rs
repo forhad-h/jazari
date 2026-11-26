@@ -29,6 +29,8 @@ pub enum Origin {
     Watcher,
     /// A Claude Code hook.
     Hook,
+    /// The founder, from the paired Telegram chat.
+    Telegram,
 }
 
 impl Origin {
@@ -39,6 +41,7 @@ impl Origin {
             Origin::Session(_) => "session",
             Origin::Watcher => "watcher",
             Origin::Hook => "hook",
+            Origin::Telegram => "telegram",
         }
     }
 
@@ -361,32 +364,47 @@ pub struct PauseArgs {
     duration: Option<String>,
 }
 
-/// `marsad pause`: hold what marsad does on its own.
-pub fn run_pause(a: PauseArgs) -> anyhow::Result<()> {
+/// Holds what marsad does on its own, for `duration` (30m, 2h, 1d) or until resumed; returns
+/// " until <time>" or "".
+pub fn pause(duration: Option<&str>) -> anyhow::Result<String> {
     let now = crate::now();
-    let until = a.duration.as_deref().map(parse_duration).transpose()?.map(|d| now + d);
+    let until = duration.map(parse_duration).transpose()?.map(|d| now + d);
     let action = Action::new(Kind::Setting, "paused").detail(until.map_or("until resumed".into(), fmt_time));
     run(&action, || {
         std::fs::create_dir_all(dir())?;
         std::fs::write(pause_path(&dir()), serde_json::to_vec(&json!({ "since": now, "until": until }))?)?;
         Ok(())
     })?;
-    println!("Paused{}: marsad won't interrupt or end sessions, clean up or update on its own.", Pause { since: now, until }.until_label());
+    Ok(Pause { since: now, until }.until_label())
+}
+
+/// Lifts a pause; false when marsad wasn't paused.
+pub fn resume() -> anyhow::Result<bool> {
+    if !paused() {
+        return Ok(false);
+    }
+    run(&Action::new(Kind::Setting, "paused").detail("resumed"), || {
+        std::fs::remove_file(pause_path(&dir()))?;
+        Ok(())
+    })?;
+    Ok(true)
+}
+
+/// `marsad pause`: hold what marsad does on its own.
+pub fn run_pause(a: PauseArgs) -> anyhow::Result<()> {
+    let label = pause(a.duration.as_deref())?;
+    println!("Paused{label}: marsad won't interrupt or end sessions, clean up or update on its own.");
     println!("Warnings, the command check and anything you ask for still work. `marsad resume` turns it back on.");
     Ok(())
 }
 
 /// `marsad resume`: lift a pause.
 pub fn run_resume() -> anyhow::Result<()> {
-    if !paused() {
+    if resume()? {
+        println!("Resumed: marsad acts on its own again.");
+    } else {
         println!("marsad isn't paused.");
-        return Ok(());
     }
-    run(&Action::new(Kind::Setting, "paused").detail("resumed"), || {
-        std::fs::remove_file(pause_path(&dir()))?;
-        Ok(())
-    })?;
-    println!("Resumed: marsad acts on its own again.");
     Ok(())
 }
 
