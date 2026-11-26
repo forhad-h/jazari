@@ -241,7 +241,7 @@ fn checks_on(d: &Deps, container: &str, work: &Path, name: &str, clone: impl FnO
     let result = match clone(&dir) {
         Ok(()) => {
             let checks = run_checks(d, container, &super::sandbox::inside(name), script);
-            (checks, easy_english(d, container, &super::sandbox::inside(name), docs))
+            (checks, easy_english(d, container, work, &super::sandbox::inside(name), docs))
         }
         Err(e) => (Checks { passed: false, missing: false, log: format!("the checks couldn't be set up: {e}") }, String::new()),
     };
@@ -249,10 +249,15 @@ fn checks_on(d: &Deps, container: &str, work: &Path, name: &str, clone: impl FnO
     result
 }
 
-/// The Easy English checker's report on the changed docs, run in the container. It is evidence
-/// for the evaluator, not a gate: the checker can't see meaning.
-fn easy_english(d: &Deps, container: &str, dir: &str, docs: &[String]) -> String {
+/// The Easy English checker's report on the changed docs, run in the container. It is a hint for
+/// the evaluator, not a gate: the checker can't see meaning. The checker comes from a fresh copy of
+/// the skills, written after a restart, so neither the worker nor the code the checks ran can have
+/// changed it.
+fn easy_english(d: &Deps, container: &str, work: &Path, dir: &str, docs: &[String]) -> String {
     if docs.is_empty() {
+        return String::new();
+    }
+    if (d.reset)(container).is_err() || (d.skills)(work).is_err() {
         return String::new();
     }
     let mut command: Vec<String> = ["timeout", "120", "sh", "-c", "python3 \"$HOME/.claude/skills/easy-english/scripts/check.py\" \"$@\" 2>&1", "sh"].map(String::from).to_vec();
@@ -311,7 +316,11 @@ fn gates(d: &Deps, task: &Task, container: &str, repo: &Path, work: &Path, base:
     } else {
         "FAILED".into()
     };
-    let plain = if plain.is_empty() { String::new() } else { format!("\n\nThe Easy English checker on the changed docs (hints, not a gate; judge the meaning yourself):\n```\n{plain}\n```") };
+    let plain = if plain.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nAdvice, not evidence: the Easy English checker's hints on the changed docs. Judge the meaning yourself.\n```\n{plain}\n```")
+    };
     let report = format!(
         "Evidence the harness gathered itself (trust this over the worker's claims):\n- `{CHECKS}`: {status}\n- secret scan: {}\n- changed files: {}\n```\n{}\n```{plain}",
         if secrets.is_empty() { "clean" } else { "credentials found" },
@@ -424,6 +433,7 @@ fn merge(d: &Deps, task: &Task, branch: &str, head: &str, title: &str) -> anyhow
             d.store.land_branch(branch)?;
             (d.audit)("merge", json!({ "task": task.id, "branch": branch, "approved": head, "base": base, "commit": sha }));
             say(d, &Card::new("🚀", format!("Merged: {title}"), format!("It is now on {base}.")).detail(format!("{branch} · {}", &sha[..sha.len().min(10)])));
+            lessons_landed(d, branch);
             learn_from_rework(d, task, branch);
             Ok(Merged::Done)
         }
@@ -520,8 +530,16 @@ pub fn tick(d: &Deps) -> anyhow::Result<Tick> {
 /// Turns the founder's new signals into preferences and lets old ones fade. Learning never stops
 /// the work: a failed call is tried again with the next tick.
 fn learn(d: &Deps, now: f64) {
-    match super::profile::learn(d.store, d.llm, now) {
+    // After a failed call, wait before the next try (5 minutes, doubling up to an hour), so a
+    // missing or logged-out `claude` doesn't hold up every tick.
+    let wait_until = d.store.get("learn_backoff_until").ok().flatten().and_then(|t| t.parse::<f64>().ok()).unwrap_or(0.0);
+    let tried = wait_until <= now;
+    let result = if tried { super::profile::learn(d.store, d.llm, now) } else { Ok(super::profile::Learned { cards: Vec::new(), changed: false }) };
+    match result {
         Ok(l) => {
+            if tried {
+                let _ = d.store.put("learn_failures", "0");
+            }
             let changed = l.changed;
             for c in &l.cards {
                 say(d, c);
@@ -530,7 +548,13 @@ fn learn(d: &Deps, now: f64) {
                 (d.profile_file)(&text);
             }
         }
-        Err(e) => (d.audit)("learn.failed", json!({ "why": e.to_string() })),
+        Err(e) => {
+            let failures: u32 = d.store.get("learn_failures").ok().flatten().and_then(|t| t.parse().ok()).unwrap_or(0) + 1;
+            let wait = (300.0 * 2f64.powi(failures as i32 - 1)).min(3600.0);
+            let _ = d.store.put("learn_failures", &failures.to_string());
+            let _ = d.store.put("learn_backoff_until", &(now + wait).to_string());
+            (d.audit)("learn.failed", json!({ "why": e.to_string(), "retry_in_secs": wait }));
+        }
     }
     let day = (now / 86_400.0).floor().to_string();
     if d.store.get("decay_day").ok().flatten().as_deref() != Some(day.as_str()) {
@@ -583,8 +607,9 @@ fn run_task(d: &Deps, task: &Task, now: f64) -> anyhow::Result<Tick> {
     let item = format!("task-{}", task.id);
     let clone = work.join(&item);
     d.repo.clone_for_task(&repo, &clone, &branch, &base)?;
-    (d.skills)(&work)?;
+    // Restart first, so nothing left from an earlier task can touch the skills while they are written.
     (d.reset)(&container)?;
+    (d.skills)(&work)?;
     // Claude Code in the container finds the skills in its own folder.
     let link: Vec<String> = ["sh", "-c", &format!("mkdir -p \"$HOME/.claude\" && ln -sfn {} \"$HOME/.claude/skills\"", super::sandbox::inside(".skills"))].map(String::from).to_vec();
     d.runner.run(&container, super::sandbox::WORK, &link, false, &mut |_| {})?;
@@ -678,17 +703,33 @@ fn learn_from_rework(d: &Deps, task: &Task, branch: &str) {
         .unwrap_or_default()
         .into_iter()
         .filter(|t| t.branch.as_deref() == Some(branch) && t.title.starts_with("Fix: "))
-        .map(|t| t.brief.split("\n\nThe original spec:").next().unwrap_or("").to_string())
+        .map(|t| (t.id, t.brief.split("\n\nThe original spec:").next().unwrap_or("").to_string()))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_values()
         .collect();
     let now = (d.now)();
     if let Err(e) = super::profile::lesson_from_rework(d.store, d.llm, &task.product, task.id, &task.spec, &findings, now) {
         (d.audit)("lesson.failed", json!({ "task": task.id, "why": e.to_string() }));
     }
-    if let Ok(Some((brief, ids))) = super::profile::lessons_to_record(d.store, &task.product) {
-        let new = NewTask { product: &task.product, role: "technical-writer", title: "Record the team's lessons", brief: &brief, priority: -5, ..Default::default() };
-        if d.store.add_task(&new, now).is_ok() {
-            let _ = d.store.lessons_recorded(&ids);
+    let open = d.store.tasks(Some(&task.product), 500).unwrap_or_default().into_iter().any(|t| t.title == RECORD_LESSONS && matches!(t.status.as_str(), "queued" | "running" | "blocked"));
+    if !open && let Ok(Some((brief, ids))) = super::profile::lessons_to_record(d.store, &task.product) {
+        let new = NewTask { product: &task.product, role: "technical-writer", title: RECORD_LESSONS, brief: &brief, priority: -5, ..Default::default() };
+        if let Ok(id) = d.store.add_task(&new, now) {
+            // They count as recorded once that task's branch is merged.
+            let _ = d.store.put(&format!("lessons_task:{id}"), &serde_json::to_string(&ids).unwrap_or_default());
         }
+    }
+}
+
+const RECORD_LESSONS: &str = "Record the team's lessons";
+
+/// After a merge: lessons whose recording task this was now count as recorded.
+fn lessons_landed(d: &Deps, branch: &str) {
+    let Some(root) = branch.strip_prefix("jazari/task-") else { return };
+    let key = format!("lessons_task:{root}");
+    if let Some(ids) = d.store.get(&key).ok().flatten().and_then(|t| serde_json::from_str::<Vec<i64>>(&t).ok()) {
+        let _ = d.store.lessons_recorded(&ids);
+        let _ = d.store.put(&key, "[]");
     }
 }
 
@@ -1266,6 +1307,40 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_learning_call_backs_off_instead_of_running_every_tick() {
+        let w = World::new(vec![]);
+        w.store.add_signal("shop", "feedback", "green buttons", 0.0).unwrap();
+        let calls = Cell::new(0);
+        let failing = |_s: &str, _p: &str, _sc: &str| -> anyhow::Result<serde_json::Value> {
+            calls.set(calls.get() + 1);
+            anyhow::bail!("claude: not logged in")
+        };
+        let d = |now: &dyn Fn() -> f64| {
+            let paused = || false;
+            let work = |p: &str| PathBuf::from(format!("/data/jazari/work/{p}"));
+            let ensure = |p: &str, _w: &str| Ok(format!("jazari-{p}"));
+            let reset = |_c: &str| Ok(());
+            let skills = |_w: &Path| Ok(());
+            let profile_file = |_t: &str| {};
+            let notify = |_t: &str, _b: &[Button]| {};
+            let audit = |_k: &str, _v: serde_json::Value| {};
+            let deps = Deps {
+                store: &w.store, runner: &w.runner, repo: &w.repo, profile: Plan::Max5.profile(), now, paused: &paused, work: &work,
+                ensure: &ensure, reset: &reset, skills: &skills, llm: &failing, profile_file: &profile_file, notify: &notify, audit: &audit,
+            };
+            tick(&deps).unwrap()
+        };
+        d(&|| 1000.0);
+        d(&|| 1010.0);
+        assert_eq!(calls.get(), 1, "the second tick waits");
+        d(&|| 1000.0 + 301.0);
+        assert_eq!(calls.get(), 2, "after 5 minutes it tries again");
+        d(&|| 1301.0 + 400.0);
+        assert_eq!(calls.get(), 2, "then the wait doubles");
+        assert_eq!(w.store.pending_signals(5).unwrap().len(), 1, "the signal waits for a working call");
+    }
+
+    #[test]
     fn a_branch_that_moved_after_approval_is_not_merged() {
         let w = World::new(vec![approve()]);
         w.repo.heads.borrow_mut().insert("jazari/task-1".into(), "sha-new".into());
@@ -1324,7 +1399,7 @@ mod tests {
         assert!(eval.brief.contains("not set up") && eval.brief.contains("documentation only"));
         let plain = w.runner.of("setup").into_iter().find(|e| e.command.get(4).is_some_and(|c| c.contains("check.py"))).expect("the Easy English checker ran");
         assert!(plain.command.contains(&"company/VISION.md".to_string()) && plain.dir == "/work/check-1" && !plain.with_token);
-        assert!(eval.brief.contains("The Easy English checker on the changed docs"));
+        assert!(eval.brief.contains("Advice, not evidence: the Easy English checker's hints"));
         w.tick();
         assert_eq!(w.repo.merged.borrow().len(), 1, "docs merge after the evaluator alone");
         let w = World::new(vec![done(json!({}))]);

@@ -27,6 +27,12 @@ pub struct Ask {
     pub hard_line: bool,
 }
 
+/// An option's text on one line, without the ": " that separates a stored label from its effect.
+fn one_line(text: &str, max: usize) -> String {
+    let flat: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    crate::hook::truncate(&flat.replace(": ", " - ").split_whitespace().collect::<Vec<_>>().join(" "), max)
+}
+
 impl Ask {
     fn parse(v: &Value) -> Option<Ask> {
         if let Some(text) = v.as_str() {
@@ -39,12 +45,14 @@ impl Ask {
             .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
-            .filter_map(|o| Some(super::card::Choice { label: crate::hook::truncate(o["label"].as_str()?, 80), effect: crate::hook::truncate(o["effect"].as_str().unwrap_or(""), 160) }))
+            .filter_map(|o| Some(super::card::Choice { label: one_line(o["label"].as_str()?, 80), effect: one_line(o["effect"].as_str().unwrap_or(""), 160) }))
             .filter(|c| !c.label.is_empty())
             .take(4)
             .collect::<Vec<_>>();
-        let recommend = Some(short("recommend", 80)).filter(|r| options.iter().any(|o| o.label == *r)).map(|r| (r, short("recommend_why", 160)));
-        Some(Ask { question, why: short("why", 300), options, recommend, hard_line: v["hard_line"] == true }).filter(|a| !a.question.is_empty())
+        let recommend = Some(one_line(v["recommend"].as_str().unwrap_or(""), 80)).filter(|r| options.iter().any(|o| o.label == *r)).map(|r| (r, short("recommend_why", 160)));
+        // A hard line needs a safe option to choose; without one it would block every answer.
+        let hard_line = v["hard_line"] == true && recommend.is_some();
+        Some(Ask { question, why: short("why", 300), options, recommend, hard_line }).filter(|a| !a.question.is_empty())
     }
 
     /// The question as stored with the task, so a reply like "option 2" can be read later.
@@ -411,6 +419,12 @@ pub mod tests {
         assert_eq!(ask.stored(), "Remove the login rate limit?\n1. Raise the limit to 10: keeps the protection\n2. Remove it: allows guessing\nRecommended: Raise the limit to 10");
         let ask = read(&[result_line(json!({"status": "blocked", "summary": "Ready to ship.", "approval_needed": {"kind": "deploy", "detail": "Deploy v1 to fly.io"}}))]);
         assert_eq!(ask.approval, Some(("deploy".into(), "Deploy v1 to fly.io".into())));
+        let tricky = read(&[result_line(json!({"status": "blocked", "summary": "x", "needs_founder": {
+            "question": "Which policy?", "options": [{"label": "Policy: skip\nreviews", "effect": "fast"}], "hard_line": true}}))])
+        .needs_founder
+        .unwrap();
+        assert_eq!(tricky.options[0].label, "Policy - skip reviews", "labels are one line without \": \"");
+        assert!(!tricky.hard_line, "a hard line without a recommended option would block every answer");
         let odd = read(&[result_line(json!({"status": "blocked", "summary": "x", "approval_needed": {"kind": "rm -rf", "detail": "y"}}))]);
         assert_eq!(odd.approval, None);
     }

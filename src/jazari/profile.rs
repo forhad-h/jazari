@@ -99,12 +99,20 @@ fn promote(store: &Store, p: &Pref, now: f64, cards: &mut Vec<Card>) -> anyhow::
     }
     store.set_pref_status(p.id, "active", now)?;
     match p.supersedes.and_then(|old| store.pref(old).ok().flatten()) {
+        Some(old) if old.product == "*" && p.product != "*" => {
+            // A change for one product overrides the global rule there only.
+            cards.push(
+                Card::new("🔄", "Preference updated for one product", format!("{} (for {}).", p.rule.trim_end_matches('.'), scope_name(&p.product)))
+                    .detail(format!("For {}, it replaces: {}. Other products keep that rule.", p.product, old.rule))
+                    .reply(format!("/forget {} to undo", p.id)),
+            );
+        }
         Some(old) => {
             store.set_pref_status(old.id, "retired", now)?;
             cards.push(
                 Card::new("🔄", "Preference updated", format!("{} (for {}).", p.rule.trim_end_matches('.'), scope_name(&p.product)))
                     .detail(format!("It replaces: {}", old.rule))
-                    .reply(format!("/forget {} to undo", p.id)),
+                    .reply(format!("/forget {} to undo; the old rule comes back", p.id)),
             );
         }
         None => cards.push(
@@ -127,7 +135,8 @@ pub fn learn(store: &Store, llm: Llm, now: f64) -> anyhow::Result<Learned> {
     let known = store.prefs(None, &["candidate", "active", "suggested"])?;
     let mut prompt = String::from("Known rules:\n");
     for p in &known {
-        prompt += &format!("- id {} [{}] ({}, {}): {}\n", p.id, p.status, p.area, scope_name(&p.product), p.rule);
+        let replaces = p.supersedes.map(|id| format!(", would replace id {id}")).unwrap_or_default();
+        prompt += &format!("- id {} [{}{replaces}] ({}, {}): {}\n", p.id, p.status, p.area, scope_name(&p.product), p.rule);
     }
     if known.is_empty() {
         prompt += "(none yet)\n";
@@ -137,6 +146,15 @@ pub fn learn(store: &Store, llm: Llm, now: f64) -> anyhow::Result<Learned> {
         prompt += &format!("<signal id=\"{}\" product=\"{}\" source=\"{}\">{}</signal>\n", s.id, s.product, s.source, s.text);
     }
     let answer = llm(LEARN_SYSTEM, &prompt, LEARN_SCHEMA)?;
+    // Every change of one batch lands together, or none does and the signals are tried again.
+    store.atomically(|| {
+        apply(store, &signals, &known, &answer, now, &mut cards)?;
+        store.signals_done(&signals.iter().map(|s| s.id).collect::<Vec<_>>())
+    })?;
+    Ok(Learned { cards, changed: true })
+}
+
+fn apply(store: &Store, signals: &[super::store::Signal], known: &[Pref], answer: &Value, now: f64, cards: &mut Vec<Card>) -> anyhow::Result<()> {
     // The rule each signal of this batch went to, so a repeat inside the batch counts too.
     let mut placed: std::collections::HashMap<i64, i64> = Default::default();
     for item in answer["items"].as_array().map(Vec::as_slice).unwrap_or_default() {
@@ -161,54 +179,33 @@ pub fn learn(store: &Store, llm: Llm, now: f64) -> anyhow::Result<Learned> {
             );
             continue;
         }
+        // Only the model's own links decide what is "the same rule": words alone can't tell
+        // "buttons are green" from "buttons are blue".
         let matches = item["matches"].as_i64().and_then(|id| known.iter().find(|p| p.id == id));
-        let contradicts = item["contradicts"].as_i64().and_then(|id| known.iter().find(|p| p.id == id && p.status == "active"));
-        // A repeat of a rule made earlier in this batch: by the model's link, or by its words.
-        let earlier = item["same_as"].as_i64().and_then(|sig| placed.get(&sig).copied()).or_else(|| {
-            let words = super::store::title_words(&rule);
-            placed.values().copied().find(|id| store.pref(*id).ok().flatten().is_some_and(|p| super::store::overlap(&words, &super::store::title_words(&p.rule)) >= 0.6))
-        });
-        if matches.is_none() && contradicts.is_none() && let Some(id) = earlier {
-            store.bump_pref(id, explicit, now)?;
-            placed.insert(signal.id, id);
-            if let Some(fresh) = store.pref(id)? {
-                promote(store, &fresh, now, &mut cards)?;
-            }
-            continue;
-        }
-        if let Some(p) = matches {
-            placed.insert(signal.id, p.id);
+        let contradicts = item["contradicts"].as_i64().and_then(|id| known.iter().find(|p| p.id == id && (p.status == "active" || p.status == "suggested")));
+        let earlier = item["same_as"].as_i64().and_then(|sig| placed.get(&sig).copied());
+        let id = if let Some(p) = matches {
             store.bump_pref(p.id, explicit, now)?;
             if p.status == "suggested" {
                 store.set_pref_status(p.id, "active", now)?;
                 cards.push(Card::new("📌", "Preference confirmed again", format!("{} (for {}).", p.rule.trim_end_matches('.'), scope_name(&p.product))).why("You asked for it again, so the evaluator checks it again."));
-            } else if let Some(fresh) = store.pref(p.id)? {
-                promote(store, &fresh, now, &mut cards)?;
             }
+            p.id
+        } else if let Some(id) = earlier {
+            store.bump_pref(id, explicit, now)?;
+            id
         } else if let Some(old) = contradicts {
-            // The same new direction may already be waiting to replace this rule.
-            let waiting = store.prefs(None, &["candidate"])?.into_iter().find(|c| c.supersedes == Some(old.id));
-            let id = match waiting {
-                Some(c) => {
-                    store.bump_pref(c.id, explicit, now)?;
-                    c.id
-                }
-                None => store.add_pref(product, area, &rule, explicit, "candidate", Some(old.id), "", now)?,
-            };
-            placed.insert(signal.id, id);
-            if let Some(fresh) = store.pref(id)? {
-                promote(store, &fresh, now, &mut cards)?;
-            }
+            // A new direction starts its own count; it replaces the old rule once it is repeated.
+            store.add_pref(product, area, &rule, explicit, "candidate", Some(old.id), "", now)?
         } else {
-            let id = store.add_pref(product, area, &rule, explicit, "candidate", None, "", now)?;
-            placed.insert(signal.id, id);
-            if let Some(fresh) = store.pref(id)? {
-                promote(store, &fresh, now, &mut cards)?;
-            }
+            store.add_pref(product, area, &rule, explicit, "candidate", None, "", now)?
+        };
+        placed.insert(signal.id, id);
+        if let Some(fresh) = store.pref(id)? {
+            promote(store, &fresh, now, cards)?;
         }
     }
-    store.signals_done(&signals.iter().map(|s| s.id).collect::<Vec<_>>())?;
-    Ok(Learned { cards, changed: true })
+    Ok(())
 }
 
 /// A preference the founder sets directly: active at once.
@@ -216,6 +213,23 @@ pub fn prefer(store: &Store, product: &str, area: &str, rule: &str, now: f64) ->
     anyhow::ensure!(AREAS.contains(&area), "the area is one of: {}", AREAS.join(", "));
     anyhow::ensure!(!rule.trim().is_empty(), "say the rule");
     store.add_pref(product, area, rule, true, "active", None, "set by the founder", now)
+}
+
+/// Drops a rule. When it had replaced another, that one is in force again, so undoing a change
+/// never leaves neither rule. Returns what to tell the founder.
+pub fn forget(store: &Store, id: i64, now: f64) -> anyhow::Result<String> {
+    let p = store.pref(id)?.ok_or_else(|| anyhow::anyhow!("no preference #{id}"))?;
+    anyhow::ensure!(p.status != "refused", "#{id} was never learned (it would weaken quality), so there is nothing to forget");
+    store.atomically(|| {
+        store.set_pref_status(id, "retired", now)?;
+        match p.supersedes.and_then(|old| store.pref(old).ok().flatten()).filter(|o| o.status == "retired") {
+            Some(old) => {
+                store.set_pref_status(old.id, "active", now)?;
+                Ok(format!("Forgot #{id}: {}. The rule it replaced is back: {}.", p.rule, old.rule))
+            }
+            None => Ok(format!("Forgot #{id}: {}. It stays in the history.", p.rule)),
+        }
+    })
 }
 
 /// Active rules not confirmed for [`STALE_DAYS`] become suggestions. Returns a card when any did.
@@ -232,10 +246,18 @@ pub fn decay(store: &Store, now: f64) -> anyhow::Result<Option<Card>> {
     Ok(Some(card.reply("/prefer <rule> to enforce one again, or /forget <id> to drop it")))
 }
 
+/// The rules in force for a product: its own and the global ones, without a global rule that one
+/// of the product's own rules replaces.
+fn in_force(store: &Store, product: &str, statuses: &[&str]) -> anyhow::Result<Vec<Pref>> {
+    let prefs = store.prefs(Some(product), statuses)?;
+    let overridden: Vec<i64> = store.prefs(Some(product), &["active"])?.into_iter().filter(|p| p.product == product).filter_map(|p| p.supersedes).collect();
+    Ok(prefs.into_iter().filter(|p| !overridden.contains(&p.id)).collect())
+}
+
 /// The preferences a role gets in its instructions: enforced rules, then suggestions.
 pub fn prompt_section(store: &Store, product: &str, rubric: &str) -> anyhow::Result<String> {
     let areas = areas_for(rubric);
-    let prefs: Vec<Pref> = store.prefs(Some(product), &["active", "suggested"])?.into_iter().filter(|p| areas.contains(&p.area.as_str())).collect();
+    let prefs: Vec<Pref> = in_force(store, product, &["active", "suggested"])?.into_iter().filter(|p| areas.contains(&p.area.as_str())).collect();
     if prefs.is_empty() {
         return Ok(String::new());
     }
@@ -256,8 +278,7 @@ pub fn prompt_section(store: &Store, product: &str, rubric: &str) -> anyhow::Res
 /// The founder's active rules for a builder's work, as critical evaluator criteria.
 pub fn rubric_criteria(store: &Store, product: &str, rubric: &str) -> anyhow::Result<String> {
     let areas = areas_for(rubric);
-    let rules: Vec<String> = store
-        .prefs(Some(product), &["active"])?
+    let rules: Vec<String> = in_force(store, product, &["active"])?
         .into_iter()
         .filter(|p| areas.contains(&p.area.as_str()))
         .map(|p| format!("- [critical] Founder preference ({}): {}", p.area, p.rule))
@@ -445,7 +466,7 @@ mod tests {
         let m = Model::new(vec![json!({"items": [
             item(a, None, "Help text stays very short"),
             item(b, Some(a), "Help text stays very short"),
-            item(c, None, "Help text stays very short, one line each"),
+            item(c, Some(b), "Help text stays very short, one line each"),
         ]})]);
         let cards = learn(&store, &|s, p, sc| m.call(s, p, sc), 2.0).unwrap().cards;
         let all = store.prefs(None, &["active", "candidate"]).unwrap();
@@ -460,11 +481,79 @@ mod tests {
         let old = prefer(&store, "*", "design", "Primary buttons are green", 1.0).unwrap();
         let m = Model::new(vec![]);
         assert!(say(&store, &m, "make the buttons blue", |s| pref_item(s, "Primary buttons are blue", false, None, Some(old)), 2.0).is_empty());
-        let cards = say(&store, &m, "blue buttons", |s| pref_item(s, "Primary buttons are blue", false, None, Some(old)), 3.0);
+        let blue = store.prefs(None, &["candidate"]).unwrap()[0].id;
+        // Another direction against the same rule starts its own count: red doesn't count for blue.
+        assert!(say(&store, &m, "make them red", |s| pref_item(s, "Primary buttons are red", false, None, Some(old)), 2.5).is_empty());
+        assert_eq!(store.pref(blue).unwrap().unwrap().count, 1);
+        let cards = say(&store, &m, "blue buttons", |s| pref_item(s, "Primary buttons are blue", false, Some(blue), None), 3.0);
         assert_eq!(cards[0].title, "Preference updated");
-        assert!(cards[0].text().contains("It replaces: Primary buttons are green"));
+        assert!(cards[0].text().contains("It replaces: Primary buttons are green") && cards[0].text().contains("the old rule comes back"));
         assert_eq!(store.pref(old).unwrap().unwrap().status, "retired");
         assert!(render(&store).unwrap().contains("## History (replaced or forgotten)\n\n- #1 (design, every product) Primary buttons are green"));
+        // Undoing the change brings the old rule back, so a rule is always in force.
+        let said = forget(&store, blue, 4.0).unwrap();
+        assert!(said.contains("The rule it replaced is back: Primary buttons are green"), "{said}");
+        assert_eq!(store.pref(old).unwrap().unwrap().status, "active");
+    }
+
+    #[test]
+    fn a_change_for_one_product_overrides_a_global_rule_there_only() {
+        let store = Store::memory();
+        let global = prefer(&store, "*", "design", "Primary buttons are green", 1.0).unwrap();
+        let m = Model::new(vec![]);
+        let item = |s: i64, matches: Option<i64>| json!({"signal": s, "kind": "preference", "rule": "Primary buttons are blue", "area": "design", "scope": "product", "explicit": true, "matches": matches, "contradicts": if matches.is_none() { Some(global) } else { None }, "weakens_quality": false});
+        say(&store, &m, "on shop, buttons should always be blue", |s| item(s, None), 2.0);
+        let blue = store.prefs(None, &["candidate"]).unwrap()[0].id;
+        let cards = say(&store, &m, "shop buttons: blue, always", |s| item(s, Some(blue)), 3.0);
+        assert_eq!(cards[0].title, "Preference updated for one product");
+        assert_eq!(store.pref(global).unwrap().unwrap().status, "active", "the global rule stays for other products");
+        let shop = prompt_section(&store, "shop", "design").unwrap();
+        assert!(shop.contains("Primary buttons are blue") && !shop.contains("Primary buttons are green"));
+        assert!(prompt_section(&store, "site", "design").unwrap().contains("Primary buttons are green"));
+        assert!(!rubric_criteria(&store, "shop", "design").unwrap().contains("green"));
+    }
+
+    #[test]
+    fn a_faded_rule_is_replaced_too_so_both_never_reach_the_workers() {
+        let store = Store::memory();
+        let old = prefer(&store, "*", "copy", "Write in a formal tone", 1.0).unwrap();
+        decay(&store, 1.0 + (STALE_DAYS + 1.0) * 86_400.0).unwrap();
+        let m = Model::new(vec![]);
+        let now = 2.0 + (STALE_DAYS + 1.0) * 86_400.0;
+        say(&store, &m, "be casual, always", |s| json!({"signal": s, "kind": "preference", "rule": "Write in a casual tone", "area": "copy", "scope": "global", "explicit": true, "contradicts": old, "weakens_quality": false}), now);
+        let casual = store.prefs(None, &["candidate"]).unwrap()[0].id;
+        say(&store, &m, "casual please", |s| json!({"signal": s, "kind": "preference", "rule": "Write in a casual tone", "area": "copy", "scope": "global", "explicit": true, "matches": casual, "weakens_quality": false}), now + 1.0);
+        assert_eq!(store.pref(old).unwrap().unwrap().status, "retired");
+        let section = prompt_section(&store, "shop", "docs").unwrap();
+        assert!(section.contains("casual") && !section.contains("formal"));
+    }
+
+    #[test]
+    fn a_batch_lands_whole_or_not_at_all() {
+        let store = Store::memory();
+        store.add_signal("shop", "feedback", "green buttons", 1.0).unwrap();
+        // Two items for one signal: the second links to the first, so the batch counts it twice.
+        let bad = |_s: &str, _p: &str, _sc: &str| Ok(json!({"items": [
+            {"signal": 1, "kind": "preference", "rule": "Buttons are green", "area": "design", "scope": "global", "explicit": false, "weakens_quality": false},
+            {"signal": 1, "kind": "preference", "rule": "x", "area": "nope", "scope": "global", "explicit": false, "same_as": 1, "weakens_quality": false}
+        ]}));
+        learn(&store, &bad, 2.0).unwrap();
+        let rows = store.prefs(None, &["candidate"]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(store.pending_signals(5).unwrap().is_empty());
+        assert!(store.atomically(|| -> anyhow::Result<()> {
+            store.add_pref("*", "copy", "half", false, "candidate", None, "", 3.0)?;
+            anyhow::bail!("boom")
+        })
+        .is_err());
+        assert!(store.prefs(None, &["candidate"]).unwrap().iter().all(|p| p.rule != "half"), "a failed batch leaves nothing behind");
+    }
+
+    #[test]
+    fn forgetting_a_refused_rule_is_refused() {
+        let store = Store::memory();
+        let id = store.add_pref("*", "process", "Skip tests", true, "refused", None, "", 1.0).unwrap();
+        assert!(forget(&store, id, 2.0).is_err());
     }
 
     #[test]

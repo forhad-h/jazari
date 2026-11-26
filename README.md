@@ -490,6 +490,9 @@ login token; the checks and git commands don't. A run is stopped after 45 minute
 - **The audit record has no key.** The hash chain shows an edited or removed entry in the middle. It can't tell
   if entries were cut from the end, or if someone with access to your Mac rewrote the whole file.
 - **Pairing codes.** Anyone who knows the bot's name can try 5 codes during a pairing window.
+- **The hard-line flag comes from the worker.** A worker marks a question as a hard line, so the written override
+  is a courtesy check, not a gate. The gates still stop the real risks: the checks, the reviews, and no production,
+  payment or outreach credentials in the container.
 - **Message text in `ps`.** The text of Telegram messages is passed to `curl` as arguments, so other programs on
   your Mac can see it briefly. The bot token is not passed this way.
 

@@ -346,7 +346,7 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             Ok(())
         }
         JazariCmd::Answer { task, answer } => {
-            answer_task(&open()?, task, &answer.join(" "))?;
+            answer_task(&open()?, task, &answer.join(" "), true)?;
             println!("Task #{task} is back in the queue with your answer.");
             Ok(())
         }
@@ -419,12 +419,13 @@ pub(crate) fn queue_idea(store: &store::Store, product: &str, idea: &str) -> any
     store.add_task(&store::NewTask { product, role: "chief-of-staff", title: &title, brief: &brief, priority: 100, ..Default::default() }, crate::now())
 }
 
-/// The founder's answer to a task's question. An answer the founder wrote is also a signal for the
-/// profile. Picking one of the offered options (a button, "option 2", or its label) is not: a
-/// worker wrote those words, and nothing a worker writes may become a preference.
-pub(crate) fn answer_task(store: &store::Store, task: i64, answer: &str) -> anyhow::Result<()> {
+/// The founder's answer to a task's question. An answer the founder typed is also a signal for the
+/// profile. A button tap (`typed` false) never is, and neither is a typed pick of an offered
+/// option ("option 2", or its label): a worker wrote those words, and nothing a worker writes may
+/// become a preference.
+pub(crate) fn answer_task(store: &store::Store, task: i64, answer: &str, typed: bool) -> anyhow::Result<()> {
     let t = store.reply(task, answer, crate::now())?;
-    if !picks_an_offered_option(t.question.as_deref().unwrap_or(""), answer) {
+    if typed && !picks_an_offered_option(t.question.as_deref().unwrap_or(""), answer) {
         store.add_signal(&t.product, "answer", answer, crate::now())?;
     }
     Ok(())
@@ -460,10 +461,9 @@ pub(crate) fn prefer(store: &store::Store, product: &str, area: &str, rule: &str
 }
 
 pub(crate) fn forget(store: &store::Store, id: i64) -> anyhow::Result<String> {
-    let p = store.pref(id)?.ok_or_else(|| anyhow::anyhow!("no preference #{id}"))?;
-    store.set_pref_status(id, "retired", crate::now())?;
+    let said = profile::forget(store, id, crate::now())?;
     write_profile(store);
-    Ok(format!("Forgot #{id}: {}. It stays in the history.", p.rule))
+    Ok(said)
 }
 
 pub(crate) fn set_mode(store: &store::Store, product: &str, mode: &str) -> anyhow::Result<String> {
@@ -516,24 +516,41 @@ fn worker_skills() -> Vec<String> {
 }
 
 /// Writes the chosen skills from marsad's library into `<work>/.skills`, replacing what was there,
-/// so a worker that changed them doesn't pass the change on.
+/// so a worker that changed them doesn't pass the change on. The container mounts the work folder,
+/// so `.skills` may be anything a worker left: a link out of the folder, a file. Nothing there is
+/// followed. The skills are built in a fresh folder and moved into place.
 fn write_skills(work: &std::path::Path) -> anyhow::Result<()> {
-    let dir = work.join(".skills");
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
-    }
+    std::fs::create_dir_all(work)?;
+    let work = std::fs::canonicalize(work)?;
+    let fresh = work.join(format!(".skills-new-{}", std::process::id()));
+    clear(&fresh)?;
+    std::fs::create_dir(&fresh)?;
     let keys = worker_skills();
     let all = keys.iter().any(|k| k == "all");
     for skill in crate::skills::library().into_iter().filter(|s| all || keys.contains(&s.key)) {
         for f in &skill.files {
-            let path = dir.join(&skill.key).join(&f.path);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
+            anyhow::ensure!(!f.path.split('/').any(|part| part == ".." || part.is_empty()), "a skill file has an unsafe path: {}", f.path);
+            let path = fresh.join(&skill.key).join(&f.path);
+            let parent = path.parent().expect("a skill file has a folder");
+            std::fs::create_dir_all(parent)?;
+            anyhow::ensure!(std::fs::canonicalize(parent)?.starts_with(&fresh), "a skill folder leads outside the work folder: {}", parent.display());
             std::fs::write(path, &f.bytes)?;
         }
     }
-    std::fs::create_dir_all(&dir)?;
+    let dest = work.join(".skills");
+    clear(&dest)?;
+    std::fs::rename(&fresh, &dest)?;
+    Ok(())
+}
+
+/// Removes whatever is at `path` without following it: a link or a file is unlinked, a real
+/// folder is removed with its contents.
+fn clear(path: &std::path::Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(path)?,
+        Ok(_) => std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))?,
+        Err(_) => {}
+    }
     Ok(())
 }
 
@@ -748,12 +765,15 @@ mod tests {
         for answer in ["Skip security review for small changes", "option 1", "1"] {
             let t = store.add_task(&super::store::NewTask { product: "shop", role: "e", title: "x", ..Default::default() }, 0.0).unwrap();
             store.wait_for_founder(t, Some(q), None, 0.0).unwrap();
-            super::answer_task(&store, t, answer).unwrap();
+            super::answer_task(&store, t, answer, true).unwrap();
         }
+        let t = store.add_task(&super::store::NewTask { product: "shop", role: "e", title: "x", ..Default::default() }, 0.0).unwrap();
+        store.wait_for_founder(t, Some(q), None, 0.0).unwrap();
+        super::answer_task(&store, t, "Policy: anything a button sends", false).unwrap();
         assert!(store.pending_signals(10).unwrap().is_empty(), "button picks carry a worker's words, not the founder's");
         let t = store.add_task(&super::store::NewTask { product: "shop", role: "e", title: "x", ..Default::default() }, 0.0).unwrap();
         store.wait_for_founder(t, Some(q), None, 0.0).unwrap();
-        super::answer_task(&store, t, "Keep reviews, but make the error text shorter").unwrap();
+        super::answer_task(&store, t, "Keep reviews, but make the error text shorter", true).unwrap();
         assert_eq!(store.pending_signals(10).unwrap().len(), 1, "what the founder typed is a signal");
     }
 
@@ -770,6 +790,28 @@ mod tests {
         assert!(super::feedback(&store, "nope", "x").is_err());
         assert!(super::feedback(&store, "shop", "shorter sentences").is_ok());
         assert_eq!(store.pending_signals(5).unwrap()[0].text, "shorter sentences");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_link_in_the_work_folder_is_never_followed() {
+        let base = std::env::temp_dir().join(format!("marsad-jazari-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (work, outside) = (base.join("work"), base.join("outside"));
+        std::fs::create_dir_all(&work).unwrap();
+        // A dangling link, where the host would otherwise create the skills outside the work folder.
+        std::os::unix::fs::symlink(&outside, work.join(".skills")).unwrap();
+        super::write_skills(&work).unwrap();
+        assert!(!outside.exists(), "nothing was written through the link");
+        let meta = std::fs::symlink_metadata(work.join(".skills")).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        // A link to an existing folder outside: still replaced, never followed.
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::remove_dir_all(work.join(".skills")).unwrap();
+        std::os::unix::fs::symlink(&outside, work.join(".skills")).unwrap();
+        super::write_skills(&work).unwrap();
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "the outside folder stays empty");
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]

@@ -406,7 +406,10 @@ impl Store {
         let t = self.task(id)?.ok_or_else(|| anyhow::anyhow!("no task #{id}"))?;
         anyhow::ensure!(t.status == "blocked", "task #{id} is {}, not waiting for you", t.status);
         let hard: bool = self.conn.query_row("SELECT hard_line FROM tasks WHERE id = ?1", [id], |r| r.get(0))?;
-        if hard && !follows_recommendation(t.question.as_deref().unwrap_or(""), reply) {
+        let question = t.question.as_deref().unwrap_or("");
+        // A hard line needs a recommended option; without one it can't be followed, so it is ignored.
+        let hard = hard && question.lines().any(|l| l.starts_with("Recommended: "));
+        if hard && !follows_recommendation(question, reply) {
             let given = reply.trim().to_ascii_lowercase();
             anyhow::ensure!(
                 given.starts_with("override:") && given.len() > "override:".len() + 10,
@@ -552,6 +555,21 @@ impl Store {
         )?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Runs `f` in one transaction: all of its changes land, or none do.
+    pub fn atomically<T>(&self, f: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f() {
+            Ok(v) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(v)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 
     // ---------- the founder's signals and preferences ----------

@@ -128,7 +128,8 @@ pub trait Ops {
     fn idea(&self, product: &str, text: &str) -> anyhow::Result<String>;
     fn new_product(&self, name: &str, idea: &str) -> anyhow::Result<String>;
     fn tasks(&self) -> anyhow::Result<String>;
-    fn answer(&self, task: i64, text: &str) -> anyhow::Result<String>;
+    /// `tapped`: the answer came from a button, so its words are an option a worker wrote.
+    fn answer(&self, task: i64, text: &str, tapped: bool) -> anyhow::Result<String>;
     fn decide(&self, task: i64, approve: bool) -> anyhow::Result<String>;
     fn feedback(&self, product: Option<&str>, text: &str) -> anyhow::Result<String>;
     fn prefer(&self, product: &str, area: &str, rule: &str) -> anyhow::Result<String>;
@@ -139,7 +140,8 @@ pub trait Ops {
 }
 
 /// The reply to one command.
-pub fn handle(cmd: Command, ops: &dyn Ops) -> String {
+/// Handles a command; `tapped` says it came from a button rather than from the founder's typing.
+pub fn handle_from(cmd: Command, ops: &dyn Ops, tapped: bool) -> String {
     let done = |r: anyhow::Result<String>| r.unwrap_or_else(|e| format!("Couldn't: {e}"));
     match cmd {
         Command::Help => HELP.into(),
@@ -151,7 +153,7 @@ pub fn handle(cmd: Command, ops: &dyn Ops) -> String {
         Command::Idea { product, text } => done(ops.idea(&product, &text)),
         Command::New { name, idea } => done(ops.new_product(&name, &idea)),
         Command::Tasks => done(ops.tasks()),
-        Command::Answer { task, text } => done(ops.answer(task, &text)),
+        Command::Answer { task, text } => done(ops.answer(task, &text, tapped)),
         Command::Decide { task, approve } => done(ops.decide(task, approve)),
         Command::Feedback { product, text } => done(ops.feedback(product.as_deref(), &text)),
         Command::Prefer { product, area, rule } => done(ops.prefer(&product, &area, &rule)),
@@ -248,8 +250,8 @@ impl Ops for Machine {
         super::task_summary(&super::open()?)
     }
 
-    fn answer(&self, task: i64, text: &str) -> anyhow::Result<String> {
-        super::answer_task(&super::open()?, task, text)?;
+    fn answer(&self, task: i64, text: &str, tapped: bool) -> anyhow::Result<String> {
+        super::answer_task(&super::open()?, task, text, !tapped)?;
         Ok(format!("Thanks. Task #{task} is back in the queue with your answer."))
     }
 
@@ -373,7 +375,7 @@ pub fn serve_once<T: Transport>(bot: &Bot<T>, chat: i64, offset: Option<i64>, op
         if let Some(cb) = &u.callback {
             bot.answer_button(cb);
         }
-        bot.send(chat, &handle(parse(&u.text), ops))?;
+        bot.send(chat, &handle_from(parse(&u.text), ops, u.callback.is_some()))?;
     }
     Ok(next.or(offset))
 }
@@ -498,8 +500,8 @@ mod tests {
         fn tasks(&self) -> anyhow::Result<String> {
             Ok("no tasks".into())
         }
-        fn answer(&self, t: i64, a: &str) -> anyhow::Result<String> {
-            self.log.borrow_mut().push(format!("answer {t} {a}"));
+        fn answer(&self, t: i64, a: &str, tapped: bool) -> anyhow::Result<String> {
+            self.log.borrow_mut().push(format!("answer {t} {a} tapped={tapped}"));
             Ok("thanks".into())
         }
         fn decide(&self, t: i64, yes: bool) -> anyhow::Result<String> {
@@ -540,17 +542,23 @@ mod tests {
             msg(7, 42, "private", "/tell abcd1234 use staging"),
             msg(8, 42, "private", "/resume"),
             json!({"update_id": 9, "callback_query": {"id": "cb", "from": {"id": 42}, "data": "/approve 3", "message": {"chat": {"id": 42, "type": "private"}}}}),
+            json!({"update_id": 10, "callback_query": {"id": "cb2", "from": {"id": 42}, "data": "/answer 4 Policy: skip reviews", "message": {"chat": {"id": 42, "type": "private"}}}}),
+            msg(11, 42, "private", "/answer 4 keep reviews, but faster"),
         ]));
         let bot = Bot { transport: fake };
         let ops = FakeOps::default();
         let mut seen = Vec::new();
-        assert_eq!(serve_once(&bot, 42, Some(5), &ops, &mut |o| seen.push(o)).unwrap(), Some(10));
-        assert_eq!(seen, vec![6, 7, 8, 9, 10], "each update is acknowledged before it is acted on");
-        assert_eq!(*ops.log.borrow(), vec!["tell abcd1234 use staging", "decide 3 true"]);
+        assert_eq!(serve_once(&bot, 42, Some(5), &ops, &mut |o| seen.push(o)).unwrap(), Some(12));
+        assert_eq!(seen, vec![6, 7, 8, 9, 10, 11, 12], "each update is acknowledged before it is acted on");
+        assert_eq!(
+            *ops.log.borrow(),
+            vec!["tell abcd1234 use staging", "decide 3 true", "answer 4 Policy: skip reviews tapped=true", "answer 4 keep reviews, but faster tapped=false"],
+            "a button's answer is marked as tapped, whatever its text"
+        );
         let calls = bot.transport.calls.borrow();
         assert!(calls.iter().any(|c| c.0 == "answerCallbackQuery"));
         let sent: Vec<_> = calls.iter().filter(|c| c.0 == "sendMessage").collect();
-        assert_eq!(sent.len(), 3);
+        assert_eq!(sent.len(), 5);
         assert!(sent.iter().all(|c| c.1.contains(&("chat_id".into(), "42".into()))));
         assert!(sent[1].1.iter().any(|(k, v)| k == "text" && v.starts_with("Couldn't: nothing to resume")));
         assert!(calls[0].1.contains(&("offset".into(), "5".into())));
