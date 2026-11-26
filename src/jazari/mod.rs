@@ -7,6 +7,7 @@
 
 mod audit;
 mod bridge;
+mod evals;
 mod git;
 mod limits;
 mod personas;
@@ -66,6 +67,21 @@ pub enum JazariCmd {
     Run {
         #[arg(long)]
         once: bool,
+        /// Start even if the persona checks (`marsad jazari evals`) block.
+        #[arg(long)]
+        skip_evals: bool,
+    },
+    /// Check the team after a change to personas, rubrics or the evaluator: lint for free, then
+    /// calibrate the judges with known-good and known-bad cases, with effort matched to the change.
+    Evals {
+        /// Check everything at full effort, as if nothing had been checked before.
+        #[arg(long)]
+        all: bool,
+        /// Show what changed and what would run, without running it.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Check that the audit record is whole.
     Audit,
@@ -83,8 +99,14 @@ pub enum JazariCmd {
     Approve { task: i64 },
     /// Deny a task's deploy, spend or contact request.
     Deny { task: i64 },
-    /// List the roles workers can take, with their model tier.
-    Personas,
+    /// List the roles workers can take, with their model tier and rubric.
+    Personas {
+        /// Copy the built-in personas.md and rubrics.md to ~/.marsad/jazari/ to edit; jazari uses those copies.
+        #[arg(long)]
+        export: bool,
+    },
+    /// How each role's work fares at each gate: checks, evaluator, reviews, the merge queue.
+    Quality,
 }
 
 #[derive(Subcommand)]
@@ -170,6 +192,7 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
         }
         JazariCmd::Task { product, title, role, priority, brief } => {
             let title = title.join(" ");
+            let role = personas::resolve(&role);
             let task = store::NewTask { product: &product, role: &role, title: &title, brief: &brief, priority, ..Default::default() };
             let id = open()?.add_task(&task, crate::now())?;
             println!("Queued task #{id} for {product}.");
@@ -213,7 +236,33 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        JazariCmd::Run { once } => run_supervisor(once),
+        JazariCmd::Run { once, skip_evals } => run_supervisor(once, skip_evals),
+        JazariCmd::Evals { all, dry_run, json } => {
+            let store = open()?;
+            let roster = personas::all();
+            if dry_run {
+                let plan = evals::plan(&store, &roster, all)?;
+                for (item, level) in &plan.changed {
+                    println!("changed: {item} ({level:?})");
+                }
+                for (judge, group, level) in &plan.calls {
+                    let how = if *level == evals::Level::Major { "every case, production model, high effort" } else { "bad cases, small model, low effort" };
+                    println!("would run: {judge} on the {group} cases ({how})");
+                }
+                if plan.calls.is_empty() {
+                    println!("No calibration calls needed.");
+                }
+                return Ok(());
+            }
+            let report = evals::check(&store, &roster, all, limits::plan().profile().build_model, &evals::claude_judge)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&evals::report_json(&report))?);
+            } else {
+                println!("{}", report.text());
+            }
+            anyhow::ensure!(!report.blocking(), "the team's checks block the supervisor");
+            Ok(())
+        }
         JazariCmd::Audit => match audit::verify(&dir().join("audit.jsonl")) {
             Ok(n) => {
                 println!("The audit record is whole: {n} entries.");
@@ -244,9 +293,35 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             println!("{}", decide(&open()?, task, false)?);
             Ok(())
         }
-        JazariCmd::Personas => {
+        JazariCmd::Quality => {
+            let store = open()?;
+            let rows = store.quality()?;
+            if rows.is_empty() {
+                println!("No judgments yet.");
+            }
+            println!("{:<26} {:<9} {:>6} {:>7} {:>6}", "ROLE", "GATE", "TIMES", "PASSED", "SCORE");
+            for (role, stage, n, passed, score) in rows {
+                let pct = if n > 0 { passed * 100 / n } else { 0 };
+                let score = score.map(|s| format!("{s:.1}")).unwrap_or_else(|| "-".into());
+                let up = if stage == "eval" && store.get(&format!("upgrade:{role}"))?.is_some() { "  ↑ moved to the lead model" } else { "" };
+                println!("{role:<26} {stage:<9} {n:>6} {pct:>6}% {score:>6}{up}");
+            }
+            Ok(())
+        }
+        JazariCmd::Personas { export } => {
+            if export {
+                std::fs::create_dir_all(dir())?;
+                for (name, text) in [("personas.md", personas::ROSTER), ("rubrics.md", personas::RUBRICS)] {
+                    let path = dir().join(name);
+                    anyhow::ensure!(!path.exists(), "{} already exists; edit it, or delete it to go back to the built-in one", path.display());
+                    std::fs::write(&path, text)?;
+                    println!("Wrote {}", path.display());
+                }
+                println!("jazari now uses these copies. `marsad jazari evals` checks your changes, with effort matched to their size.");
+                return Ok(());
+            }
             for p in personas::all() {
-                println!("{:<26} {:<6} {}", p.key, format!("{:?}", p.tier).to_lowercase(), p.title);
+                println!("{:<26} {:<6} {:<9} {}", p.key, format!("{:?}", p.tier).to_lowercase(), p.rubric, p.title);
             }
             Ok(())
         }
@@ -365,7 +440,7 @@ fn tell_founder(text: &str, buttons: &[supervisor::Button]) {
     }
 }
 
-fn run_supervisor(once: bool) -> anyhow::Result<()> {
+fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
     let dir = dir();
     std::fs::create_dir_all(&dir)?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("supervisor.lock"))?;
@@ -373,6 +448,16 @@ fn run_supervisor(once: bool) -> anyhow::Result<()> {
     let token = secrets::get(secrets::CLAUDE_TOKEN)
         .ok_or_else(|| anyhow::anyhow!("no Claude login token for the workers: run `claude setup-token`, then {}", secrets::how_to_add(secrets::CLAUDE_TOKEN)))?;
     let store = open()?;
+    // The team's own checks: free when nothing changed, and matched to the change's size when
+    // something did.
+    let report = evals::check(&store, &personas::all(), false, limits::plan().profile().build_model, &evals::claude_judge)?;
+    if !report.plan.changed.is_empty() || report.blocking() {
+        println!("{}", report.text());
+    }
+    if report.blocking() && !skip_evals {
+        tell_founder("⛔ jazari won't start: a persona or judge check failed. Run `marsad jazari evals` for details.", &[]);
+        anyhow::bail!("the team's checks block the supervisor; fix them, or start with --skip-evals");
+    }
     let requeued = store.requeue_running(crate::now())?;
     if requeued > 0 {
         println!("{requeued} task(s) left running by an earlier supervisor went back in the queue.");

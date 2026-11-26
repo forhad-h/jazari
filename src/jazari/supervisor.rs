@@ -1,18 +1,25 @@
 //! The supervisor: one task at a time, for as long as it runs.
 //!
 //! Each tick it checks the pause and the usage windows, takes the next queued task, and runs a
-//! worker on it in the product's container, in the task's own git worktree. It then moves the work
-//! along the pipeline:
-//! - a branch with new commits goes to a code review;
-//! - unless the change is documentation only, it then goes to a security review;
-//! - after that it is merged into the default branch;
-//! - a review that asks for changes sends a fix task back to the role that built the branch.
+//! worker on it in the product's container, in the task's own git worktree. Nothing a worker
+//! claims is trusted until it is verified.
 //!
-//! Questions and approvals wait for the founder. When a usage window is used up, it sleeps until
-//! the reset.
+//! A branch with new commits goes through these gates in order:
+//! 1. **Harness checks.** Deterministic and free: the product's `company/checks.sh` and a secret
+//!    scan of the diff.
+//! 2. **The evaluator.** A fresh, read-only judge scores the work against the builder's role rubric,
+//!    with the check output as evidence.
+//! 3. **Code review**, then **security review.** Documentation-only changes skip both.
+//! 4. **The merge queue.** The merge is built aside, the checks run on the merged result, and only
+//!    then does the default branch move.
+//!
+//! A failed gate sends a fix task back to the builder; after a few rounds the founder decides.
+//! Every judgment is recorded per role. A role that keeps failing evaluation moves up to the
+//! plan's lead model.
 
-use super::git::Merge;
+use super::git::{Stage, Staged};
 use super::limits::{self, Decision, Limits, Profile};
+use super::personas::{self, Tier};
 use super::store::{NewTask, Run, Store, Task};
 use super::worker::{self, Kind, Outcome, Runner, Setup};
 use serde_json::json;
@@ -20,13 +27,21 @@ use std::path::{Path, PathBuf};
 
 /// Failed attempts before a task is set aside for the founder.
 pub const MAX_ATTEMPTS: i64 = 3;
-/// Review rounds a branch gets before the founder is asked.
+/// Fix rounds a branch gets before the founder is asked.
 pub const MAX_ROUNDS: i64 = 3;
 /// Queued tasks a product may have before build roles' follow-ups are dropped; planning roles
 /// may still add theirs.
 pub const MAX_QUEUED: i64 = 25;
 /// How long to wait after a refusal that gave no reset time.
 const BACKOFF_SECS: f64 = 900.0;
+/// Evaluations looked at to decide whether a role needs a stronger model.
+const UPGRADE_WINDOW: usize = 8;
+/// The product's own checks: build, tests, lint, type checks.
+pub const CHECKS: &str = "company/checks.sh";
+/// The longest the checks may run, in seconds.
+const CHECKS_TIMEOUT_SECS: u64 = 15 * 60;
+/// Printed when a repo has no checks script.
+const NO_CHECKS: &str = "__jazari_no_checks__";
 
 /// Git on a product's repo, so tests run without one.
 pub trait Repo {
@@ -35,7 +50,10 @@ pub trait Repo {
     fn remove(&self, repo: &Path, worktree: &Path);
     fn commits_ahead(&self, repo: &Path, base: &str, branch: &str) -> usize;
     fn changed_files(&self, repo: &Path, base: &str, branch: &str) -> Vec<String>;
-    fn merge(&self, repo: &Path, base: &str, branch: &str, message: &str) -> anyhow::Result<Merge>;
+    fn secrets(&self, repo: &Path, base: &str, branch: &str) -> Vec<String>;
+    fn stage(&self, repo: &Path, base: &str, branch: &str, message: &str) -> anyhow::Result<Stage>;
+    fn advance(&self, repo: &Path, base: &str, staged: &Staged) -> anyhow::Result<String>;
+    fn discard(&self, repo: &Path, staged: &Staged);
 }
 
 pub struct Git;
@@ -56,8 +74,17 @@ impl Repo for Git {
     fn changed_files(&self, repo: &Path, base: &str, branch: &str) -> Vec<String> {
         super::git::changed_files(repo, base, branch)
     }
-    fn merge(&self, repo: &Path, base: &str, branch: &str, message: &str) -> anyhow::Result<Merge> {
-        super::git::merge(repo, base, branch, message)
+    fn secrets(&self, repo: &Path, base: &str, branch: &str) -> Vec<String> {
+        super::git::secrets(repo, base, branch)
+    }
+    fn stage(&self, repo: &Path, base: &str, branch: &str, message: &str) -> anyhow::Result<Stage> {
+        super::git::stage(repo, base, branch, message)
+    }
+    fn advance(&self, repo: &Path, base: &str, staged: &Staged) -> anyhow::Result<String> {
+        super::git::advance(repo, base, staged)
+    }
+    fn discard(&self, repo: &Path, staged: &Staged) {
+        super::git::discard(repo, staged)
     }
 }
 
@@ -104,11 +131,79 @@ fn announce_sleep(d: &Deps, until: f64, reason: &str) {
     }
 }
 
+// ---------- the harness's own checks ----------
+
+/// What the harness found by running things itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Checks {
+    pub passed: bool,
+    /// The repo has no `company/checks.sh`.
+    pub missing: bool,
+    /// The end of the output, for the evaluator and for fixes.
+    pub log: String,
+}
+
+/// Runs `company/checks.sh` in a folder of the container.
+pub fn run_checks(runner: &dyn Runner, container: &str, dir: &str) -> Checks {
+    let script = format!("if [ ! -f {CHECKS} ]; then echo {NO_CHECKS}; exit 3; fi; timeout --kill-after=30 {CHECKS_TIMEOUT_SECS} sh {CHECKS} 2>&1");
+    let mut lines: Vec<String> = Vec::new();
+    let code = runner.run(container, dir, &["sh".into(), "-c".into(), script], &mut |l| lines.push(l.to_string()));
+    let missing = lines.iter().any(|l| l == NO_CHECKS);
+    lines.retain(|l| l != NO_CHECKS);
+    let tail = lines[lines.len().saturating_sub(60)..].join("\n");
+    let log = super::telegram::redact(&crate::hook::truncate(&tail, 4000));
+    match code {
+        Ok(0) if !missing => Checks { passed: true, missing, log },
+        Ok(c) => Checks { passed: false, missing, log: if missing { log } else { format!("exit code {c}\n{log}") } },
+        Err(e) => Checks { passed: false, missing, log: format!("the checks couldn't run: {e}") },
+    }
+}
+
+/// The gates a built branch must pass before an evaluator spends tokens on it.
+struct Gates {
+    /// What to fix, when a gate failed.
+    failure: Option<String>,
+    /// The evidence handed to the evaluator.
+    report: String,
+    docs: bool,
+}
+
+fn gates(d: &Deps, task: &Task, container: &str, worktree: &Path, repo: &Path, base: &str, branch: &str) -> Gates {
+    let files = d.repo.changed_files(repo, base, branch);
+    let docs = super::git::docs_only(&files);
+    let secrets = d.repo.secrets(repo, base, branch);
+    let checks = run_checks(d.runner, container, &worktree.to_string_lossy());
+    let failure = if !secrets.is_empty() {
+        Some(format!(
+            "The secret scan found credentials in: {}. Remove them and read them from the environment instead. This branch isn't merged, so rewrite its own commits so the secret is gone from its history.",
+            secrets.join(", ")
+        ))
+    } else if checks.missing && !docs {
+        Some(format!("This repo has no `{CHECKS}`. Add it: one script that runs the build, every test suite, the linters and the type checks, and exits non-zero on any failure. Then make it pass."))
+    } else if !checks.passed && !checks.missing {
+        Some(format!("The harness ran `{CHECKS}` on your branch and it failed:\n```\n{}\n```\nMake it pass.", checks.log))
+    } else {
+        None
+    };
+    let stage = if secrets.is_empty() { "checks" } else { "secrets" };
+    let why = failure.as_deref().map(|f| crate::hook::truncate(f, 200)).unwrap_or_default();
+    let _ = judged(d, task, stage, failure.is_none(), None, &why);
+    let status = if checks.missing { "not set up (documentation-only change)".to_string() } else if checks.passed { "passed".into() } else { "FAILED".into() };
+    let report = format!(
+        "Evidence the harness gathered itself (trust this over the worker's claims):\n- `{CHECKS}`: {status}\n- secret scan: {}\n- changed files: {}\n```\n{}\n```",
+        if secrets.is_empty() { "clean" } else { "credentials found" },
+        crate::hook::truncate(&files.join(", "), 600),
+        checks.log
+    );
+    Gates { failure, report, docs }
+}
+
+// ---------- merges ----------
+
 /// A merge waiting for the founder's checkout to be clean.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 struct Pending {
     task: i64,
-    product: String,
     branch: String,
     title: String,
 }
@@ -127,15 +222,78 @@ fn retry_merges(d: &Deps) -> anyhow::Result<()> {
     if list.is_empty() {
         return Ok(());
     }
-    let mut left = Vec::new();
+    set_pending(d.store, &[])?;
     for p in list {
-        let Some(product) = d.store.product(&p.product)? else { continue };
-        let Some(task) = d.store.task(p.task)? else { continue };
-        if !merge(d, &task, &product.repo, &p.branch, &p.title)? {
-            left.push(p);
+        if let Some(task) = d.store.task(p.task)? {
+            merge(d, &task, &p.branch, &p.title)?;
         }
     }
-    set_pending(d.store, &left)
+    Ok(())
+}
+
+/// The merge queue: builds the merge aside, runs the checks on the merged result, and moves the
+/// default branch only when they pass.
+fn merge(d: &Deps, task: &Task, branch: &str, title: &str) -> anyhow::Result<()> {
+    let product = d.store.product(&task.product)?.ok_or_else(|| anyhow::anyhow!("no product {}", task.product))?;
+    let repo = PathBuf::from(&product.repo);
+    let base = d.repo.default_branch(&repo)?;
+    match d.repo.stage(&repo, &base, branch, &format!("Merge {branch}: {title}"))? {
+        Stage::Ready(staged) => {
+            let container = (d.ensure)(&product.name, &product.repo)?;
+            let checks = run_checks(d.runner, &container, &staged.dir.to_string_lossy());
+            if !checks.passed && !checks.missing {
+                d.repo.discard(&repo, &staged);
+                judged(d, task, "merge", false, None, "checks fail on the merged result")?;
+                let findings = format!(
+                    "The branch passes on its own, but `{CHECKS}` fails once `{base}` is merged into it:\n```\n{}\n```\nMerge `{base}` into the branch and make the checks pass.",
+                    checks.log
+                );
+                fix(d, task, branch, title, &findings)?;
+                return Ok(());
+            }
+            let sha = d.repo.advance(&repo, &base, &staged)?;
+            d.store.land_branch(branch)?;
+            (d.audit)("merge", json!({ "task": task.id, "branch": branch, "base": base, "commit": sha }));
+            (d.notify)(&format!("🚀 Merged into {base}: {title}\n{branch} · {}", &sha[..sha.len().min(10)]), &[]);
+        }
+        Stage::Conflict => {
+            let findings = format!("`{branch}` no longer merges cleanly into `{base}`. Merge `{base}` into the branch, resolve the conflicts keeping both sides' intent, and make the checks pass.");
+            fix(d, task, branch, title, &findings)?;
+        }
+        Stage::Dirty(dir) => {
+            let mut list = pending(d.store);
+            list.push(Pending { task: task.id, branch: branch.into(), title: title.into() });
+            set_pending(d.store, &list)?;
+            let told = format!("dirty_told:{branch}");
+            if d.store.get(&told)?.is_none() {
+                d.store.put(&told, "1")?;
+                (d.notify)(&format!("⏸ {title} is approved, but {base} in {} has uncommitted changes. jazari merges it once they are committed or stashed.", dir.display()), &[]);
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------- the tick ----------
+
+/// The role that built the branch a task is about.
+fn owner(task: &Task) -> String {
+    task.owner_role.clone().unwrap_or_else(|| personas::resolve(&task.role))
+}
+
+/// The feature a task belongs to, without the pipeline's prefixes.
+fn feature(title: &str) -> &str {
+    let mut t = title;
+    for prefix in ["Evaluate: ", "Review: ", "Security review: ", "Fix: ", "Resolve conflicts: "] {
+        t = t.strip_prefix(prefix).unwrap_or(t);
+    }
+    t
+}
+
+/// The model for a role: the profile's, or the lead model once the role was moved up.
+fn model_for(d: &Deps, persona: &personas::Persona) -> &'static str {
+    let upgraded = persona.tier == Tier::Build && d.store.get(&format!("upgrade:{}", persona.key)).ok().flatten().is_some();
+    if upgraded { d.profile.lead_model } else { persona.model(&d.profile) }
 }
 
 pub fn tick(d: &Deps) -> anyhow::Result<Tick> {
@@ -168,34 +326,90 @@ pub fn tick(d: &Deps) -> anyhow::Result<Tick> {
         }
     };
     (d.audit)("task.start", json!({ "task": task.id, "product": task.product, "role": task.role, "kind": task.kind, "title": task.title, "branch": branch }));
-    let persona = super::personas::find(&task.role);
-    let system_prompt = persona.system_prompt();
+    let persona = personas::find(&task.role);
+    let judge = task.kind == "eval";
+    let system_prompt = if judge {
+        let builder = personas::find(&owner(&task));
+        format!("{}\n# How to score\n\n{}\n\n# The rubric for the {}\n\n{}\n", persona.system_prompt(), personas::scoring_rules(), builder.title, builder.rubric())
+    } else {
+        persona.system_prompt()
+    };
+    let workdir = worktree.to_string_lossy().to_string();
     let setup = Setup {
         container: &container,
-        workdir: &worktree.to_string_lossy(),
+        workdir: &workdir,
         base: &base,
-        model: persona.model(&d.profile),
+        model: model_for(d, &persona),
         max_turns: d.profile.max_turns,
         system_prompt: &system_prompt,
         max_follow_ups: persona.max_follow_ups(),
+        read_only: judge,
     };
     let outcome = worker::run(d.runner, &task, &setup);
+    let built = outcome.kind == Kind::Done && task.kind == "work" && d.repo.commits_ahead(&repo, &base, &branch) > 0;
+    let gates = built.then(|| gates(d, &task, &container, &worktree, &repo, &base, &branch));
+    let docs = super::git::docs_only(&d.repo.changed_files(&repo, &base, &branch));
     d.repo.remove(&repo, &worktree);
-    record(d, &task, &outcome, &product.repo, &base, &branch, now)?;
+    record(d, &task, &outcome, gates, docs, &branch, now)?;
     Ok(Tick::Ran { task: task.id, kind: outcome.kind })
 }
 
-/// The feature a task belongs to, without the pipeline's prefixes.
-fn feature(title: &str) -> &str {
-    let mut t = title;
-    for prefix in ["Review: ", "Security review: ", "Fix: ", "Resolve conflicts: "] {
-        t = t.strip_prefix(prefix).unwrap_or(t);
+/// Sends a branch back to the role that built it, with what to fix and the original spec. After
+/// [`MAX_ROUNDS`] the fix waits for the founder.
+fn fix(d: &Deps, task: &Task, branch: &str, title: &str, findings: &str) -> anyhow::Result<i64> {
+    let owner = owner(task);
+    let round = task.round + 1;
+    let brief = format!("{findings}\n\nThe original spec:\n{}", task.spec);
+    let id = d.store.add_task(
+        &NewTask {
+            product: &task.product,
+            role: &owner,
+            title: &format!("Fix: {}", feature(title)),
+            brief: &brief,
+            priority: task.priority + 1,
+            parent: Some(task.id),
+            kind: "work",
+            branch: Some(branch),
+            owner_role: Some(&owner),
+            round,
+            after: None,
+            spec: &task.spec,
+        },
+        (d.now)(),
+    )?;
+    if round >= MAX_ROUNDS {
+        let q = format!("`{branch}` failed its gates {round} times. Latest: {}", crate::hook::truncate(findings, 500));
+        d.store.wait_for_founder(id, Some(&q), None, (d.now)())?;
+        (d.notify)(&format!("❓ #{id} {}\n{q}\nReply /answer {id} <guidance> to try again.", feature(title)), &[]);
     }
-    t
+    Ok(id)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn record(d: &Deps, task: &Task, o: &Outcome, repo: &str, base: &str, branch: &str, started: f64) -> anyhow::Result<()> {
+/// Records a judgment of the builder's work, tagged with the builder's current prompt version.
+fn judged(d: &Deps, task: &Task, stage: &str, passed: bool, score: Option<i64>, failed: &str) -> anyhow::Result<()> {
+    let owner = owner(task);
+    let version = super::evals::version(&personas::find(&owner));
+    d.store.add_eval(task.id, &owner, stage, passed, score, failed, (d.now)(), &version)
+}
+
+/// Moves a role to the lead model when it fails most of its recent evaluations.
+fn maybe_upgrade(d: &Deps, role: &str) -> anyhow::Result<()> {
+    let persona = personas::find(role);
+    let key = format!("upgrade:{}", persona.key);
+    if persona.tier != Tier::Build || d.store.get(&key)?.is_some() {
+        return Ok(());
+    }
+    let recent = d.store.recent_evals(role, UPGRADE_WINDOW)?;
+    let passed = recent.iter().filter(|(p, _)| *p).count();
+    if recent.len() >= 6 && passed * 2 < recent.len() {
+        d.store.put(&key, d.profile.lead_model)?;
+        (d.audit)("upgrade", json!({ "role": role, "passed": passed, "of": recent.len(), "model": d.profile.lead_model }));
+        (d.notify)(&format!("📈 {} passed only {passed} of its last {} evaluations; it now runs on {}.", persona.title, recent.len(), d.profile.lead_model), &[]);
+    }
+    Ok(())
+}
+
+fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, branch: &str, started: f64) -> anyhow::Result<()> {
     let now = (d.now)();
     let s = d.store;
     s.add_run(&Run {
@@ -214,21 +428,22 @@ fn record(d: &Deps, task: &Task, o: &Outcome, repo: &str, base: &str, branch: &s
         s.put("limits", &serde_json::to_string(&l)?)?;
     }
     let name = format!("#{} {}", task.id, task.title);
-    let owner = task.owner_role.clone().unwrap_or_else(|| task.role.clone());
-    let next = |role: &str, title: String, brief: &str, kind: &str, round: i64, priority: i64| {
+    let owner = owner(task);
+    let next = |role: &str, title: String, brief: &str, kind: &str| {
         s.add_task(
             &NewTask {
                 product: &task.product,
                 role,
                 title: &title,
                 brief,
-                priority,
+                priority: task.priority + 1,
                 parent: Some(task.id),
                 kind,
                 branch: Some(branch),
                 owner_role: Some(&owner),
-                round,
+                round: task.round,
                 after: None,
+                spec: &task.spec,
             },
             now,
         )
@@ -236,52 +451,58 @@ fn record(d: &Deps, task: &Task, o: &Outcome, repo: &str, base: &str, branch: &s
     match o.kind {
         Kind::Done => {
             s.set_status(task.id, "done", Some(&o.summary), None, now)?;
-            // Follow-ups run in order, each after the one before has landed, the first after this
-            // task's own work. Reviews add at most one; repeats of an existing task are dropped, and
-            // a full queue takes only the planning roles' tasks.
-            let mut after = task.id;
-            let planner = super::personas::find(&task.role).tier == super::personas::Tier::Lead;
-            let limit = if task.kind == "work" { o.follow_ups.len() } else { 1 };
-            let mut queued = 0;
-            for f in o.follow_ups.iter().take(limit) {
-                if s.has_similar(&task.product, &f.title)? || (!planner && s.queued(&task.product)? >= MAX_QUEUED) {
-                    continue;
-                }
-                let role = super::personas::find(&f.role);
-                let role = if role.key == "engineer" && super::personas::key(&f.role) != "engineer" { f.role.trim().to_string() } else { role.key };
-                let brief = format!("{}\n\nQueued by {} in task #{}: {}", f.brief, task.role, task.id, feature(&task.title));
-                let new = NewTask { product: &task.product, role: &role, title: &f.title, brief: &brief, priority: task.priority - 1, parent: Some(task.id), after: Some(after), ..Default::default() };
-                after = s.add_task(&new, now)?;
-                queued += 1;
-            }
+            let queued = follow_ups(d, task, o)?;
             let more = if queued == 0 { String::new() } else { format!("\n+{queued} follow-up task(s) queued.") };
             match task.kind.as_str() {
-                "review" | "security" => {
-                    if o.verdict.as_deref() == Some("approve") {
-                        let docs = super::git::docs_only(&d.repo.changed_files(Path::new(repo), base, branch));
-                        if task.kind == "review" && !docs {
-                            next("appsec-engineer", format!("Security review: {}", feature(&task.title)), "", "security", task.round, task.priority)?;
-                        } else {
-                            merge(d, task, repo, branch, feature(&task.title))?;
-                        }
-                    } else {
-                        let findings = format!("The {} asked for changes on this branch:\n{}", if task.kind == "review" { "code review" } else { "security review" }, o.summary);
-                        let fix = next(&owner, format!("Fix: {}", feature(&task.title)), &findings, "work", task.round + 1, task.priority + 1)?;
-                        if task.round + 1 >= MAX_ROUNDS {
-                            let q = format!("`{branch}` failed review {MAX_ROUNDS} times. Latest findings: {}", o.summary);
-                            s.wait_for_founder(fix, Some(&q), None, now)?;
-                            (d.notify)(&format!("❓ #{fix} {}\n{q}\nReply /answer {fix} <guidance> to try again.", feature(&task.title)), &[]);
+                "eval" | "review" | "security" => {
+                    let approved = o.verdict.as_deref() == Some("approve");
+                    let failed = o.failed.join("; ");
+                    judged(d, task, &task.kind, approved, o.score, &failed)?;
+                    if task.kind == "eval" {
+                        maybe_upgrade(d, &owner)?;
+                        let version = super::evals::version(&personas::find(&owner));
+                        if let Some(warning) = super::evals::canary(s, &owner, &version)? {
+                            (d.notify)(&warning, &[]);
                         }
                     }
+                    if !approved {
+                        let who = match task.kind.as_str() {
+                            "eval" => "evaluator",
+                            "review" => "code review",
+                            _ => "security review",
+                        };
+                        let criteria = if failed.is_empty() { String::new() } else { format!("\nFailed criteria: {failed}") };
+                        fix(d, task, branch, &task.title, &format!("The {who} asked for changes:\n{}{criteria}", o.summary))?;
+                    } else if task.kind == "eval" && !docs {
+                        next("code-reviewer", format!("Review: {}", feature(&task.title)), "", "review")?;
+                    } else if task.kind == "review" && !docs {
+                        next("appsec-engineer", format!("Security review: {}", feature(&task.title)), "", "security")?;
+                    } else {
+                        merge(d, task, branch, feature(&task.title))?;
+                    }
                 }
-                _ if d.repo.commits_ahead(Path::new(repo), base, branch) > 0 => {
-                    next("code-reviewer", format!("Review: {}", feature(&task.title)), "", "review", task.round, task.priority + 1)?;
-                    (d.notify)(&format!("✅ {name}\n{}\nIn review.{more}", o.summary), &[]);
-                }
-                _ => {
-                    s.land(task.id)?;
-                    (d.notify)(&format!("✅ {name}\n{}{more}", o.summary), &[]);
-                }
+                _ => match gates {
+                    None => {
+                        s.land(task.id)?;
+                        (d.notify)(&format!("✅ {name}\n{}{more}", o.summary), &[]);
+                    }
+                    Some(Gates { failure: Some(f), .. }) => {
+                        (d.audit)("gate.failed", json!({ "task": task.id, "branch": branch, "why": crate::hook::truncate(&f, 300) }));
+                        fix(d, task, branch, &task.title, &f)?;
+                    }
+                    Some(Gates { failure: None, report, docs }) => {
+                        let brief = format!(
+                            "Judge task #{} by the {} (`{owner}`).\n\nThe spec:\n{}\n\nWhat the worker claims:\n{}\n\n{report}{}",
+                            task.id,
+                            personas::find(&owner).title,
+                            task.spec,
+                            o.summary,
+                            if docs { "\n\nThis change is documentation only." } else { "" }
+                        );
+                        next("evaluator", format!("Evaluate: {}", feature(&task.title)), &brief, "eval")?;
+                        (d.notify)(&format!("✅ {name}\n{}\nChecks passed; now evaluated and reviewed.{more}", o.summary), &[]);
+                    }
+                },
             }
         }
         Kind::Blocked => {
@@ -315,54 +536,33 @@ fn record(d: &Deps, task: &Task, o: &Outcome, repo: &str, base: &str, branch: &s
             }
         }
     }
-    (d.audit)("task.end", json!({ "task": task.id, "outcome": o.kind.key(), "verdict": o.verdict, "summary": o.summary, "branch": branch, "session": o.session }));
+    (d.audit)(
+        "task.end",
+        json!({ "task": task.id, "kind": task.kind, "outcome": o.kind.key(), "verdict": o.verdict, "score": o.score, "summary": o.summary, "branch": branch, "session": o.session }),
+    );
     Ok(())
 }
 
-/// Merges an approved branch. Returns false when it must wait for a clean checkout.
-fn merge(d: &Deps, task: &Task, repo: &str, branch: &str, title: &str) -> anyhow::Result<bool> {
-    let base = d.repo.default_branch(Path::new(repo))?;
-    match d.repo.merge(Path::new(repo), &base, branch, &format!("Merge {branch}: {title}"))? {
-        Merge::Merged(sha) => {
-            d.store.land_branch(branch)?;
-            (d.audit)("merge", json!({ "task": task.id, "branch": branch, "base": base, "commit": sha }));
-            (d.notify)(&format!("🚀 Merged into {base}: {title}\n{branch} · {}", &sha[..sha.len().min(10)]), &[]);
-            Ok(true)
+/// Queues a finished task's follow-ups. They run in order, each after the one before has landed,
+/// the first after this task's own work. Judges add at most one; repeats of an existing task are
+/// dropped, and a full queue takes only the planning roles' tasks.
+fn follow_ups(d: &Deps, task: &Task, o: &Outcome) -> anyhow::Result<usize> {
+    let s = d.store;
+    let mut after = task.id;
+    let planner = personas::find(&task.role).tier == Tier::Lead;
+    let limit = if task.kind == "work" { o.follow_ups.len() } else { 1 };
+    let mut queued = 0;
+    for f in o.follow_ups.iter().take(limit) {
+        if s.has_similar(&task.product, &f.title)? || (!planner && s.queued(&task.product)? >= MAX_QUEUED) {
+            continue;
         }
-        Merge::Conflict => {
-            let owner = task.owner_role.clone().unwrap_or_else(|| task.role.clone());
-            let brief = format!("`{branch}` no longer merges cleanly into `{base}`. Merge `{base}` into the branch, resolve the conflicts keeping both sides' intent, and make the tests pass.");
-            d.store.add_task(
-                &NewTask {
-                    product: &task.product,
-                    role: &owner,
-                    title: &format!("Resolve conflicts: {title}"),
-                    brief: &brief,
-                    priority: task.priority + 1,
-                    parent: Some(task.id),
-                    kind: "work",
-                    branch: Some(branch),
-                    owner_role: Some(&owner),
-                    round: task.round,
-                    after: None,
-                },
-                (d.now)(),
-            )?;
-            Ok(true)
-        }
-        Merge::Dirty(dir) => {
-            let mut list = pending(d.store);
-            if !list.iter().any(|p| p.branch == branch) {
-                list.push(Pending { task: task.id, product: task.product.clone(), branch: branch.into(), title: title.into() });
-                set_pending(d.store, &list)?;
-                (d.notify)(
-                    &format!("⏸ {title} is approved, but {base} in {} has uncommitted changes. jazari merges it once they are committed or stashed.", dir.display()),
-                    &[],
-                );
-            }
-            Ok(false)
-        }
+        let role = personas::resolve(&f.role);
+        let brief = format!("{}\n\nQueued by {} in task #{}: {}", f.brief, task.role, task.id, feature(&task.title));
+        let new = NewTask { product: &task.product, role: &role, title: &f.title, brief: &brief, priority: task.priority - 1, parent: Some(task.id), after: Some(after), ..Default::default() };
+        after = s.add_task(&new, (d.now)())?;
+        queued += 1;
     }
+    Ok(queued)
 }
 
 #[cfg(test)]
@@ -372,18 +572,33 @@ mod tests {
     use crate::jazari::worker::tests::{limit_line, result_line};
     use std::cell::{Cell, RefCell};
 
-    /// Plays back canned lines, one list per run, and keeps the prompts it was given.
-    struct Script(RefCell<Vec<Vec<String>>>, RefCell<Vec<String>>);
+    /// Plays back canned worker runs and answers check runs, keeping what it was asked.
+    #[derive(Default)]
+    struct Script {
+        runs: RefCell<Vec<Vec<String>>>,
+        prompts: RefCell<Vec<String>>,
+        systems: RefCell<Vec<String>>,
+        read_only: RefCell<Vec<bool>>,
+        /// Exit code and output per check run; passing with no output when empty.
+        checks: RefCell<Vec<(i32, String)>>,
+        check_dirs: RefCell<Vec<String>>,
+    }
 
     impl Runner for Script {
-        fn run(&self, _c: &str, _w: &str, cmd: &[String], line: &mut dyn FnMut(&str)) -> anyhow::Result<()> {
-            self.1.borrow_mut().push(cmd.iter().position(|a| a == "-p").map(|i| cmd[i + 1].clone()).unwrap_or_default());
-            let lines = {
-                let mut s = self.0.borrow_mut();
-                if s.is_empty() { Vec::new() } else { s.remove(0) }
-            };
+        fn run(&self, _c: &str, dir: &str, cmd: &[String], line: &mut dyn FnMut(&str)) -> anyhow::Result<i32> {
+            if cmd[0] == "sh" {
+                self.check_dirs.borrow_mut().push(dir.into());
+                let (code, out) = { let mut c = self.checks.borrow_mut(); if c.is_empty() { (0, "ok".to_string()) } else { c.remove(0) } };
+                out.lines().for_each(&mut *line);
+                return Ok(code);
+            }
+            let arg = |k: &str| cmd.iter().position(|a| a == k).map(|i| cmd[i + 1].clone()).unwrap_or_default();
+            self.prompts.borrow_mut().push(arg("-p"));
+            self.systems.borrow_mut().push(arg("--append-system-prompt"));
+            self.read_only.borrow_mut().push(cmd.iter().any(|a| a == "--allowedTools"));
+            let lines = { let mut s = self.runs.borrow_mut(); if s.is_empty() { Vec::new() } else { s.remove(0) } };
             lines.iter().for_each(|l| line(l));
-            Ok(())
+            Ok(0)
         }
     }
 
@@ -391,8 +606,14 @@ mod tests {
     struct FakeRepo {
         ahead: Cell<usize>,
         files: RefCell<Vec<String>>,
-        merges: RefCell<Vec<Merge>>,
+        secrets: RefCell<Vec<String>>,
+        stages: RefCell<Vec<Stage>>,
         merged: RefCell<Vec<String>>,
+        discarded: Cell<usize>,
+    }
+
+    fn staged() -> Staged {
+        Staged::for_tests("/repos/shop/.jazari/merge", "abc123def456")
     }
 
     impl Repo for FakeRepo {
@@ -409,10 +630,19 @@ mod tests {
         fn changed_files(&self, _r: &Path, _b: &str, _br: &str) -> Vec<String> {
             self.files.borrow().clone()
         }
-        fn merge(&self, _r: &Path, _b: &str, branch: &str, _m: &str) -> anyhow::Result<Merge> {
-            self.merged.borrow_mut().push(branch.into());
-            let mut m = self.merges.borrow_mut();
-            Ok(if m.is_empty() { Merge::Merged("abc123def456".into()) } else { m.remove(0) })
+        fn secrets(&self, _r: &Path, _b: &str, _br: &str) -> Vec<String> {
+            self.secrets.borrow().clone()
+        }
+        fn stage(&self, _r: &Path, _b: &str, _br: &str, _m: &str) -> anyhow::Result<Stage> {
+            let mut s = self.stages.borrow_mut();
+            Ok(if s.is_empty() { Stage::Ready(staged()) } else { s.remove(0) })
+        }
+        fn advance(&self, _r: &Path, _b: &str, s: &Staged) -> anyhow::Result<String> {
+            self.merged.borrow_mut().push(s.new.clone());
+            Ok(s.new.clone())
+        }
+        fn discard(&self, _r: &Path, _s: &Staged) {
+            self.discarded.set(self.discarded.get() + 1);
         }
     }
 
@@ -430,15 +660,12 @@ mod tests {
         fn new(runs: Vec<Vec<String>>) -> Self {
             let store = Store::memory();
             store.add_product("shop", "/repos/shop", 0.0).unwrap();
-            World {
-                store,
-                runner: Script(RefCell::new(runs), RefCell::default()),
-                repo: FakeRepo::default(),
-                now: Cell::new(1000.0),
-                paused: Cell::new(false),
-                sent: RefCell::default(),
-                audit: RefCell::default(),
-            }
+            let runner = Script::default();
+            *runner.runs.borrow_mut() = runs;
+            let repo = FakeRepo::default();
+            repo.ahead.set(1);
+            repo.files.borrow_mut().push("src/login.rs".into());
+            World { store, runner, repo, now: Cell::new(1000.0), paused: Cell::new(false), sent: RefCell::default(), audit: RefCell::default() }
         }
 
         fn tick(&self) -> Tick {
@@ -462,7 +689,12 @@ mod tests {
         }
 
         fn add(&self, title: &str) -> i64 {
-            self.store.add_task(&NewTask { product: "shop", role: "backend-engineer", title, priority: 2, ..Default::default() }, 0.0).unwrap()
+            let t = NewTask { product: "shop", role: "backend-engineer", title, brief: "Accept: 5 tries a minute.", priority: 2, ..Default::default() };
+            self.store.add_task(&t, 0.0).unwrap()
+        }
+
+        fn next(&self) -> Task {
+            self.store.next_task().unwrap().expect("a queued task")
         }
 
         fn last(&self) -> String {
@@ -478,101 +710,168 @@ mod tests {
         vec![limit_line(0.1, "allowed"), result_line(v)]
     }
 
+    fn approve() -> Vec<String> {
+        done(json!({"verdict": "approve", "score": 5}))
+    }
+
     #[test]
-    fn a_built_branch_goes_through_review_and_security_to_a_merge() {
-        let w = World::new(vec![
-            done(json!({"follow_ups": [{"role": "qa-engineer", "title": "Test it"}]})),
-            done(json!({"verdict": "approve"})),
-            done(json!({"verdict": "approve"})),
-        ]);
-        w.repo.ahead.set(2);
-        w.repo.files.borrow_mut().push("src/login.rs".into());
+    fn built_work_is_checked_evaluated_reviewed_secured_then_merged_after_checks_on_the_merge() {
+        let w = World::new(vec![done(json!({"follow_ups": [{"role": "qa-engineer", "title": "Test it"}]})), approve(), approve(), approve()]);
         assert_eq!(w.tick(), Tick::Idle);
         let id = w.add("Build login");
         assert_eq!(w.tick(), Tick::Ran { task: id, kind: Kind::Done });
-        assert!(w.last().contains("In review") && w.last().contains("+1 follow-up"));
-        let review = w.store.next_task().unwrap().unwrap();
-        assert_eq!((review.kind.as_str(), review.role.as_str(), review.title.as_str()), ("review", "code-reviewer", "Review: Build login"));
-        assert_eq!((review.branch.as_deref(), review.owner_role.as_deref(), review.priority), (Some("jazari/task-1"), Some("backend-engineer"), 3));
+        assert_eq!(*w.runner.check_dirs.borrow(), vec!["/repos/shop/wt-1"], "the harness ran the checks on the branch");
+        assert!(w.last().contains("Checks passed") && w.last().contains("+1 follow-up"));
+        let eval = w.next();
+        assert_eq!((eval.kind.as_str(), eval.role.as_str(), eval.title.as_str(), eval.owner_role.as_deref()), ("eval", "evaluator", "Evaluate: Build login", Some("backend-engineer")));
+        assert!(eval.brief.contains("Accept: 5 tries a minute.") && eval.brief.contains("What the worker claims:\nDid it.") && eval.brief.contains("`company/checks.sh`: passed"));
         w.tick();
-        assert!(w.runner.1.borrow()[1].contains("reviewing the branch `jazari/task-1` against `main`"));
-        let sec = w.store.next_task().unwrap().unwrap();
-        assert_eq!((sec.kind.as_str(), sec.role.as_str()), ("security", "appsec-engineer"));
+        assert!(*w.runner.read_only.borrow().last().unwrap(), "the evaluator can't write");
+        let system = w.runner.systems.borrow().last().unwrap().clone();
+        assert!(system.contains("# The rubric for the Backend Engineer") && system.contains("## code") && system.contains("5: ready to ship"));
+        assert_eq!(w.next().kind, "review");
         w.tick();
-        assert_eq!(*w.repo.merged.borrow(), vec!["jazari/task-1"]);
+        assert_eq!(w.next().kind, "security");
+        w.tick();
+        assert_eq!(*w.repo.merged.borrow(), vec!["abc123def456"]);
+        assert_eq!(w.runner.check_dirs.borrow().last().unwrap(), "/repos/shop/.jazari/merge", "the checks ran on the merged result");
         assert!(w.last().starts_with("🚀 Merged into main: Build login"), "{}", w.last());
-        assert!(w.audit.borrow().contains(&"merge".to_string()));
-        // The follow-up runs once the feature has landed.
-        let next = w.store.next_task().unwrap().unwrap();
+        let next = w.next();
         assert_eq!((next.title.as_str(), next.after_task), ("Test it", Some(id)));
+        let q = w.store.quality().unwrap();
+        assert!(q.iter().any(|(r, s, n, p, _)| r == "backend-engineer" && s == "eval" && *n == 1 && *p == 1));
+        assert!(q.iter().any(|(r, s, ..)| r == "backend-engineer" && s == "checks"));
+    }
+
+    #[test]
+    fn failing_checks_and_secrets_go_back_to_the_builder_without_spending_an_evaluation() {
+        let w = World::new(vec![done(json!({})), done(json!({}))]);
+        w.runner.checks.borrow_mut().push((1, "FAILED test_login - assert 401 == 200".into()));
+        w.add("Build login");
+        w.tick();
+        let fix = w.next();
+        assert_eq!((fix.title.as_str(), fix.round, fix.kind.as_str(), fix.branch.as_deref()), ("Fix: Build login", 1, "work", Some("jazari/task-1")));
+        assert!(fix.brief.contains("assert 401 == 200") && fix.brief.contains("The original spec:\nAccept: 5 tries a minute."));
+        assert_eq!(fix.spec, "Accept: 5 tries a minute.");
+        w.repo.secrets.borrow_mut().push("config.py".into());
+        w.tick();
+        let fix2 = w.next();
+        assert!(fix2.brief.contains("secret scan found credentials in: config.py") && fix2.round == 2);
+        assert!(w.runner.read_only.borrow().iter().all(|r| !r), "no evaluator ran");
+    }
+
+    #[test]
+    fn a_missing_checks_script_is_required_for_code_but_not_for_docs() {
+        let w = World::new(vec![done(json!({})), done(json!({}))]);
+        w.runner.checks.borrow_mut().extend([(3, NO_CHECKS.to_string()), (3, NO_CHECKS.to_string())]);
+        w.add("Build login");
+        w.tick();
+        assert!(w.next().brief.contains("This repo has no `company/checks.sh`"));
+        let w = World::new(vec![done(json!({})), approve()]);
+        w.runner.checks.borrow_mut().push((3, NO_CHECKS.to_string()));
+        *w.repo.files.borrow_mut() = vec!["company/VISION.md".into()];
+        w.add("Write the vision");
+        w.tick();
+        let eval = w.next();
+        assert!(eval.brief.contains("not set up") && eval.brief.contains("documentation only"));
+        w.tick();
+        assert_eq!(w.repo.merged.borrow().len(), 1, "docs merge after the evaluator alone");
+    }
+
+    #[test]
+    fn a_failed_evaluation_sends_the_criteria_back_and_repeated_failures_upgrade_the_role() {
+        let fail = || done(json!({"verdict": "changes", "score": 2, "summary": "No test for lockout.",
+            "criteria": [{"name": "Tests prove the behavior", "pass": false}, {"name": "Scope", "pass": true}]}));
+        let w = World::new(vec![]);
+        for i in 0..6 {
+            *w.runner.runs.borrow_mut() = vec![fail()];
+            let t = NewTask { product: "shop", role: "evaluator", title: &format!("Evaluate: F{i}"), priority: 50, kind: "eval", branch: Some("b"), owner_role: Some("backend-engineer"), spec: "S", ..Default::default() };
+            w.store.add_task(&t, 0.0).unwrap();
+            w.tick();
+            let fix = w.store.tasks(None, 100).unwrap().into_iter().find(|t| t.title == format!("Fix: F{i}")).unwrap();
+            assert!(fix.brief.contains("The evaluator asked for changes:\nNo test for lockout.\nFailed criteria: Tests prove the behavior"));
+            assert_eq!(fix.role, "backend-engineer");
+            w.store.set_status(fix.id, "done", None, None, 0.0).unwrap();
+        }
+        assert!(w.last().contains("📈 Backend Engineer passed only 0 of its last 6 evaluations"), "{}", w.last());
+        assert_eq!(w.store.get("upgrade:backend-engineer").unwrap().as_deref(), Some("claude-opus-5-5"));
+        let d_model = {
+            let p = personas::find("backend-engineer");
+            let now = || 0.0;
+            let paused = || false;
+            let ensure = |_: &str, _: &str| Ok(String::new());
+            let notify = |_: &str, _: &[Button]| {};
+            let audit = |_: &str, _: serde_json::Value| {};
+            let d = Deps { store: &w.store, runner: &w.runner, repo: &w.repo, profile: Plan::Max5.profile(), now: &now, paused: &paused, ensure: &ensure, notify: &notify, audit: &audit };
+            model_for(&d, &p)
+        };
+        assert_eq!(d_model, "claude-opus-5-5");
+    }
+
+    #[test]
+    fn checks_failing_on_the_merged_result_hold_main_and_send_a_fix() {
+        let w = World::new(vec![approve()]);
+        w.runner.checks.borrow_mut().push((1, "conflicting migrations".into()));
+        let t = NewTask { product: "shop", role: "appsec-engineer", title: "Security review: Login", kind: "security", branch: Some("jazari/task-1"), owner_role: Some("frontend-engineer"), spec: "S", ..Default::default() };
+        w.store.add_task(&t, 0.0).unwrap();
+        w.tick();
+        assert!(w.repo.merged.borrow().is_empty() && w.repo.discarded.get() == 1);
+        let fix = w.next();
+        assert_eq!((fix.title.as_str(), fix.role.as_str()), ("Fix: Login", "frontend-engineer"));
+        assert!(fix.brief.contains("fails once `main` is merged") && fix.brief.contains("conflicting migrations"));
+    }
+
+    #[test]
+    fn a_conflict_or_a_dirty_checkout_is_handled_without_losing_the_merge() {
+        let w = World::new(vec![approve(), approve()]);
+        w.repo.stages.borrow_mut().extend([Stage::Conflict, Stage::Dirty("/repos/shop".into())]);
+        fn sec(title: &str) -> NewTask<'_> {
+            NewTask { product: "shop", role: "appsec-engineer", title, kind: "security", branch: Some("jazari/task-1"), owner_role: Some("frontend-engineer"), spec: "S", ..Default::default() }
+        }
+        w.store.add_task(&sec("Security review: Login"), 0.0).unwrap();
+        w.tick();
+        let fix = w.next();
+        assert!(fix.title == "Fix: Login" && fix.brief.contains("no longer merges cleanly"));
+        w.store.set_status(fix.id, "done", None, None, 0.0).unwrap();
+        w.store.add_task(&sec("Security review: Signup"), 0.0).unwrap();
+        w.tick();
+        assert!(w.last().contains("uncommitted changes"));
+        assert_eq!(w.tick(), Tick::Idle);
+        assert!(w.last().starts_with("🚀 Merged into main: Signup"), "{}", w.last());
+        assert!(pending(&w.store).is_empty());
     }
 
     #[test]
     fn a_plan_s_tasks_run_one_after_another_as_each_lands() {
         let plan = json!({"follow_ups": [{"role": "engineer", "title": "Skeleton"}, {"role": "engineer", "title": "Engine"}]});
-        let w = World::new(vec![done(plan), done(json!({"verdict": "approve"})), done(json!({}))]);
-        w.repo.ahead.set(1);
-        w.repo.files.borrow_mut().push("company/VISION.md".into());
+        let w = World::new(vec![done(plan), approve(), done(json!({}))]);
+        *w.repo.files.borrow_mut() = vec!["company/VISION.md".into()];
         w.store.add_task(&NewTask { product: "shop", role: "chief-of-staff", title: "Plan: notes", priority: 100, ..Default::default() }, 0.0).unwrap();
         w.tick();
-        assert_eq!(w.store.next_task().unwrap().unwrap().title, "Review: Plan: notes", "the plan's tasks wait for it to merge");
+        assert_eq!(w.next().title, "Evaluate: Plan: notes", "the plan's tasks wait for it to merge");
         w.tick();
-        assert_eq!(w.store.next_task().unwrap().unwrap().title, "Skeleton");
+        assert_eq!(w.next().title, "Skeleton");
         w.repo.ahead.set(0);
         w.tick();
-        assert_eq!(w.store.next_task().unwrap().unwrap().title, "Engine", "nothing to merge counts as landed");
+        assert_eq!(w.next().title, "Engine", "nothing to merge counts as landed");
     }
 
     #[test]
-    fn follow_ups_use_role_keys_skip_repeats_and_reviews_add_one() {
+    fn follow_ups_use_role_keys_skip_repeats_and_judges_add_one() {
         let w = World::new(vec![
             done(json!({"follow_ups": [{"role": "Backend Engineer", "title": "Add CI"}, {"role": "qa", "title": "add ci!"}, {"role": "devops", "title": "Pin deps"}]})),
-            done(json!({"verdict": "approve", "follow_ups": [{"role": "engineer", "title": "One"}, {"role": "engineer", "title": "Two"}]})),
+            done(json!({"verdict": "changes", "follow_ups": [{"role": "engineer", "title": "One"}, {"role": "engineer", "title": "Two"}]})),
         ]);
         w.repo.ahead.set(0);
         w.add("Build login");
         w.tick();
         let titles: Vec<_> = w.store.tasks(None, 20).unwrap().into_iter().filter(|t| t.status == "queued").map(|t| (t.title, t.role)).collect();
         assert_eq!(titles.len(), 2);
-        assert!(titles.contains(&("Add CI".into(), "backend-engineer".into())) && titles.contains(&("Pin deps".into(), "devops".into())));
-        w.store.add_task(&NewTask { product: "shop", role: "code-reviewer", title: "Review: X", kind: "review", branch: Some("b"), ..Default::default() }, 0.0).unwrap();
-        w.store.set_status(2, "done", None, None, 0.0).unwrap();
-        w.store.set_status(3, "done", None, None, 0.0).unwrap();
-        w.tick();
+        assert!(titles.contains(&("Add CI".into(), "backend-engineer".into())) && titles.contains(&("Pin deps".into(), "platform-engineer".into())));
+        let t = NewTask { product: "shop", role: "evaluator", title: "Evaluate: X", kind: "eval", branch: Some("b"), owner_role: Some("engineer"), ..Default::default() };
+        let judge = w.store.add_task(&NewTask { priority: 50, ..t }, 0.0).unwrap();
+        assert_eq!(w.tick(), Tick::Ran { task: judge, kind: Kind::Done });
         assert!(w.store.has_similar("shop", "One").unwrap() && !w.store.has_similar("shop", "Two").unwrap());
-    }
-
-    #[test]
-    fn docs_skip_the_security_review_and_changes_go_back_to_the_builder() {
-        let w = World::new(vec![
-            done(json!({})),
-            done(json!({"verdict": "changes", "summary": "Missing tests."})),
-            done(json!({})),
-            done(json!({"verdict": "approve"})),
-        ]);
-        w.repo.ahead.set(1);
-        w.repo.files.borrow_mut().push("company/VISION.md".into());
-        w.add("Write the vision");
-        w.tick();
-        w.tick();
-        let fix = w.store.next_task().unwrap().unwrap();
-        assert_eq!((fix.title.as_str(), fix.role.as_str(), fix.round, fix.kind.as_str()), ("Fix: Write the vision", "backend-engineer", 1, "work"));
-        assert!(fix.brief.contains("code review asked for changes") && fix.brief.contains("Missing tests."));
-        w.tick();
-        assert_eq!(w.store.next_task().unwrap().unwrap().title, "Review: Write the vision");
-        w.tick();
-        assert_eq!(w.repo.merged.borrow().len(), 1, "docs merge after the code review alone");
-    }
-
-    #[test]
-    fn three_failed_reviews_ask_the_founder() {
-        let w = World::new(vec![done(json!({"verdict": "changes", "summary": "Still broken."}))]);
-        let id = w.store.add_task(&NewTask { product: "shop", role: "code-reviewer", title: "Review: Login", kind: "review", branch: Some("jazari/task-1"), owner_role: Some("backend-engineer"), round: 2, ..Default::default() }, 0.0).unwrap();
-        w.tick();
-        let fix = w.store.tasks(None, 10).unwrap().into_iter().find(|t| t.parent == Some(id)).unwrap();
-        assert_eq!((fix.status.as_str(), fix.round), ("blocked", 3));
-        assert!(fix.question.unwrap().contains("failed review 3 times"));
-        assert!(w.last().contains(&format!("/answer {}", fix.id)));
     }
 
     #[test]
@@ -595,29 +894,6 @@ mod tests {
     }
 
     #[test]
-    fn a_dirty_checkout_holds_the_merge_until_it_is_clean() {
-        let w = World::new(vec![done(json!({"verdict": "approve"}))]);
-        w.repo.merges.borrow_mut().push(Merge::Dirty("/repos/shop".into()));
-        w.store.add_task(&NewTask { product: "shop", role: "appsec-engineer", title: "Security review: Login", kind: "security", branch: Some("jazari/task-1"), ..Default::default() }, 0.0).unwrap();
-        w.tick();
-        assert!(w.last().contains("uncommitted changes"));
-        assert_eq!(pending(&w.store).len(), 1);
-        assert_eq!(w.tick(), Tick::Idle);
-        assert_eq!(pending(&w.store).len(), 0);
-        assert!(w.last().starts_with("🚀 Merged into main: Login"), "{}", w.last());
-    }
-
-    #[test]
-    fn a_conflict_sends_the_branch_back_to_its_builder() {
-        let w = World::new(vec![done(json!({"verdict": "approve"}))]);
-        w.repo.merges.borrow_mut().push(Merge::Conflict);
-        w.store.add_task(&NewTask { product: "shop", role: "appsec-engineer", title: "Security review: Login", kind: "security", branch: Some("jazari/task-1"), owner_role: Some("frontend-engineer"), ..Default::default() }, 0.0).unwrap();
-        w.tick();
-        let t = w.store.next_task().unwrap().unwrap();
-        assert_eq!((t.title.as_str(), t.role.as_str(), t.branch.as_deref()), ("Resolve conflicts: Login", "frontend-engineer", Some("jazari/task-1")));
-    }
-
-    #[test]
     fn a_failing_task_is_retried_then_set_aside() {
         let w = World::new(vec![vec![], vec![], vec![]]);
         let id = w.add("Flaky");
@@ -636,6 +912,7 @@ mod tests {
     #[test]
     fn a_refused_run_is_requeued_and_jazari_sleeps_until_the_reset() {
         let w = World::new(vec![vec![limit_line(1.0, "rejected")], done(json!({}))]);
+        w.repo.ahead.set(0);
         let id = w.add("Build login");
         assert_eq!(w.tick(), Tick::Ran { task: id, kind: Kind::Limited });
         let t = w.store.task(id).unwrap().unwrap();

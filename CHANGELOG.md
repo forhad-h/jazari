@@ -13,9 +13,15 @@ GitHub release. Keep each bullet to one short line.
 - Finished, blocked and failing tasks are reported on Telegram; `marsad jazari audit` checks the hash-chained audit record
 - `marsad jazari new` and `/new` start a product from an idea: the Chief of Staff writes the vision, roadmap, ADR and threat model, then queues the first tasks
 - 36 roles (`marsad jazari personas`), from Chief of Staff to red team, each with its own mandate and model tier
-- Each task works in its own git worktree; built branches go through code review and security review, then merge into `main`
+- Each task works in its own git worktree, and approved branches merge into `main`
 - Workers' questions wait for `/answer`, and deploy, spend or contact requests wait for the Approve or Deny button
 - A worker run stops after 45 minutes
+- Quality gates before every merge: the harness runs `company/checks.sh` and a secret scan itself, an independent read-only evaluator scores the work against the role's rubric, then code and security review
+- The merge queue runs the checks again on the merged result before `main` moves
+- `marsad jazari quality` shows each role's pass rate and score per gate; a role that keeps failing moves up to the lead model
+- `marsad jazari evals` checks changes to personas, rubrics or the evaluator: free lint, then calibration cases with planted defects, with effort matched to the size of the change; nothing changed costs nothing
+- A judge that misses a planted defect blocks `marsad jazari run`; a changed role that does worse in live work is reported
+- `marsad jazari personas --export` lets you edit the roster and rubrics; role names workers use (developer, devops, qa) map to roster roles, and reworded duplicate tasks are dropped
 - A plan's tasks run in order: each starts once the one before it is merged into `main`
 - The worker image (`jazari-worker:2`) has Python 3, a C toolchain, ripgrep and shellcheck; workers install other tools in user space
 

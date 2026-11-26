@@ -39,6 +39,18 @@ CREATE TABLE IF NOT EXISTS runs (
     used_5h REAL,
     used_7d REAL
 );
+CREATE TABLE IF NOT EXISTS evals (
+    id INTEGER PRIMARY KEY,
+    task INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    passed INTEGER NOT NULL,
+    score INTEGER,
+    failed TEXT NOT NULL DEFAULT '',
+    at REAL NOT NULL,
+    version TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS evals_role ON evals(role, at);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -46,7 +58,7 @@ CREATE TABLE IF NOT EXISTS kv (
 ";
 
 /// Columns added after the first schema, so older databases gain them.
-const NEW_COLUMNS: [(&str, &str); 7] = [
+const NEW_COLUMNS: [(&str, &str); 8] = [
     ("kind", "TEXT NOT NULL DEFAULT 'work'"),
     ("owner_role", "TEXT"),
     ("round", "INTEGER NOT NULL DEFAULT 0"),
@@ -54,10 +66,11 @@ const NEW_COLUMNS: [(&str, &str); 7] = [
     ("approval", "TEXT"),
     ("after_task", "INTEGER"),
     ("landed", "INTEGER NOT NULL DEFAULT 0"),
+    ("spec", "TEXT NOT NULL DEFAULT ''"),
 ];
 
-/// What a task is: `work` builds, `review` and `security` judge a branch before it merges.
-pub const KINDS: [&str; 3] = ["work", "review", "security"];
+/// What a task is: `work` builds; `eval`, `review` and `security` judge a branch before it merges.
+pub const KINDS: [&str; 4] = ["work", "eval", "review", "security"];
 
 pub const STATUSES: [&str; 5] = ["queued", "running", "done", "blocked", "failed"];
 
@@ -91,6 +104,9 @@ pub struct Task {
     pub approval: Option<String>,
     /// A task whose work must be on the default branch before this one starts.
     pub after_task: Option<i64>,
+    /// The original request and its acceptance criteria, carried through evaluation, review and
+    /// fixes.
+    pub spec: String,
 }
 
 /// A task to queue. `kind` defaults to `work`.
@@ -107,7 +123,12 @@ pub struct NewTask<'a> {
     pub owner_role: Option<&'a str>,
     pub round: i64,
     pub after: Option<i64>,
+    /// Empty: the brief is the spec.
+    pub spec: &'a str,
 }
+
+/// How a role fares at one gate: (role, stage, judgments, passed, average score).
+pub type Quality = (String, String, i64, i64, Option<f64>);
 
 /// One finished worker run, for the record.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -126,6 +147,21 @@ pub struct Run {
 
 pub struct Store {
     conn: Connection,
+}
+
+/// A title's meaningful words: lowercase, 3+ letters, without filler.
+fn title_words(t: &str) -> std::collections::BTreeSet<String> {
+    const FILLER: [&str; 12] = ["the", "and", "for", "with", "when", "into", "from", "that", "this", "add", "fix", "once"];
+    t.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase).filter(|w| w.len() >= 3 && !FILLER.contains(&w.as_str())).collect()
+}
+
+/// How much two word sets share, against the smaller one.
+fn overlap(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>) -> f64 {
+    let small = a.len().min(b.len());
+    if small < 2 {
+        return 0.0;
+    }
+    a.intersection(b).count() as f64 / small as f64
 }
 
 /// A product name is also a container and branch name: lowercase letters, digits and dashes.
@@ -152,10 +188,11 @@ fn task_from(r: &rusqlite::Row) -> rusqlite::Result<Task> {
         question: r.get(14)?,
         approval: r.get(15)?,
         after_task: r.get(16)?,
+        spec: r.get(17)?,
     })
 }
 
-const TASK_COLUMNS: &str = "id, product, role, title, brief, priority, status, attempts, summary, branch, kind, parent, owner_role, round, question, approval, after_task";
+const TASK_COLUMNS: &str = "id, product, role, title, brief, priority, status, attempts, summary, branch, kind, parent, owner_role, round, question, approval, after_task, spec";
 
 impl Store {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
@@ -173,6 +210,10 @@ impl Store {
     fn init(conn: Connection) -> anyhow::Result<Self> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
+        let eval_cols: Vec<String> = conn.prepare("SELECT name FROM pragma_table_info('evals')")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        if !eval_cols.iter().any(|c| c == "version") {
+            conn.execute_batch("ALTER TABLE evals ADD COLUMN version TEXT NOT NULL DEFAULT ''")?;
+        }
         let have: Vec<String> = conn.prepare("SELECT name FROM pragma_table_info('tasks')")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
         for (col, ddl) in NEW_COLUMNS {
             if !have.iter().any(|h| h == col) {
@@ -208,9 +249,12 @@ impl Store {
         let kind = if t.kind.is_empty() { "work" } else { t.kind };
         anyhow::ensure!(KINDS.contains(&kind), "not a task kind: {kind}");
         self.conn.execute(
-            "INSERT INTO tasks (product, role, title, brief, priority, parent, kind, branch, owner_role, round, after_task, created, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
-            params![t.product, t.role, t.title.trim(), t.brief.trim(), t.priority, t.parent, kind, t.branch, t.owner_role, t.round, t.after, now],
+            "INSERT INTO tasks (product, role, title, brief, priority, parent, kind, branch, owner_role, round, after_task, spec, created, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+            params![
+                t.product, t.role, t.title.trim(), t.brief.trim(), t.priority, t.parent, kind, t.branch, t.owner_role, t.round, t.after,
+                if t.spec.trim().is_empty() { t.brief.trim() } else { t.spec.trim() }, now
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -309,19 +353,59 @@ impl Store {
         Ok(())
     }
 
-    /// Whether the product already has a task with this title (ignoring case, spaces and
-    /// punctuation) that isn't finished-and-failed.
+    /// Whether the product already has this task: the same title (ignoring case and punctuation)
+    /// anywhere, or a title sharing most of its words with a task still open.
     pub fn has_similar(&self, product: &str, title: &str) -> anyhow::Result<bool> {
         let norm = |t: &str| t.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
         let want = norm(title);
-        let mut st = self.conn.prepare("SELECT title FROM tasks WHERE product = ?1 AND status != 'failed'")?;
-        let titles = st.query_map([product], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        Ok(titles.iter().any(|t| norm(t) == want))
+        let words = title_words(title);
+        let mut st = self.conn.prepare("SELECT title, status FROM tasks WHERE product = ?1 AND status != 'failed'")?;
+        let rows = st.query_map([product], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows.iter().any(|(t, status)| norm(t) == want || (status != "done" && overlap(&words, &title_words(t)) >= 0.6)))
     }
 
     /// Queued tasks of a product.
     pub fn queued(&self, product: &str) -> anyhow::Result<i64> {
         Ok(self.conn.query_row("SELECT COUNT(*) FROM tasks WHERE product = ?1 AND status = 'queued'", [product], |r| r.get(0))?)
+    }
+
+    /// Records one judgment of a role's work: by the evaluator, a reviewer or the harness checks.
+    /// `version` is the role's prompt version when it did the work.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_eval(&self, task: i64, role: &str, stage: &str, passed: bool, score: Option<i64>, failed: &str, now: f64, version: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO evals (task, role, stage, passed, score, failed, at, version) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![task, role, stage, passed, score, failed, now, version],
+        )?;
+        Ok(())
+    }
+
+    /// A role's evaluator judgments split by version: (passed, total) for `current`, then for
+    /// every other version.
+    pub fn version_split(&self, role: &str, current: &str) -> anyhow::Result<(i64, i64, i64, i64)> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN version = ?2 THEN passed END), 0), COUNT(CASE WHEN version = ?2 THEN 1 END),
+                    COALESCE(SUM(CASE WHEN version != ?2 THEN passed END), 0), COUNT(CASE WHEN version != ?2 THEN 1 END)
+             FROM evals WHERE role = ?1 AND stage = 'eval'",
+            params![role, current],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?)
+    }
+
+    /// The role's last `n` evaluator judgments, newest first: (passed, score).
+    pub fn recent_evals(&self, role: &str, n: usize) -> anyhow::Result<Vec<(bool, Option<i64>)>> {
+        let mut st = self.conn.prepare("SELECT passed, score FROM evals WHERE role = ?1 AND stage = 'eval' ORDER BY at DESC, id DESC LIMIT ?2")?;
+        let rows = st.query_map(params![role, n as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Per role and stage: judgments, how many passed, the average score.
+    pub fn quality(&self) -> anyhow::Result<Vec<Quality>> {
+        let mut st = self.conn.prepare(
+            "SELECT role, stage, COUNT(*), SUM(passed), AVG(score) FROM evals GROUP BY role, stage ORDER BY role, stage",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub fn counts(&self) -> anyhow::Result<Vec<(String, i64)>> {
@@ -366,7 +450,11 @@ mod tests {
         assert!(s.set_status(a, "nonsense", None, None, 7.0).is_err());
         assert_eq!(s.counts().unwrap(), vec![("done".into(), 1), ("queued".into(), 2)]);
         assert!(s.has_similar("shop", "HIGH, newer!").unwrap() && !s.has_similar("shop", "high newest").unwrap());
-        assert_eq!(s.queued("shop").unwrap(), 2);
+        s.add_task(&NewTask { product: "shop", role: "e", title: "CLI: map PasswordTooLongError to exit code 2", ..Default::default() }, 9.0).unwrap();
+        assert!(s.has_similar("shop", "Map PasswordTooLongError and invalid UTF-8 to exit code 2 in the CLI").unwrap(), "a rewording of an open task");
+        assert!(!s.has_similar("shop", "Document the exit codes in the README").unwrap());
+        assert_eq!(s.queued("shop").unwrap(), 3);
+        assert_eq!(s.task(a).unwrap().unwrap().spec, "", "an empty brief is an empty spec");
         assert!(s.add_task(&NewTask { product: "shop", role: "x", title: "y", kind: "deploy", ..Default::default() }, 8.0).is_err());
     }
 
@@ -399,6 +487,19 @@ mod tests {
         let t = s.task(id).unwrap().unwrap();
         assert_eq!((t.status.as_str(), t.question, t.attempts), ("queued", None, 0));
         assert_eq!(t.brief, "Send codes.\n\nYou asked: Which SMS provider?\nThe founder replied: Twilio");
+    }
+
+    #[test]
+    fn judgments_add_up_per_role() {
+        let s = Store::memory();
+        s.add_eval(1, "backend-engineer", "eval", true, Some(5), "", 1.0, "v1").unwrap();
+        s.add_eval(2, "backend-engineer", "eval", false, Some(2), "Tests prove the behavior", 2.0, "v2").unwrap();
+        s.add_eval(2, "backend-engineer", "checks", false, None, "pytest failed", 2.0, "v2").unwrap();
+        assert_eq!(s.version_split("backend-engineer", "v2").unwrap(), (0, 1, 1, 1));
+        assert_eq!(s.recent_evals("backend-engineer", 5).unwrap(), vec![(false, Some(2)), (true, Some(5))]);
+        let q = s.quality().unwrap();
+        assert_eq!(q[0], ("backend-engineer".into(), "checks".into(), 1, 0, None));
+        assert_eq!(q[1], ("backend-engineer".into(), "eval".into(), 2, 1, Some(3.5)));
     }
 
     #[test]

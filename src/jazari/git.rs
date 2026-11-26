@@ -85,6 +85,7 @@ pub fn docs_only(files: &[String]) -> bool {
     !files.is_empty() && files.iter().all(|f| f.ends_with(".md") || f.ends_with(".txt") || f.starts_with("company/"))
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq)]
 pub enum Merge {
     Merged(String),
@@ -108,41 +109,101 @@ fn checked_out(repo: &Path, branch: &str) -> Option<PathBuf> {
     None
 }
 
-/// Merges `branch` into `base` with a merge commit, built in a scratch worktree, then moves
-/// `base` forward:
-/// - a clean checkout of it is fast-forwarded;
-/// - a dirty one is left alone;
-/// - with no checkout, the ref is moved only if it hasn't changed meanwhile.
-pub fn merge(repo: &Path, base: &str, branch: &str, message: &str) -> anyhow::Result<Merge> {
+/// A merge commit built in a scratch worktree, not yet on the base branch.
+#[derive(Debug, PartialEq)]
+pub struct Staged {
+    /// The scratch worktree holding the merge, where checks can run on it.
+    pub dir: PathBuf,
+    pub old: String,
+    pub new: String,
+    /// The base branch's checkout, if it has one.
+    checkout: Option<PathBuf>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Stage {
+    Ready(Staged),
+    Conflict,
+    Dirty(PathBuf),
+}
+
+#[cfg(test)]
+impl Staged {
+    pub fn for_tests(dir: &str, new: &str) -> Self {
+        Staged { dir: dir.into(), old: "0".into(), new: new.into(), checkout: None }
+    }
+}
+
+/// Builds the merge of `branch` into `base` in `<repo>/.jazari/merge`, leaving `base` alone.
+pub fn stage(repo: &Path, base: &str, branch: &str, message: &str) -> anyhow::Result<Stage> {
     exclude_jazari(repo)?;
     let checkout = checked_out(repo, base);
     if let Some(dir) = &checkout
         && !git(dir, &["status", "--porcelain", "--untracked-files=no"])?.is_empty()
     {
-        return Ok(Merge::Dirty(dir.clone()));
+        return Ok(Stage::Dirty(dir.clone()));
     }
     let old = git(repo, &["rev-parse", &format!("refs/heads/{base}")])?;
-    let scratch = repo.join(".jazari").join("merge");
-    remove(repo, &scratch);
-    let s = scratch.to_string_lossy().to_string();
-    git(repo, &["worktree", "add", "--detach", &s, &old])?;
-    let merged = git(&scratch, &["merge", "--no-ff", "-m", message, branch]);
-    let result = match merged {
-        Err(_) => {
-            let _ = git(&scratch, &["merge", "--abort"]);
-            Ok(Merge::Conflict)
-        }
-        Ok(_) => {
-            let new = git(&scratch, &["rev-parse", "HEAD"])?;
-            match &checkout {
-                Some(dir) => git(dir, &["merge", "--ff-only", &new]).map(|_| ()),
-                None => git(repo, &["update-ref", &format!("refs/heads/{base}"), &new, &old]).map(|_| ()),
-            }
-            .map(|()| Merge::Merged(new))
-        }
+    let dir = repo.join(".jazari").join("merge");
+    remove(repo, &dir);
+    git(repo, &["worktree", "add", "--detach", &dir.to_string_lossy(), &old])?;
+    if git(&dir, &["merge", "--no-ff", "-m", message, branch]).is_err() {
+        let _ = git(&dir, &["merge", "--abort"]);
+        remove(repo, &dir);
+        return Ok(Stage::Conflict);
+    }
+    let new = git(&dir, &["rev-parse", "HEAD"])?;
+    Ok(Stage::Ready(Staged { dir, old, new, checkout }))
+}
+
+/// Moves `base` to a staged merge:
+/// - a clean checkout of it is fast-forwarded;
+/// - with no checkout, the ref is moved only if it hasn't changed meanwhile.
+pub fn advance(repo: &Path, base: &str, s: &Staged) -> anyhow::Result<String> {
+    let moved = match &s.checkout {
+        Some(dir) => git(dir, &["merge", "--ff-only", &s.new]).map(|_| ()),
+        None => git(repo, &["update-ref", &format!("refs/heads/{base}"), &s.new, &s.old]).map(|_| ()),
     };
-    remove(repo, &scratch);
-    result
+    remove(repo, &s.dir);
+    moved.map(|()| s.new.clone())
+}
+
+/// Drops a staged merge.
+pub fn discard(repo: &Path, s: &Staged) {
+    remove(repo, &s.dir);
+}
+
+/// Merges `branch` into `base` with a merge commit, without running checks on it.
+#[cfg(test)]
+pub fn merge(repo: &Path, base: &str, branch: &str, message: &str) -> anyhow::Result<Merge> {
+    Ok(match stage(repo, base, branch, message)? {
+        Stage::Ready(s) => Merge::Merged(advance(repo, base, &s)?),
+        Stage::Conflict => Merge::Conflict,
+        Stage::Dirty(d) => Merge::Dirty(d),
+    })
+}
+
+/// The files whose added lines look like credentials.
+pub fn secrets(repo: &Path, base: &str, branch: &str) -> Vec<String> {
+    let Ok(diff) = git(repo, &["diff", "--unified=0", "--no-color", &format!("{base}...{branch}")]) else { return Vec::new() };
+    secrets_in(&diff)
+}
+
+pub fn secrets_in(diff: &str) -> Vec<String> {
+    let mut file = String::new();
+    let mut hits: Vec<String> = Vec::new();
+    for line in diff.lines() {
+        if let Some(f) = line.strip_prefix("+++ b/") {
+            file = f.to_string();
+        } else if let Some(added) = line.strip_prefix('+')
+            && !line.starts_with("+++")
+            && super::telegram::redact(added) != added
+            && !hits.contains(&file)
+        {
+            hits.push(file.clone());
+        }
+    }
+    hits
 }
 
 #[cfg(test)]
@@ -212,6 +273,15 @@ mod tests {
         assert!(matches!(merge(&r, "main", "jazari/task-3", "m").unwrap(), Merge::Merged(_)));
         assert_eq!(commits_ahead(&r, "elsewhere", "main"), 2);
         assert!(docs_only(&["company/VISION.md".into(), "README.md".into()]) && !docs_only(&["src/a.rs".into()]) && !docs_only(&[]));
+        let wt = prepare(&r, 4, "jazari/task-4", "main").unwrap();
+        commit(&wt, "config.py", "TOKEN = 1\nAPI_KEY=sk-ant-api03-abcdefghijklmnopqrstuv\n");
+        remove(&r, &wt);
+        assert_eq!(secrets(&r, "main", "jazari/task-4"), vec!["config.py"]);
+        let Stage::Ready(staged) = stage(&r, "main", "jazari/task-4", "m").unwrap() else { panic!() };
+        assert!(staged.dir.join("config.py").exists(), "checks can run on the staged merge");
+        let before = git(&r, &["rev-parse", "main"]).unwrap();
+        discard(&r, &staged);
+        assert_eq!(git(&r, &["rev-parse", "main"]).unwrap(), before, "a discarded merge leaves main alone");
         std::fs::remove_dir_all(r).ok();
     }
 }

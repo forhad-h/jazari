@@ -350,17 +350,63 @@ goes to the Chief of Staff. It writes `company/VISION.md`, the roadmap, an archi
 `SECURITY.md`, and then queues the first milestone's tasks. They run in order: each starts once the one before it
 is merged. These files in the product's repo are the team's memory.
 
-**The pipeline.** Every task runs as a fresh headless Claude session, in the product's container, inside its own
-git worktree (`.jazari/worktrees/task-<id>`). Your checkout is never switched. A branch with new commits goes:
-1. to a code review;
-2. then to a security review (documentation-only changes skip it);
-3. then it is merged into `main` with a merge commit.
+**The pipeline: nothing a worker claims is trusted until it is verified.** Every task runs as a fresh
+headless Claude session, in the product's container, inside its own git worktree
+(`.jazari/worktrees/task-<id>`). Your checkout is never switched. A branch with new commits passes these gates
+in order:
 
-Along the way:
-- **A review asks for changes:** a fix task goes back to the role that built the branch. After three rounds, the
-  task waits for you.
-- **The merge conflicts:** the builder resolves the conflict.
-- **Your checkout of `main` has uncommitted changes:** the merge waits until it is clean. jazari doesn't push.
+1. **Harness checks.** These are deterministic and cost no tokens:
+   - jazari itself runs the product's `company/checks.sh` on the branch. This one script runs the build, the
+     tests, the linters and the type checks;
+   - it scans the diff for credentials.
+
+   Code without a checks script fails this gate.
+2. **The evaluator.** A separate, read-only judge with a fresh context scores the work against the builder's role
+   rubric (`assets/jazari/rubrics.md`):
+   - every role is judged on: done as asked, claims match evidence, scope, and no secrets;
+   - each kind of work adds its own criteria: code, plan, design, docs or security.
+
+   Each criterion is pass or fail, with evidence. The harness's check output is given to the judge as evidence,
+   so a claim like "the tests pass" is verified, not believed. To pass:
+   - every critical criterion must pass;
+   - at least 80% of all criteria must pass;
+   - the overall score must be 4 or 5.
+3. **Code review, then security review.** Documentation-only changes skip both.
+4. **The merge queue.** The merge commit is built aside, `company/checks.sh` runs again on the merged result, and
+   only then does `main` move.
+
+A failed gate sends a fix task back to the role that built the branch. The fix carries the findings, the failed
+criteria and the original spec. After three rounds the task waits for you. A merge that conflicts goes back to
+the builder. If your checkout of `main` has uncommitted changes, the merge waits until it is clean. jazari doesn't
+push.
+
+**Quality per role.** Every judgment is recorded. `marsad jazari quality` shows, for each role and gate:
+- how often it ran;
+- how often it passed;
+- the average score.
+
+A building role that fails most of its last 8 evaluations moves up to the plan's lead model, and jazari tells you.
+
+**Changing the team.** `marsad jazari personas --export` copies the built-in `personas.md` and `rubrics.md` to
+`~/.marsad/jazari/`. jazari uses your copies from then on. `marsad jazari evals` checks a change with effort
+matched to its size, so a small edit costs little or nothing:
+
+- **Nothing changed:** each role, each rubric group and the evaluator have a fingerprint. If none changed, no
+  tokens are spent.
+- **Lint, always run, free:** duplicate or missing roles, unknown rubric groups, rubrics with no critical
+  criterion, unsafe instructions (such as "git push" or "always approve") and the prompt-size budget.
+- **A minor edit (a few words):** lint only, then the canary watches live results.
+- **A moderate edit:** the judges see only the known-bad calibration cases (`assets/jazari/evals.json`), in one
+  batched call per rubric group, on the small model at low effort.
+- **A major change:** every case, on the production judge model at high effort. A change counts as major when a
+  criterion is added, removed or re-weighted, a role's tier or rubric changes, more than a third of the text
+  changes, or it is the first check.
+
+A judge that approves one of the planted defects blocks `marsad jazari run`. Such defects include missing tests
+behind a "tests pass" claim, SQL injection, scope creep, a committed key, a vague plan, poor contrast, a wrong
+command in docs or an unproven security finding. `--skip-evals` overrides the block. Live judgments are tagged
+with the role's prompt version, and if a changed role passes clearly less often than its earlier versions, jazari
+tells you.
 
 **What needs you.** A worker that needs a decision asks a question, and you reply with `/answer`. To deploy,
 spend money or contact real users, it must ask for approval, and Telegram shows ✅ Approve and ❌ Deny buttons.

@@ -21,7 +21,15 @@ How you work:
   - never commit secrets;
   - pin every new dependency to an exact version;
   - write a test for every behavior you add or fix.
-- Run the project's tests and linters before you finish. A task is done only when they pass.
+- `company/checks.sh` is the product's single quality gate: one script that runs the build,
+  every test suite, the linters and the type checks, and exits non-zero on any failure. The
+  harness runs it on your branch and on the merged result, and work that fails it is sent back.
+  - Run it before you finish.
+  - When you add a tool or a test suite, add it to the script.
+  - If the script doesn't exist and your task adds code, create it.
+- How your work is judged: the harness's own checks first, then an independent evaluator using your
+  role's rubric, then code review and security review. Claims without evidence fail, so make your
+  summary match what you actually did and verified.
 - The container has git, Node.js, Python 3, a C toolchain and network access for packages. When a
   tool is missing, install it yourself in user space, never with sudo or apt:
   - `pip install --user <tool>`, or a `.venv` in the repo;
