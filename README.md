@@ -515,8 +515,8 @@ messages to the bot. A small batched call turns the signals into short rules, su
 - **Fading:** a rule you haven't mentioned in 60 days becomes a suggestion, which is followed but not checked.
 - **Refusing:** a request that would weaken quality or security, such as "skip the tests", is never learned as a
   rule.
-- **Telling you:** every change comes as a card with `/forget <id>` to undo it. The whole profile is in
-  `~/.jazari/build/FOUNDER.md`, and `/prefs` lists it.
+- **Telling you:** changes are not pushed to Telegram. `/prefs` lists them, each with `/forget <id>` to undo it.
+  The whole profile is in `~/.jazari/build/FOUNDER.md`.
 
 **It learns from its own rework.** When a branch needed fixes before it merged, jazari draws a one-line lesson
 from what the gates found. The next workers get it, and every 5 lessons a task writes them into the product's
@@ -558,10 +558,15 @@ login token; the checks and git commands don't. A run is stopped after 45 minute
 - A task refused for usage goes back in the queue without counting as a failure.
 - `jazari build limits` shows the last reading.
 
-**Telling you.** When Telegram is paired, jazari tells you when:
-- work is built, merged, blocked or waiting for you;
-- a task fails three times;
-- it goes to sleep.
+**Telling you.** When Telegram is paired, jazari sends you a message only when you must decide or act:
+- a question, or a deploy, spend or contact to approve;
+- a task that keeps failing, or that is set aside until you say how to go on;
+- a proposal to add a check, or a role that got worse after a change;
+- a product on hold, or a supervisor that won't start or keeps failing;
+- a session that asks for you with `--attention`.
+
+News (built, merged, sleeping until a limit resets, preferences learned) is not sent. Ask with `/status`,
+`/tasks` or `/prefs`, and the supervisor's output has all of it.
 
 **Pausing.** `jazari watch pause` (or `/pause`) pauses it.
 

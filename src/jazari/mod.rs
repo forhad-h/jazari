@@ -689,7 +689,7 @@ fn open() -> anyhow::Result<store::Store> {
 fn tell_founder(text: &str, buttons: &[supervisor::Button]) {
     println!("{text}");
     if let (Ok(bot), Ok(chat)) = (bot(), chat())
-        && let Err(e) = bot.send_with_buttons(chat, text, buttons)
+        && let Err(e) = bot.send_with_buttons(chat, text, buttons) // push: helper; each caller gives its reason
     {
         eprintln!("[jazari] couldn't reach Telegram: {e}");
     }
@@ -710,7 +710,7 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
         for i in &lint {
             eprintln!("✗ {}", i.what);
         }
-        tell_founder("⛔ jazari won't start: the personas or rubrics are broken. Run `jazari build evals` for details.", &[]);
+        tell_founder("⛔ jazari won't start: the personas or rubrics are broken. Run `jazari build evals` for details.", &[]); // push: the supervisor won't start until the founder fixes the personas
         anyhow::bail!("fix personas.md or rubrics.md first");
     }
     if !skip_evals {
@@ -721,7 +721,7 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
             println!("{}", report.text());
         }
         if report.blocking() {
-            tell_founder("⛔ jazari won't start: a judge check failed. Run `jazari build evals` for details.", &[]);
+            tell_founder("⛔ jazari won't start: a judge check failed. Run `jazari build evals` for details.", &[]); // push: the supervisor won't start until the founder fixes a judge check
             anyhow::bail!("the judges' checks block the supervisor; fix them, or start with --skip-evals");
         }
     }
@@ -824,7 +824,7 @@ fn supervise(deps: &supervisor::Deps, once: bool) -> anyhow::Result<()> {
             Err(e) => {
                 errors += 1;
                 if errors == 3 {
-                    tell_founder(&format!("⚠️ jazari supervisor keeps failing: {e}"), &[]);
+                    tell_founder(&format!("⚠️ jazari supervisor keeps failing: {e}"), &[]); // push: the supervisor keeps failing, and the founder must act
                 }
                 anyhow::ensure!(!once, "{e}");
                 eprintln!("[jazari] {e}");

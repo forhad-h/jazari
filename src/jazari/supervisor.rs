@@ -152,9 +152,15 @@ fn clock(ts: f64) -> String {
     chrono::DateTime::from_timestamp(ts as i64, 0).map(|t| t.with_timezone(&chrono::Local).format("%a %H:%M").to_string()).unwrap_or_default()
 }
 
-/// Sends the founder a card.
+/// Sends the founder a card. Only for what needs their decision or action: see [`PUSHES`].
 fn say(d: &Deps, card: &Card) {
-    (d.notify)(&card.text(), &card.buttons());
+    (d.notify)(&card.text(), &card.buttons()); // push: helper; each caller gives its reason
+}
+
+/// Writes a card to the supervisor's own output only. The founder gets news like this on request
+/// (`/status`, `/tasks`), not as a push, so the messages that need them aren't missed.
+fn note(card: &Card) {
+    println!("{}", card.text());
 }
 
 /// Sends a card once per `key`, however often it is true again.
@@ -162,7 +168,7 @@ fn once(d: &Deps, key: &str, card: &Card) {
     let key = format!("told:{key}");
     if d.store.get(&key).ok().flatten().is_none() {
         let _ = d.store.put(&key, "1");
-        say(d, card);
+        say(d, card); // push: helper; each caller gives its reason
     }
 }
 
@@ -170,7 +176,10 @@ fn announce_sleep(d: &Deps, until: f64, reason: &str, key: &str) {
     if d.store.get(&format!("told:sleep:{key}")).ok().flatten().is_none() {
         (d.audit)("sleep", json!({ "until": until, "reason": reason }));
     }
-    once(d, &format!("sleep:{key}"), &Card::new("😴", "jazari is paused for usage", format!("It starts again at {}.", clock(until))).why(format!("{}.", capital(reason))));
+    if d.store.get(&format!("told:sleep:{key}")).ok().flatten().is_none() {
+        let _ = d.store.put(&format!("told:sleep:{key}"), "1");
+        note(&Card::new("😴", "jazari is paused for usage", format!("It starts again at {}.", clock(until))).why(format!("{}.", capital(reason))));
+    }
 }
 
 // ---------- the harness's own checks ----------
@@ -290,7 +299,7 @@ fn gates(d: &Deps, task: &Task, container: &str, repo: &Path, work: &Path, base:
         let what = if first { "adds" } else { "changes" };
         let card = Card::new("🛡", format!("Task #{} {what} the quality checks", task.id), format!("`{CHECKS}` decides what every branch must pass."))
             .why("A change to the checks changes the rules for all later work. So it gets a full code review and security review before it counts.");
-        once(d, &format!("checks:{}:{rev}", task.id), &card);
+        note(&card);
     }
     let docs_changed: Vec<String> = files.iter().filter(|f| f.ends_with(".md")).cloned().collect();
     let (checks, plain) = checks_on(d, container, work, &format!("check-{}", task.id), |dir| d.repo.clone_for_task(repo, dir, branch, base), script.as_deref(), &docs_changed);
@@ -368,7 +377,7 @@ fn park(d: &Deps, p: Pending, why: &str) -> anyhow::Result<()> {
         set_pending(d.store, &list)?;
     }
     let card = Card::new("⏸", format!("Not merged yet: {}", p.title), "The work is approved, but jazari can't merge it now.").why(capital(why)).detail("jazari tries again by itself.");
-    once(d, &format!("park:{}:{}", p.branch, p.head), &card);
+    note(&card);
     Ok(())
 }
 
@@ -385,7 +394,7 @@ fn retry_merges(d: &Deps) -> anyhow::Result<()> {
             Ok(Merged::Done | Merged::Handled) => {}
             Ok(Merged::Waiting) => left.push(p),
             Err(e) => {
-                once(d, &format!("merge-error:{}:{}", p.branch, p.head), &Card::new("⚠️", format!("Merge keeps failing: {}", p.title), capital(&e.to_string())).detail("jazari keeps trying."));
+                note(&Card::new("⚠️", format!("Merge keeps failing: {}", p.title), capital(&e.to_string())).detail("jazari keeps trying."));
                 left.push(p);
             }
         }
@@ -432,7 +441,7 @@ fn merge(d: &Deps, task: &Task, branch: &str, head: &str, title: &str) -> anyhow
             let sha = d.repo.advance(&repo, &base, &staged)?;
             d.store.land_branch(branch)?;
             (d.audit)("merge", json!({ "task": task.id, "branch": branch, "approved": head, "base": base, "commit": sha }));
-            say(d, &Card::new("🚀", format!("Merged: {title}"), format!("It is now on {base}.")).detail(format!("{branch} · {}", &sha[..sha.len().min(10)])));
+            note(&Card::new("🚀", format!("Merged: {title}"), format!("It is now on {base}.")).detail(format!("{branch} · {}", &sha[..sha.len().min(10)])));
             lessons_landed(d, branch);
             learn_from_rework(d, task, branch);
             Ok(Merged::Done)
@@ -520,7 +529,7 @@ pub fn tick(d: &Deps) -> anyhow::Result<Tick> {
                 let card = Card::new("⚠️", format!("{} is on hold for 10 minutes", task.product), "jazari couldn't prepare its container or its copy of the repo.")
                     .why(capital(&e.to_string()))
                     .detail("Other products keep working.");
-                once(d, &format!("hold:{}:{}", task.product, (now / 3600.0) as i64), &card);
+                once(d, &format!("hold:{}:{}", task.product, (now / 3600.0) as i64), &card); // push: a product is on hold, and Docker or the repo may need the founder
                 held.push(task.product.clone());
             }
         }
@@ -542,7 +551,7 @@ fn learn(d: &Deps, now: f64) {
             }
             let changed = l.changed;
             for c in &l.cards {
-                say(d, c);
+                note(c);
             }
             if changed && let Ok(text) = super::profile::render(d.store) {
                 (d.profile_file)(&text);
@@ -560,7 +569,7 @@ fn learn(d: &Deps, now: f64) {
     if d.store.get("decay_day").ok().flatten().as_deref() != Some(day.as_str()) {
         let _ = d.store.put("decay_day", &day);
         if let Ok(Some(card)) = super::profile::decay(d.store, now) {
-            say(d, &card);
+            note(&card);
             if let Ok(text) = super::profile::render(d.store) {
                 (d.profile_file)(&text);
             }
@@ -686,7 +695,7 @@ fn fix(d: &Deps, task: &Task, branch: &str, title: &str, findings: &str) -> anyh
         let card = Card::new("❓", format!("#{id} {}: still failing", feature(title)), format!("It failed its checks or reviews {round} times. The team needs your guidance."))
             .why(crate::hook::truncate(findings, 400))
             .reply(format!("/answer {id} <what to do>"));
-        say(d, &card);
+        say(d, &card); // push: a task keeps failing, and the team needs the founder's guidance
     }
     Ok(id)
 }
@@ -743,7 +752,7 @@ fn propose_check(d: &Deps, product: &str) -> anyhow::Result<()> {
     let card = Card::new("🔁", format!("\"{criterion}\" keeps failing"), format!("Reviews of {product} failed it {n} times in two weeks."))
         .why("An automatic check in company/checks.sh would catch it before review. Then the team stops repeating it, and reviews cost less.")
         .actions(vec![("✅ Add a check".into(), format!("/accept {id}")), ("Ignore".into(), format!("/ignore {id}"))]);
-    say(d, &card);
+    say(d, &card); // push: a proposal the founder accepts or ignores
     Ok(())
 }
 
@@ -768,7 +777,7 @@ fn maybe_upgrade(d: &Deps, role: &str) -> anyhow::Result<()> {
         (d.audit)("upgrade", json!({ "role": role, "passed": passed, "of": recent.len(), "model": d.profile.lead_model }));
         let card = Card::new("📈", format!("{} now uses a stronger model", persona.title), format!("It passed only {passed} of its last {} evaluations.", recent.len()))
             .detail(format!("New model: {}", d.profile.lead_model));
-        say(d, &card);
+        note(&card);
     }
     Ok(())
 }
@@ -830,7 +839,7 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                         maybe_upgrade(d, &owner)?;
                         let version = super::evals::version(&personas::find(&owner));
                         if let Some(warning) = super::evals::canary(s, &owner, &version)? {
-                            say(d, &Card::new("⚠️", format!("{} got worse after a change", personas::find(&owner).title), warning).detail("Check the last change to personas.md, or undo it."));
+                            say(d, &Card::new("⚠️", format!("{} got worse after a change", personas::find(&owner).title), warning).detail("Check the last change to personas.md, or undo it.")); // push: a persona got worse after a change, and the founder should check or undo it
                         }
                     }
                     let head = task.head.as_deref();
@@ -853,7 +862,7 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                 _ => match gates {
                     None => {
                         s.land(task.id)?;
-                        say(d, &Card::new("✅", format!("Done: {name}"), o.summary.clone()).detail(more.trim()));
+                        note(&Card::new("✅", format!("Done: {name}"), o.summary.clone()).detail(more.trim()));
                     }
                     Some(Gates { failure: Some(f), .. }) => {
                         (d.audit)("gate.failed", json!({ "task": task.id, "branch": branch, "why": crate::hook::truncate(&f, 300) }));
@@ -869,7 +878,7 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                             if docs { "\n\nThis change is documentation only." } else { "" }
                         );
                         next("evaluator", format!("Evaluate: {}", feature(&task.title)), &brief, "eval", head.as_deref())?;
-                        say(d, &Card::new("✅", format!("Built: {name}"), o.summary.clone()).detail("The checks passed. Next: evaluation and reviews.").detail(more.trim()));
+                        note(&Card::new("✅", format!("Built: {name}"), o.summary.clone()).detail("The checks passed. Next: evaluation and reviews.").detail(more.trim()));
                     }
                 },
             }
@@ -882,7 +891,7 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                     .why(o.summary.clone())
                     .detail(format!("Task: {}", task.title))
                     .actions(vec![("✅ Approve".into(), format!("/approve {}", task.id)), ("❌ Deny".into(), format!("/deny {}", task.id))]);
-                say(d, &card);
+                say(d, &card); // push: a deploy, spend or contact waits for the founder's approval
             } else {
                 let ask = o.needs_founder.clone().unwrap_or_else(|| worker::Ask { question: o.summary.clone(), ..Default::default() });
                 s.wait_for_founder_on(task.id, Some(&ask.stored()), None, ask.hard_line, now)?;
@@ -894,7 +903,7 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                 if ask.hard_line {
                     card = card.detail(format!("⚠️ Choosing against the recommendation crosses a hard line. To do it anyway, reply: /answer {} override: <your reason>", task.id));
                 }
-                say(d, &card);
+                say(d, &card); // push: a question only the founder can answer
             }
         }
         Kind::Failed => {
@@ -905,7 +914,7 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                 let card = Card::new("⛔", format!("#{} failed {attempts} times", task.id), format!("{} is set aside until you say how to go on.", task.title))
                     .why(format!("Last error: {}", o.summary))
                     .reply(format!("/answer {} <what to do>", task.id));
-                say(d, &card);
+                say(d, &card); // push: a task is set aside until the founder says how to go on
             } else {
                 s.set_status(task.id, "queued", Some(&o.summary), None, now)?;
             }
@@ -951,6 +960,42 @@ fn follow_ups(d: &Deps, task: &Task, o: &Outcome) -> anyhow::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every message pushed to Telegram, with the reason it needs the founder. The founder wants
+    /// pushes only for decisions and actions; news is given on request. A new push fails this test
+    /// until it has a `// push: <reason>` comment and is listed here.
+    #[test]
+    fn every_push_to_the_founder_has_a_reason() {
+        const PUSHES: &[&str] = &[
+            "supervisor.rs: helper; each caller gives its reason",
+            "supervisor.rs: helper; each caller gives its reason",
+            "supervisor.rs: a product is on hold, and Docker or the repo may need the founder",
+            "supervisor.rs: a task keeps failing, and the team needs the founder's guidance",
+            "supervisor.rs: a proposal the founder accepts or ignores",
+            "supervisor.rs: a persona got worse after a change, and the founder should check or undo it",
+            "supervisor.rs: a deploy, spend or contact waits for the founder's approval",
+            "supervisor.rs: a question only the founder can answer",
+            "supervisor.rs: a task is set aside until the founder says how to go on",
+            "mod.rs: helper; each caller gives its reason",
+            "mod.rs: the supervisor won't start until the founder fixes the personas",
+            "mod.rs: the supervisor won't start until the founder fixes a judge check",
+            "mod.rs: the supervisor keeps failing, and the founder must act",
+            "bridge.rs: a reply to the founder's own message",
+            "bridge.rs: a reply: the pairing the founder started is done",
+            "bridge.rs: a reply to the founder's command",
+            "bridge.rs: a session asked for the founder with --attention",
+        ];
+        let sends = ["say(d,", "once(d,", "tell_founder(", "bot.send(", "send_with_buttons(", "(d.notify)("];
+        let mut found = Vec::new();
+        for (file, text) in [("supervisor.rs", include_str!("supervisor.rs")), ("mod.rs", include_str!("mod.rs")), ("bridge.rs", include_str!("bridge.rs"))] {
+            let code = text.split("#[cfg(test)]").next().unwrap();
+            for line in code.lines().filter(|l| sends.iter().any(|s| l.contains(s)) && !l.trim_start().starts_with("fn ") && !l.trim_start().starts_with("//")) {
+                let reason = line.split("// push: ").nth(1).unwrap_or_else(|| panic!("{file}: a push without a reason: {}", line.trim()));
+                found.push(format!("{file}: {}", reason.trim()));
+            }
+        }
+        assert_eq!(found, PUSHES);
+    }
     use crate::jazari::limits::Plan;
     use crate::jazari::worker::tests::{limit_line, result_line};
     use std::cell::{Cell, RefCell};
@@ -1228,7 +1273,7 @@ mod tests {
         assert_eq!(*w.repo.staged_commits.borrow(), vec!["sha1"], "the approved commit is merged, not the branch name");
         assert_eq!(*w.repo.merged.borrow(), vec!["abc123def456"]);
         assert_eq!(w.runner.of("checks").last().unwrap().dir, "/work/merge", "the checks ran on the merged result");
-        assert!(w.last().starts_with("🚀 Merged: Build login\nIt is now on main."), "{}", w.last());
+        assert!(!w.said("🚀 Merged"), "a merge is news, not a decision: it isn't pushed");
         let next = w.next();
         assert_eq!((next.title.as_str(), next.after_task), ("Test it", Some(id)));
     }
@@ -1359,7 +1404,7 @@ mod tests {
         w.add("Skeleton");
         w.tick();
         assert!(w.runner.of("checks")[0].command.last().unwrap().ends_with("pytest"), "with no base script, the branch's first one runs");
-        assert!(w.said("🛡 Task #1 adds the quality checks"), "{:?}", w.sent.borrow());
+        assert!(!w.said("🛡"), "the full review of new checks is automatic, so it isn't pushed: {:?}", w.sent.borrow());
         assert!(w.next().brief.contains("the branch's own new script"));
         w.tick();
         assert_eq!(w.next().kind, "review", "a checks.sh change is not documentation");
@@ -1408,7 +1453,7 @@ mod tests {
         w.tick();
         assert_eq!(w.repo.imports.get(), 0);
         assert_eq!(w.store.next_task().unwrap(), None);
-        assert!(w.last().starts_with(&format!("✅ Done: #{id} Look into it")), "{}", w.last());
+        assert!(!w.said(&format!("Done: #{id}")), "{:?}", w.sent.borrow());
     }
 
     #[test]
@@ -1428,7 +1473,7 @@ mod tests {
             assert_eq!(fix.role, "backend-engineer");
             w.store.set_status(fix.id, "done", None, None, 0.0).unwrap();
         }
-        assert!(w.said("📈 Backend Engineer now uses a stronger model\nIt passed only 0 of its last 6 evaluations."));
+        assert!(!w.said("📈"), "the upgrade is automatic, so it isn't pushed");
         assert_eq!(w.store.get("upgrade:backend-engineer").unwrap().as_deref(), Some("claude-opus-5-5"));
     }
 
@@ -1452,12 +1497,12 @@ mod tests {
         w.repo.stages.borrow_mut().extend([Ok(Stage::Dirty("/repos/shop".into())), Err(anyhow::anyhow!("disk full")), Err(anyhow::anyhow!("disk full"))]);
         w.store.add_task(&judge_task("security", "Security review: Login", "h"), 0.0).unwrap();
         w.tick();
-        assert!(w.last().contains("uncommitted changes") && pending(&w.store).len() == 1);
+        assert!(!w.said("uncommitted changes") && pending(&w.store).len() == 1, "jazari retries by itself, so it isn't pushed");
         w.store.add_task(&judge_task("security", "Security review: Signup", "h"), 0.0).unwrap();
         // The retry of Login fails; Signup's merge then fails too: both are kept, nothing is lost.
         w.tick();
         assert_eq!(pending(&w.store).len(), 2, "{:?}", pending(&w.store));
-        assert!(w.said("⚠️ Merge keeps failing: Login\nDisk full"), "{:?}", w.sent.borrow());
+        assert!(!w.said("Merge keeps failing"), "{:?}", w.sent.borrow());
         assert_eq!(w.tick(), Tick::Idle);
         assert!(pending(&w.store).is_empty(), "both merged once the error cleared");
         assert_eq!(w.repo.merged.borrow().len(), 2);
@@ -1571,8 +1616,7 @@ mod tests {
         let Tick::Sleeping { until } = w.tick() else { panic!("should sleep") };
         assert!(until > 9e9);
         assert!(matches!(w.tick(), Tick::Sleeping { .. }));
-        assert_eq!(w.sent.borrow().len(), 1, "the sleep is announced once");
-        assert!(w.last().contains("5-hour limit is used up"));
+        assert!(w.sent.borrow().is_empty(), "sleeping for usage needs nothing from the founder, so it isn't pushed");
         w.now.set(until + 1.0);
         assert_eq!(w.tick(), Tick::Ran { task: id, kind: Kind::Done });
     }
