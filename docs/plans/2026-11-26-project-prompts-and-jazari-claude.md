@@ -1,6 +1,8 @@
 # Prompts and skills per project, and a `jazari claude` launcher
 
-Status: plan, not built. It needs a review before any code is written.
+Status: the command-line part is built: `jazari build project`, `jazari claude` and the handoff.
+The dashboard part (`src/app.rs`, `src/ui.rs`) comes after the answer view (#131), because #131
+changes the same files.
 
 ## Goal
 
@@ -123,6 +125,49 @@ The project's set only adds keys. It never drops a key that the old session was 
 `rules::files_for` removes any key that appears twice, and it puts "Working with jazari" first
 (#127). The model's extras come after the base set, as before.
 
+## The `c` picker stays
+
+`jazari claude` is one more way to start a session. It does not replace `c`. The `c` picker keeps
+every mode that it has: a normal session, an agent team, and "File path only". "File path only"
+copies the path of the prompts' file, to paste into a session that is already running.
+
+The selected session's folder can belong to a project with a saved set. Then the picker ticks that
+set at the start, in every mode. So `c`, `enter`, `enter` in "File path only" gives a running
+session the set of its project. `s` saves the ticked set for that project. `project::set_for` gives
+the project and its set for a folder. The picker uses it, and so do `jazari claude` and the handoff.
+
+## Agent teams: `jazari claude --team`
+
+```sh
+jazari claude --team                                           # the lead starts with the project's set
+jazari claude --team --teammates easy-english,output-hygiene   # the teammates' set for this start only
+jazari build project edit --teammates                          # save the teammates' set for the project
+```
+
+A project's file has a second list, `teammates`. Every `jazari build project` command takes
+`--teammates` to work on that list. Without a saved list, the teammates get the lead's set without
+coordination, as `c` does in team mode today.
+
+The lead learns the path of the teammates' file in the same way as with `c`:
+
+1. `rules::ensure_team_in` writes the teammates' file first, then the lead's file.
+2. The lead's file ends with an "Agent team" section. That section holds this line, with the path:
+
+   > Before any other work, read `<teammates' file>` and follow it for the rest of your work.
+
+3. The lead starts every spawn prompt with that line.
+
+"Working with jazari" is first in both files. Coordination stays with the lead, so it is never in
+the teammates' file.
+
+## The picker in the terminal
+
+`jazari build project edit` and `jazari claude --pick` open a picker in the terminal
+(`src/pick_term.rs`). It has the same ticks and keys as `c`: `space` or a number ticks a row, and
+`enter` goes to the next step. It has no keys that write, edit or delete prompts. With `--pick`, the
+last step offers "Use for this start only" (the default) or "Save for this project", and `s` saves
+at once. The `c` picker in the dashboard stays in `src/app.rs`.
+
 ## Left out on purpose
 
 - **`--remote`** (control of a session from Telegram). The founder's rule of 2026-11-26 16:29 lets
@@ -140,8 +185,11 @@ The project's set only adds keys. It never drops a key that the old session was 
 2. `src/launch.rs` (new): `jazari claude`. The step that starts `claude` is an injectable function,
    so tests never run `claude`. It reuses `handoff_pick::new_session_id` and the launch-set event
    from `handoff.rs` (moved to a shared place).
-3. `src/main.rs`: the `Claude` top-level command and the `Project` build command.
-4. `src/app.rs`, `src/ui.rs`: the `s` key in the picker, and the "project set" line.
+3. `src/main.rs`: the `Claude` top-level command. `src/jazari/mod.rs`: the `Project` build command.
+   `src/pick_term.rs` (new): the picker in the terminal. `src/rules.rs`: team files with their own
+   teammates' set.
+4. `src/app.rs`, `src/ui.rs`: the project's set ticked at the start of `c` (also for "File path
+   only"), the `s` key in the picker, and the "project set" line. This part comes after #131.
 5. `src/handoff.rs`: the base set is the old session's set, then the project's set (or the global
    defaults).
 6. Docs: README (the key list, a "Per-project prompts" section, `jazari claude`), CHANGELOG,
@@ -160,7 +208,11 @@ The project's set only adds keys. It never drops a key that the old session was 
 - `add` refuses an unknown key; `remove` of a key that isn't there says so.
 - `jazari claude` passes the args after `--` unchanged, refuses a second `--append-system-prompt-file`
   or `--session-id`, and leaves out `--session-id` with `--resume`.
-- On Windows (a `cfg` test of the spawn path): the exit code is passed through.
+- A team start writes both files. The lead's file names the teammates' file, and "Working with
+  jazari" is first in each file.
+- The folder of a project with a saved set gives that set, so the copy-path mode ticks it.
+- On Windows, jazari waits for `claude` and passes its exit code on. CI builds this code on Windows,
+  but no test runs it, because a test must not start `claude`.
 - main.rs's test that parses every documented command stays green.
 
 ## Open questions for the review

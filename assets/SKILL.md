@@ -129,6 +129,9 @@ jazari build prompt rm <name>                              # deletes one of the 
 jazari build prompt versions [<name> [<n>]]                # a prompt's earlier versions (v<n>, when replaced, title, summary), or version n's text; no name lists deleted prompts
 jazari build prompt restore <name> [<n>]                   # makes version n (default: newest) the prompt again, or brings back a deleted one
 jazari build rules coordination easy-english               # a skill key works like a prompt key: the session must use that skill
+jazari build project                                       # the prompts and skills saved for this folder's project (or the defaults), "jazari (always)" first
+jazari build project add <name> / remove <name> / clear    # change the project's set; --teammates works on the agent team's teammates' set
+jazari claude [--pick] [--team] [-- <claude args>]         # the user runs it in a terminal: starts Claude Code with the project's set; the first line names the set
 jazari build skill list --format json                      # skills: [{name, title, summary, own, installed}]
 jazari build skill new "<rough idea>" --yes --format json  # Claude writes a skill folder (SKILL.md and any scripts) and saves it
 jazari build skill edit <name> --with "<feedback>" --yes   # revises one of the user's skills with Claude

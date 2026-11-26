@@ -252,7 +252,7 @@ pub(crate) fn builtin_rules() -> Vec<Rule> {
     builtin_library()
 }
 
-fn builtin_library() -> Vec<Rule> {
+pub(crate) fn builtin_library() -> Vec<Rule> {
     BUILTIN
         .iter()
         .map(|b| Rule { key: b.key.into(), title: b.title.into(), summary: b.summary.into(), body: b.body.into(), own: false, kind: Kind::Prompt })
@@ -597,8 +597,18 @@ pub fn ensure(chosen: &[&Rule], mode: Mode) -> anyhow::Result<PathBuf> {
     ensure_in(&crate::data_dir(), chosen, mode)
 }
 
-fn ensure_in(data: &Path, chosen: &[&Rule], mode: Mode) -> anyhow::Result<PathBuf> {
-    let files = files_for(data, chosen, mode);
+pub(crate) fn ensure_in(data: &Path, chosen: &[&Rule], mode: Mode) -> anyhow::Result<PathBuf> {
+    write_files(files_for(data, chosen, mode))
+}
+
+/// Writes the files of an agent team whose lead starts with `lead` and whose teammates read
+/// `teammates` (the lead's set when None), and returns the lead's path. Coordination never reaches
+/// a teammate.
+pub(crate) fn ensure_team_in(data: &Path, lead: &[&Rule], teammates: Option<&[&Rule]>) -> anyhow::Result<PathBuf> {
+    write_files(team_files(data, lead, teammates))
+}
+
+fn write_files(files: Vec<(PathBuf, String)>) -> anyhow::Result<PathBuf> {
     // The teammates' file first, so the lead's never points at a file that isn't there yet.
     for (path, text) in files.iter().rev() {
         write_if_changed(path, text)?;
@@ -615,19 +625,30 @@ fn ensure_in(data: &Path, chosen: &[&Rule], mode: Mode) -> anyhow::Result<PathBu
 /// The files for `chosen` started as `mode`: the one the command loads, then for a team the
 /// teammates' file when any prompt reaches them.
 fn files_for(data: &Path, chosen: &[&Rule], mode: Mode) -> Vec<(PathBuf, String)> {
+    if mode == Mode::Team {
+        return team_files(data, chosen, None);
+    }
     let builtin = builtin_library();
     let always = builtin.iter().find(|r| r.key == ALWAYS);
     let chosen = &with_always(always, chosen)[..];
-    let named = |role: &str, rules: &[&Rule], text: &str| {
-        let path = launch_dir(data).join(launch_name(role, rules, text));
-        std::path::absolute(&path).unwrap_or(path)
-    };
     let merged = merge(chosen);
-    if mode == Mode::Session {
-        return vec![(named("session", chosen, &merged), merged)];
-    }
-    let shared: Vec<&Rule> = chosen.iter().copied().filter(|r| r.key != COORDINATION).collect();
-    let coordination = shared.len() < chosen.len();
+    vec![(named(data, "session", chosen, &merged), merged)]
+}
+
+/// The lead's file, then the teammates' file when any prompt reaches them. The teammates read
+/// `teammates`, or the lead's set when None, without coordination either way.
+fn team_files(data: &Path, chosen: &[&Rule], teammates: Option<&[&Rule]>) -> Vec<(PathBuf, String)> {
+    let builtin = builtin_library();
+    let always = builtin.iter().find(|r| r.key == ALWAYS);
+    let chosen = &with_always(always, chosen)[..];
+    let named = |role: &str, rules: &[&Rule], text: &str| named(data, role, rules, text);
+    let merged = merge(chosen);
+    let coordination = chosen.iter().any(|r| r.key == COORDINATION);
+    let source = match teammates {
+        Some(t) => with_always(always, t),
+        None => chosen.to_vec(),
+    };
+    let shared: Vec<&Rule> = source.into_iter().filter(|r| r.key != COORDINATION).collect();
     let teammates = (!shared.is_empty()).then(|| {
         let text = merge(&shared);
         (named("teammate", &shared, &text), text)
@@ -636,6 +657,12 @@ fn files_for(data: &Path, chosen: &[&Rule], mode: Mode) -> Vec<(PathBuf, String)
     let mut files = vec![(named("lead", chosen, &lead), lead)];
     files.extend(teammates);
     files
+}
+
+/// The absolute path of a launch file in `data`.
+fn named(data: &Path, role: &str, rules: &[&Rule], text: &str) -> PathBuf {
+    let path = launch_dir(data).join(launch_name(role, rules, text));
+    std::path::absolute(&path).unwrap_or(path)
 }
 
 /// `<role>-<keys>-<hash>.md`: the keys joined with `+` and cut to `MAX_NAME_KEYS` characters, and
@@ -1159,6 +1186,25 @@ mod tests {
         assert_eq!(remove_all_in(&data).unwrap(), 4, "a legacy file, a session file, a lead's and a teammates' file");
         assert_eq!(names(&data), ["events.jsonl", "prompts"]);
         assert_eq!(remove_all_in(&data).unwrap(), 0, "nothing left to remove");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_team_can_give_its_teammates_their_own_set() {
+        let data = temp_dir("own-teammates");
+        let lib = builtins();
+        let lead = known(&lib, &[COORDINATION]);
+        let mates = known(&lib, &[COORDINATION, "output-hygiene"]);
+        let path = ensure_team_in(&data, &lead, Some(&mates)).unwrap();
+        let lead_text = std::fs::read_to_string(&path).unwrap();
+        let mate_path = std::fs::read_dir(launch_dir(&data)).unwrap().map(|e| e.unwrap().path()).find(|p| p != &path).unwrap();
+        let mate_text = std::fs::read_to_string(&mate_path).unwrap();
+        assert!(lead_text.contains(&mate_path.display().to_string()), "the lead learns the teammates' file from its own");
+        assert!(!lead_text.contains("# Output hygiene"), "the lead keeps its own set");
+        for text in [&lead_text, &mate_text] {
+            assert!(text.starts_with("# Working with jazari"), "jazari first in each file");
+        }
+        assert!(mate_text.contains("# Output hygiene") && !mate_text.contains("# Multi-session coordination"), "coordination stays with the lead");
         let _ = std::fs::remove_dir_all(&data);
     }
 
