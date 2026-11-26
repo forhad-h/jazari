@@ -11,31 +11,49 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// An empty folder to point `core.hooksPath` at, so no hook runs on any platform.
-fn no_hooks() -> PathBuf {
-    let dir = std::env::temp_dir().join("marsad-jazari-no-hooks");
-    let _ = std::fs::create_dir_all(&dir);
-    dir
+/// Where the empty hooks folder lives: in the user's own data folder, which no container mounts
+/// and no other user can write (a shared temp folder could be made first by someone else and
+/// filled with hooks).
+fn no_hooks_home() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("marsad-jazari-tests-{}", std::process::id())).join("no-hooks");
+    }
+    crate::data_dir().join("jazari").join("no-hooks")
+}
+
+/// The empty folder `core.hooksPath` points at, so no hook runs on any platform. It is checked
+/// before every use and made empty again if anything appeared in it; when that fails, no git
+/// command runs.
+fn no_hooks_at(dir: &Path) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    if std::fs::read_dir(dir)?.next().is_some() {
+        std::fs::remove_dir_all(dir)?;
+        std::fs::create_dir_all(dir)?;
+    }
+    anyhow::ensure!(std::fs::read_dir(dir)?.next().is_none(), "{} isn't empty, so git hooks can't be turned off safely", dir.display());
+    Ok(dir.to_path_buf())
 }
 
 /// The settings every host git call runs with.
-fn safety() -> Vec<String> {
+fn safety() -> anyhow::Result<Vec<String>> {
+    let hooks = no_hooks_at(&no_hooks_home())?;
     let mut a: Vec<String> = ["-c", "user.name=jazari", "-c", "user.email=jazari@localhost", "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false"]
         .map(String::from)
         .to_vec();
     a.push("-c".into());
-    a.push(format!("core.hooksPath={}", no_hooks().display()));
-    a
+    a.push(format!("core.hooksPath={}", hooks.display()));
+    Ok(a)
 }
 
 fn run(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(safety()).args(args).stdin(Stdio::null()).output()?;
+    let out = Command::new("git").arg("-C").arg(dir).args(safety()?).args(args).stdin(Stdio::null()).output()?;
     anyhow::ensure!(out.status.success(), "git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn ok(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git").arg("-C").arg(dir).args(safety()).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    let Ok(safety) = safety() else { return false };
+    Command::new("git").arg("-C").arg(dir).args(safety).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 /// The branch work is based on and merged into: `main`, else `master`, else whatever the repo's
@@ -322,6 +340,22 @@ pub mod tests {
         assert!(!marker.exists(), "a planted hook or fsmonitor ran");
         std::fs::remove_dir_all(r.with_extension("work")).ok();
         std::fs::remove_dir_all(r).ok();
+    }
+
+    #[test]
+    fn the_hooks_folder_is_emptied_before_use_and_git_refuses_to_run_without_it() {
+        let dir = std::env::temp_dir().join(format!("marsad-jazari-nohooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(no_hooks_at(&dir).is_ok());
+        std::fs::write(dir.join("post-checkout"), "#!/bin/sh\nrm -rf ~\n").unwrap();
+        no_hooks_at(&dir).unwrap();
+        assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "a planted hook is removed before git runs");
+        // A file where the folder should be: it can't be made, so nothing runs.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::write(&dir, "not a folder").unwrap();
+        assert!(no_hooks_at(&dir).is_err());
+        std::fs::remove_file(&dir).ok();
+        assert!(!no_hooks_home().starts_with("/tmp/marsad-jazari-no-hooks"));
     }
 
     #[test]
