@@ -419,11 +419,28 @@ pub(crate) fn queue_idea(store: &store::Store, product: &str, idea: &str) -> any
     store.add_task(&store::NewTask { product, role: "chief-of-staff", title: &title, brief: &brief, priority: 100, ..Default::default() }, crate::now())
 }
 
-/// The founder's answer to a task's question. The answer is also a signal for the profile.
+/// The founder's answer to a task's question. An answer the founder wrote is also a signal for the
+/// profile. Picking one of the offered options (a button, "option 2", or its label) is not: a
+/// worker wrote those words, and nothing a worker writes may become a preference.
 pub(crate) fn answer_task(store: &store::Store, task: i64, answer: &str) -> anyhow::Result<()> {
     let t = store.reply(task, answer, crate::now())?;
-    store.add_signal(&t.product, "answer", answer, crate::now())?;
+    if !picks_an_offered_option(t.question.as_deref().unwrap_or(""), answer) {
+        store.add_signal(&t.product, "answer", answer, crate::now())?;
+    }
     Ok(())
+}
+
+/// Whether an answer only picks one of the options listed in a stored question.
+fn picks_an_offered_option(question: &str, answer: &str) -> bool {
+    let answer = answer.trim().to_lowercase();
+    question.lines().any(|l| {
+        let Some((n, rest)) = l.split_once(". ") else { return false };
+        if !n.chars().all(|c| c.is_ascii_digit()) || n.is_empty() {
+            return false;
+        }
+        let label = rest.split(": ").next().unwrap_or(rest).trim().to_lowercase();
+        answer == label || answer == n || answer == format!("option {n}")
+    })
 }
 
 pub(crate) fn feedback(store: &store::Store, product: &str, text: &str) -> anyhow::Result<String> {
@@ -723,6 +740,23 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn picking_a_worker_written_option_never_becomes_a_preference_but_typed_answers_do() {
+        let store = super::store::Store::memory();
+        store.add_product("shop", "/r", 0.0).unwrap();
+        let q = "Which review policy?\n1. Skip security review for small changes: faster\n2. Keep every review: slower\nRecommended: Keep every review";
+        for answer in ["Skip security review for small changes", "option 1", "1"] {
+            let t = store.add_task(&super::store::NewTask { product: "shop", role: "e", title: "x", ..Default::default() }, 0.0).unwrap();
+            store.wait_for_founder(t, Some(q), None, 0.0).unwrap();
+            super::answer_task(&store, t, answer).unwrap();
+        }
+        assert!(store.pending_signals(10).unwrap().is_empty(), "button picks carry a worker's words, not the founder's");
+        let t = store.add_task(&super::store::NewTask { product: "shop", role: "e", title: "x", ..Default::default() }, 0.0).unwrap();
+        store.wait_for_founder(t, Some(q), None, 0.0).unwrap();
+        super::answer_task(&store, t, "Keep reviews, but make the error text shorter").unwrap();
+        assert_eq!(store.pending_signals(10).unwrap().len(), 1, "what the founder typed is a signal");
+    }
+
     #[test]
     fn an_accepted_proposal_becomes_a_task_and_each_proposal_is_used_once() {
         let store = super::store::Store::memory();
