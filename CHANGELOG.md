@@ -3,7 +3,7 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 1.0.1 - 2026-11-26
 
 - Telegram message text no longer shows in the process list: curl now reads it on stdin
 - Autonomous jobs no longer queue a reworded copy of work that was done in the last 30 days
