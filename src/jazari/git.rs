@@ -37,7 +37,8 @@ fn no_hooks_at(dir: &Path) -> anyhow::Result<PathBuf> {
 /// The settings every host git call runs with.
 fn safety() -> anyhow::Result<Vec<String>> {
     let hooks = no_hooks_at(&no_hooks_home())?;
-    let mut a: Vec<String> = ["-c", "user.name=jazari", "-c", "user.email=jazari@localhost", "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false"]
+    // core.autocrlf off: the founder's own git settings must not rewrite what a worker wrote.
+    let mut a: Vec<String> = ["-c", "user.name=jazari", "-c", "user.email=jazari@localhost", "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false", "-c", "core.autocrlf=false"]
         .map(String::from)
         .to_vec();
     a.push("-c".into());

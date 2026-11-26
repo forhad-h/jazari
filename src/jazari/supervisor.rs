@@ -197,9 +197,9 @@ fn shell(script: &str) -> &'static str {
     }
 }
 
-/// Runs a checks script inside the product's container, in `dir` (a fresh clone the host made),
-/// after a restart. Never on the host, and never with the login token.
-pub fn run_checks(d: &Deps, container: &str, dir: &Path, script: Option<&str>) -> Checks {
+/// Runs a checks script inside the product's container, in `dir` (the container path of a fresh
+/// clone the host made), after a restart. Never on the host, and never with the login token.
+pub fn run_checks(d: &Deps, container: &str, dir: &str, script: Option<&str>) -> Checks {
     let Some(script) = script else { return Checks { passed: false, missing: true, log: String::new() } };
     if let Err(e) = (d.reset)(container) {
         return Checks { passed: false, missing: false, log: format!("the checks couldn't run: {e}") };
@@ -213,7 +213,7 @@ pub fn run_checks(d: &Deps, container: &str, dir: &Path, script: Option<&str>) -
         format!("exec 2>&1\n{script}"),
     ];
     let mut lines: Vec<String> = Vec::new();
-    let code = d.runner.run(container, &dir.to_string_lossy(), &command, false, &mut |l| lines.push(l.to_string()));
+    let code = d.runner.run(container, dir, &command, false, &mut |l| lines.push(l.to_string()));
     let tail = lines[lines.len().saturating_sub(60)..].join("\n");
     let log = super::telegram::redact(&crate::hook::truncate(&tail, 4000));
     match code {
@@ -227,7 +227,7 @@ pub fn run_checks(d: &Deps, container: &str, dir: &Path, script: Option<&str>) -
 fn checks_on(d: &Deps, container: &str, work: &Path, name: &str, clone: impl FnOnce(&Path) -> anyhow::Result<()>, script: Option<&str>) -> Checks {
     let dir = work.join(name);
     let result = match clone(&dir) {
-        Ok(()) => run_checks(d, container, &dir, script),
+        Ok(()) => run_checks(d, container, &super::sandbox::inside(name), script),
         Err(e) => Checks { passed: false, missing: false, log: format!("the checks couldn't be set up: {e}") },
     };
     let _ = std::fs::remove_dir_all(&dir);
@@ -483,7 +483,8 @@ fn run_task(d: &Deps, task: &Task, now: f64) -> anyhow::Result<Tick> {
     }
     let work = (d.work)(&product.name);
     let container = (d.ensure)(&product.name, &work.to_string_lossy())?;
-    let clone = work.join(format!("task-{}", task.id));
+    let item = format!("task-{}", task.id);
+    let clone = work.join(&item);
     d.repo.clone_for_task(&repo, &clone, &branch, &base)?;
     (d.reset)(&container)?;
     let since = d.repo.head(&repo, &format!("refs/heads/{branch}")).or_else(|| d.repo.head(&repo, &base)).unwrap_or_default();
@@ -496,7 +497,7 @@ fn run_task(d: &Deps, task: &Task, now: f64) -> anyhow::Result<Tick> {
     } else {
         persona.system_prompt()
     };
-    let workdir = clone.to_string_lossy().to_string();
+    let workdir = super::sandbox::inside(&item);
     let setup = Setup {
         container: &container,
         workdir: &workdir,
@@ -511,10 +512,9 @@ fn run_task(d: &Deps, task: &Task, now: f64) -> anyhow::Result<Tick> {
     // The worker's commits come back as a bundle the container writes; judges change nothing.
     let mut built = false;
     if !judge && outcome.kind == Kind::Done && !since.is_empty() {
-        let bundle = clone.join(BUNDLE);
-        let command: Vec<String> = ["git", "bundle", "create", &bundle.to_string_lossy(), &branch, &format!("^{since}")].map(String::from).to_vec();
+        let command: Vec<String> = ["git", "bundle", "create", &format!("{workdir}/{BUNDLE}"), &branch, &format!("^{since}")].map(String::from).to_vec();
         if d.runner.run(&container, &workdir, &command, false, &mut |_| {}).is_ok_and(|code| code == 0) {
-            d.repo.import_bundle(&repo, &bundle, &branch)?;
+            d.repo.import_bundle(&repo, &clone.join(BUNDLE), &branch)?;
             built = d.repo.commits_ahead(&repo, &base, &branch) > 0;
         }
     }
@@ -975,13 +975,15 @@ mod tests {
         let id = w.add("Build login");
         assert_eq!(w.tick(), Tick::Ran { task: id, kind: Kind::Done });
         let claude = w.runner.of("claude");
-        assert_eq!(claude[0].dir, "/data/jazari/work/shop/task-1", "the worker runs in its own clone in the work folder");
+        assert_eq!(claude[0].dir, "/work/task-1", "the worker runs in its own clone, by its container path");
         assert!(claude[0].with_token);
         let bundle = &w.runner.of("bundle")[0];
         assert!(!bundle.with_token && bundle.command.contains(&"jazari/task-1".to_string()) && bundle.command.contains(&"^base0".to_string()));
+        assert!(bundle.command.contains(&"/work/task-1/.jazari-out.bundle".to_string()));
+        assert_eq!(w.repo.clones.borrow()[0], PathBuf::from("/data/jazari/work/shop").join("task-1"), "the host makes the clone at its host path");
         let checks = w.runner.of("checks");
         assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].dir, "/data/jazari/work/shop/check-1", "the checks run in the container, on a fresh clone");
+        assert_eq!(checks[0].dir, "/work/check-1", "the checks run in the container, on a fresh clone");
         assert!(!checks[0].with_token, "the checks never see the login token");
         assert!(checks[0].command.last().unwrap().ends_with("make test"), "the base branch's checks script runs");
         assert!(w.resets.get() >= 2, "the container restarts before the worker and before the checks");
@@ -999,7 +1001,7 @@ mod tests {
         w.tick();
         assert_eq!(*w.repo.staged_commits.borrow(), vec!["sha1"], "the approved commit is merged, not the branch name");
         assert_eq!(*w.repo.merged.borrow(), vec!["abc123def456"]);
-        assert_eq!(w.runner.of("checks").last().unwrap().dir, "/data/jazari/work/shop/merge", "the checks ran on the merged result");
+        assert_eq!(w.runner.of("checks").last().unwrap().dir, "/work/merge", "the checks ran on the merged result");
         assert!(w.last().starts_with("🚀 Merged into main: Build login"), "{}", w.last());
         let next = w.next();
         assert_eq!((next.title.as_str(), next.after_task), ("Test it", Some(id)));
