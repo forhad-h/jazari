@@ -5,6 +5,7 @@ GitHub release. Keep each bullet to one short line.
 
 ## Unreleased
 
+- The check for jazari commands in a session asks only about real commands, not about `jazari update` in a heredoc, PR body or quoted text
 - `r` answers a session's permission prompt or question from the dashboard; turn it on with `jazari watch answer --on`
 - Each allow or answer from the dashboard asks for Touch ID or your Mac password first; on Linux the dashboard can only deny
 - The risk check refuses commands that type keys into other programs, or that name the dashboard's answer socket or the message inbox

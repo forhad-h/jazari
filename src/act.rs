@@ -509,9 +509,20 @@ pub fn hook_check(raw: &Value) -> Option<String> {
 
 /// The reason to ask about a shell command, if any.
 fn command_check(cmd: &str, data: &[PathBuf]) -> Option<String> {
-    for segment in cmd.split([';', '&', '|', '\n', '(', ')', '`']) {
-        let words: Vec<&str> = segment.split_whitespace().map(|w| w.trim_matches(['"', '\''])).collect();
-        let Some(mut at) = words.iter().position(|w| Path::new(w).file_stem().is_some_and(|n| n == "jazari") && !w.ends_with('/')) else { continue };
+    // A jazari command counts only where the shell runs it: text in quotes or in a here-document
+    // (a PR body, a commit message) only mentions it. When the command can't be read with
+    // certainty (an unclosed quote), every word counts, as before.
+    let parsed = simple_commands(cmd, 0);
+    let sure = parsed.is_some();
+    let commands = parsed.unwrap_or_else(|| {
+        cmd.split([';', '&', '|', '\n', '(', ')', '`'])
+            .map(|seg| seg.split_whitespace().map(|w| w.trim_matches(['"', '\'']).to_string()).collect())
+            .collect()
+    });
+    for words in &commands {
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        let at = if sure { jazari_at(&words) } else { words.iter().position(|w| is_jazari(w)) };
+        let Some(mut at) = at else { continue };
         // `jazari watch <cmd>` and `jazari build <cmd>`: the command is after the group.
         if matches!(words.get(at + 1), Some(&"watch") | Some(&"build")) {
             at += 1;
@@ -525,6 +536,238 @@ fn command_check(cmd: &str, data: &[PathBuf]) -> Option<String> {
     let names_data = cmd.contains(".jazari") || data.iter().any(|d| !d.as_os_str().is_empty() && cmd.contains(&*d.to_string_lossy()));
     (names_data && writes.iter().any(|w| cmd.contains(w)))
         .then(|| "[jazari] This command writes to jazari's own data folder, which only jazari writes. jazari asks you first.".to_string())
+}
+
+/// Words that run the command after them: `sudo jazari update` runs jazari.
+const WRAPPERS: [&str; 9] = ["sudo", "env", "exec", "command", "nohup", "time", "nice", "xargs", "doas"];
+
+fn is_jazari(w: &str) -> bool {
+    Path::new(w).file_stem().is_some_and(|n| n == "jazari") && !w.ends_with('/')
+}
+
+/// Where jazari is the program of a simple command: its first word after `VAR=value`
+/// assignments. After a wrapper such as `sudo` or `env`, whose own flags can take values, any
+/// later word counts.
+fn jazari_at(words: &[&str]) -> Option<usize> {
+    let first = words.iter().position(|w| !(w.contains('=') && !w.starts_with('=') && !w.starts_with('-')))?;
+    let program = Path::new(words[first]).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if WRAPPERS.contains(&program.as_str()) {
+        return words[first + 1..].iter().position(|w| is_jazari(w)).map(|i| first + 1 + i);
+    }
+    is_jazari(words[first]).then_some(first)
+}
+
+/// Whether `program` is a shell, which runs the text that it gets as commands.
+fn is_shell(program: &str) -> bool {
+    let name = Path::new(program).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    matches!(name.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish")
+}
+
+/// Whether `program` runs text from its standard input or arguments as shell commands.
+fn runs_text(program: &str) -> bool {
+    is_shell(program) || matches!(program, "eval" | "source" | "." | "xargs")
+}
+
+/// The simple commands of a shell command line, each as its words with quotes removed. The parts
+/// that the shell runs are included: `$(…)`, backticks, `bash -c '…'` and `eval`. Here-document
+/// bodies and comments are left out. None when the line can't be read with certainty: an unclosed
+/// quote or substitution, or nesting deeper than a few levels.
+fn simple_commands(cmd: &str, depth: usize) -> Option<Vec<Vec<String>>> {
+    if depth > 4 {
+        return None;
+    }
+    let c: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word: Option<String> = None;
+    let mut subs: Vec<String> = Vec::new();
+    // Here-documents whose bodies start at the next line: delimiter, and whether tabs are stripped.
+    let mut pending: Vec<(String, bool)> = Vec::new();
+    // Where the commands of the current line start in `out`.
+    let mut line_start = 0;
+    // Here-document bodies that a shell on their line runs.
+    let mut run_bodies: Vec<String> = Vec::new();
+    let end_word = |word: &mut Option<String>, words: &mut Vec<String>| {
+        if let Some(w) = word.take() {
+            words.push(w);
+        }
+    };
+    let end_command = |word: &mut Option<String>, words: &mut Vec<String>, out: &mut Vec<Vec<String>>| {
+        if let Some(w) = word.take() {
+            words.push(w);
+        }
+        if !words.is_empty() {
+            out.push(std::mem::take(words));
+        }
+    };
+    // The text up to the `)` that closes an already read `(`, or None when it never closes.
+    let balanced = |i: &mut usize| -> Option<String> {
+        let (mut depth, mut quote, mut s) = (1, None::<char>, String::new());
+        while let Some(&ch) = c.get(*i) {
+            *i += 1;
+            match (quote, ch) {
+                (None, '\'' | '"') => quote = Some(ch),
+                (Some(q), _) if ch == q => quote = None,
+                (None, '(') => depth += 1,
+                (None, ')') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(s);
+                    }
+                }
+                _ => {}
+            }
+            s.push(ch);
+        }
+        None
+    };
+    while let Some(&ch) = c.get(i) {
+        match ch {
+            '\\' => {
+                if let Some(&n) = c.get(i + 1) && n != '\n' {
+                    word.get_or_insert_with(String::new).push(n);
+                }
+                i += 2;
+            }
+            '\'' => {
+                let end = c[i + 1..].iter().position(|&x| x == '\'')? + i + 1;
+                word.get_or_insert_with(String::new).extend(&c[i + 1..end]);
+                i = end + 1;
+            }
+            '"' => {
+                i += 1;
+                let w = word.get_or_insert_with(String::new);
+                loop {
+                    match *c.get(i)? {
+                        '"' => break,
+                        '\\' => {
+                            w.push(*c.get(i + 1)?);
+                            i += 2;
+                            continue;
+                        }
+                        '$' if c.get(i + 1) == Some(&'(') => {
+                            i += 2;
+                            let inner = balanced(&mut i)?;
+                            w.push_str(&format!("$({inner})"));
+                            subs.push(inner);
+                            continue;
+                        }
+                        '`' => {
+                            let end = c[i + 1..].iter().position(|&x| x == '`')? + i + 1;
+                            let inner: String = c[i + 1..end].iter().collect();
+                            w.push_str(&format!("`{inner}`"));
+                            subs.push(inner);
+                            i = end + 1;
+                            continue;
+                        }
+                        x => w.push(x),
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            '`' => {
+                let end = c[i + 1..].iter().position(|&x| x == '`')? + i + 1;
+                subs.push(c[i + 1..end].iter().collect());
+                word.get_or_insert_with(String::new).push('`');
+                i = end + 1;
+            }
+            '$' | '<' | '>' if c.get(i + 1) == Some(&'(') => {
+                i += 2;
+                subs.push(balanced(&mut i)?);
+                word.get_or_insert_with(String::new).push('$');
+            }
+            '<' if c.get(i + 1) == Some(&'<') && c.get(i + 2) != Some(&'<') => {
+                end_word(&mut word, &mut words);
+                i += 2;
+                let strip = c.get(i) == Some(&'-');
+                if strip {
+                    i += 1;
+                }
+                while c.get(i).is_some_and(|x| *x == ' ' || *x == '\t') {
+                    i += 1;
+                }
+                let mut delim = String::new();
+                while let Some(&x) = c.get(i) {
+                    if x.is_whitespace() || ";&|<>()".contains(x) {
+                        break;
+                    }
+                    if x != '\'' && x != '"' && x != '\\' {
+                        delim.push(x);
+                    }
+                    i += 1;
+                }
+                if delim.is_empty() {
+                    return None;
+                }
+                pending.push((delim, strip));
+            }
+            '#' if word.is_none() => {
+                while c.get(i).is_some_and(|x| *x != '\n') {
+                    i += 1;
+                }
+            }
+            ' ' | '\t' | '\r' => {
+                end_word(&mut word, &mut words);
+                i += 1;
+            }
+            '\n' => {
+                end_command(&mut word, &mut words, &mut out);
+                i += 1;
+                // The bodies of the here-documents started on this line come next. A shell on the
+                // line (`bash <<EOF`, `cat <<EOF | sh`) runs them, so then they count as commands.
+                let shell_runs = out[line_start..].iter().any(|w| w.first().is_some_and(|f| runs_text(f)));
+                for (delim, strip) in std::mem::take(&mut pending) {
+                    let mut body = String::new();
+                    while i < c.len() {
+                        let end = c[i..].iter().position(|&x| x == '\n').map_or(c.len(), |p| i + p);
+                        let line: String = c[i..end].iter().collect();
+                        i = end + 1;
+                        let line = if strip { line.trim_start_matches('\t') } else { line.as_str() };
+                        if line.trim_end_matches('\r') == delim {
+                            break;
+                        }
+                        body.push_str(line);
+                        body.push('\n');
+                    }
+                    if shell_runs {
+                        run_bodies.push(body);
+                    }
+                }
+                line_start = out.len();
+            }
+            ';' | '&' | '|' | '(' | ')' | '{' | '}' if word.is_none() || !matches!(ch, '{' | '}') => {
+                end_command(&mut word, &mut words, &mut out);
+                i += 1;
+            }
+            x => {
+                word.get_or_insert_with(String::new).push(x);
+                i += 1;
+            }
+        }
+    }
+    end_command(&mut word, &mut words, &mut out);
+    // What the shell runs from inside the line: substitutions, `sh -c '…'` and `eval …`.
+    if !pending.is_empty() && out[line_start..].iter().any(|w| w.first().is_some_and(|f| runs_text(f))) {
+        return None;
+    }
+    let mut inner: Vec<String> = subs;
+    inner.extend(run_bodies);
+    for words in &out {
+        let Some(first) = words.first() else { continue };
+        if is_shell(first) {
+            if let Some(at) = words.iter().position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c')) {
+                inner.extend(words.get(at + 1).cloned());
+            }
+        } else if first == "eval" {
+            inner.push(words[1..].join(" "));
+        }
+    }
+    for text in inner {
+        out.extend(simple_commands(&text, depth + 1)?);
+    }
+    Some(out)
 }
 
 /// What a jazari subcommand with these arguments does that needs the user's yes.
@@ -679,6 +922,40 @@ mod tests {
             "echo '{}' > ~/.jazari/settings.json",
             "rm -rf /home/me/.jazari/claude/inbox",
             "sed -i s/true/false/ ~/.jazari/build/jazari.db",
+        ] {
+            assert!(asks(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_jazari_command_in_text_only_is_not_asked_about() {
+        for cmd in [
+            "cat > notes.md <<'EOF'\nRun jazari update, then jazari uninstall.\nEOF",
+            "gh pr create --title x --body-file - <<'EOF'\n## Tests\njazari update\n`jazari watch pause --for 1d`\nEOF\necho done",
+            "cat <<-EOF > f\n\tjazari update\n\tEOF",
+            "gh pr create --body \"run jazari update first\"",
+            "git commit -m 'feat: jazari update restarts services' -- src/update.rs",
+            "echo \"jazari update; jazari uninstall\" | wc -l",
+            "grep -n 'jazari watch tell x --stop' README.md",
+            "# jazari update\nls",
+        ] {
+            assert!(!asks(cmd), "{cmd}");
+        }
+        for cmd in [
+            "cat > f <<'EOF'\ntext\nEOF\njazari update",
+            "cd x && jazari update",
+            "\"/path/jazari\" update",
+            "FOO=1 jazari update",
+            "sudo -E jazari uninstall",
+            "echo \"$(jazari update)\"",
+            "x=`jazari update`",
+            "eval 'jazari update'",
+            "(jazari update)",
+            "bash <<'EOF'\njazari update\nEOF",
+            "cat <<EOF | sh\njazari uninstall\nEOF",
+            "true || jazari update",
+            // An unclosed quote: every word counts, as before.
+            "echo 'jazari update",
         ] {
             assert!(asks(cmd), "{cmd}");
         }
