@@ -1278,7 +1278,7 @@ fn init_terminal() -> std::io::Result<Tui> {
     RELEASE_MOUSE_ON_PANIC.call_once(|| {
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = execute!(std::io::stdout(), DisableMouseCapture);
+            let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
             hook(info);
         }));
     });
@@ -1286,16 +1286,95 @@ fn init_terminal() -> std::io::Result<Tui> {
     ratatui::Terminal::new(crate::term::Aligned::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())))
 }
 
+/// The ANSI escape codes that undo `init_terminal` and the bracketed paste that `run` turns on:
+/// mouse capture off, bracketed paste off, back to the main screen, cursor shown. Raw mode is a
+/// terminal setting, not an escape code, so the caller turns it off. These are the plain codes on
+/// every platform; `restore_terminal` sends the same commands through crossterm, which uses the
+/// console API instead on a Windows console that doesn't take ANSI.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn restore_codes() -> String {
+    use ratatui::crossterm::{Command, cursor::Show, terminal::LeaveAlternateScreen};
+    let mut codes = String::new();
+    let _ = DisableMouseCapture.write_ansi(&mut codes);
+    let _ = DisableBracketedPaste.write_ansi(&mut codes);
+    let _ = LeaveAlternateScreen.write_ansi(&mut codes);
+    let _ = Show.write_ansi(&mut codes);
+    codes
+}
+
 /// Undoes `init_terminal`.
 fn restore_terminal() {
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
-    ratatui::restore();
+    use ratatui::crossterm::{cursor::Show, terminal::LeaveAlternateScreen};
+    let _ = ratatui::crossterm::terminal::disable_raw_mode();
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen, Show);
+}
+
+/// Restores the terminal when the dashboard is stopped by SIGTERM, SIGHUP (its tab was closed),
+/// SIGINT or SIGQUIT, then exits with 128 + the signal number. Without this, the terminal stays in
+/// raw mode with mouse capture on, and every mouse move is typed into the shell.
+///
+/// The handler only calls `write`, `tcsetattr` and `_exit`, which are safe in a signal handler.
+/// So the escape codes and the terminal settings from before raw mode are prepared here.
+#[cfg(unix)]
+mod on_signal {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    static CODES: OnceLock<Vec<u8>> = OnceLock::new();
+    static SETTINGS: OnceLock<libc::termios> = OnceLock::new();
+    static TTY: AtomicI32 = AtomicI32::new(-1);
+
+    /// Call before raw mode is turned on, so the saved settings are the user's own.
+    pub fn install() {
+        let _ = CODES.set(super::restore_codes().into_bytes());
+        // The same terminal that crossterm puts in raw mode: stdin, or /dev/tty when stdin isn't one.
+        let fd = unsafe {
+            if libc::isatty(libc::STDIN_FILENO) == 1 { libc::STDIN_FILENO } else { libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) }
+        };
+        if fd >= 0 {
+            let mut t: libc::termios = unsafe { std::mem::zeroed() };
+            if unsafe { libc::tcgetattr(fd, &mut t) } == 0 && SETTINGS.set(t).is_ok() {
+                TTY.store(fd, Ordering::SeqCst);
+            } else if fd != libc::STDIN_FILENO {
+                // A second call, or /dev/tty has no settings: the handler doesn't use this fd.
+                unsafe { libc::close(fd) };
+            }
+        }
+        let handler = handle as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler;
+                libc::sigemptyset(&mut action.sa_mask);
+                libc::sigaction(sig, &action, std::ptr::null_mut());
+            }
+        }
+    }
+
+    extern "C" fn handle(sig: libc::c_int) {
+        unsafe {
+            let fd = TTY.load(Ordering::SeqCst);
+            if fd >= 0 && let Some(t) = SETTINGS.get() {
+                libc::tcsetattr(fd, libc::TCSANOW, t);
+            }
+            if let Some(codes) = CODES.get() {
+                libc::write(libc::STDOUT_FILENO, codes.as_ptr().cast(), codes.len());
+            }
+            libc::_exit(128 + sig);
+        }
+    }
+}
+
+/// Windows has no such signals. Closing the console window ends the console, and with it the
+/// console modes that jazari changed.
+#[cfg(not(unix))]
+mod on_signal {
+    pub fn install() {}
 }
 
 /// Hands the terminal to the user's editor for `text`, then takes it back: a fresh terminal and what
 /// was saved.
 fn edit_suspended(text: &str, kind: &str, ext: &str) -> std::io::Result<(Tui, Result<String, String>)> {
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     restore_terminal();
     let edited = crate::share_view::edit_in_editor(text, kind, ext);
     let terminal = init_terminal()?;
@@ -1306,6 +1385,7 @@ fn edit_suspended(text: &str, kind: &str, ext: &str) -> std::io::Result<(Tui, Re
 pub fn run() -> anyhow::Result<()> {
     let mut app = App::new();
     app.refresh();
+    on_signal::install();
     let mut terminal = init_terminal()?;
     app.cell_aspect = crate::ui::cell_aspect(terminal.backend_mut().window_size().ok());
     // Bracketed paste, so a pasted newline while editing the share line doesn't confirm it.
@@ -1355,7 +1435,6 @@ pub fn run() -> anyhow::Result<()> {
             app.refresh();
         }
     })();
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     restore_terminal();
     result
 }
@@ -1363,6 +1442,16 @@ pub fn run() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_restore_codes_turn_off_mouse_paste_and_the_alternate_screen() {
+        let text = restore_codes();
+        for code in ["?1000l", "?1002l", "?1003l", "?1006l", "?2004l", "?1049l", "?25h"] {
+            assert!(text.contains(code), "{code} missing from {text:?}");
+        }
+        let at = |code: &str| text.find(code).unwrap();
+        assert!(at("?1000l") < at("?1049l") && at("?2004l") < at("?1049l"), "the alternate screen is left last");
+    }
 
     fn key(s: &str, a: &str) -> (String, String) {
         (s.to_string(), a.to_string())

@@ -7,6 +7,7 @@ GitHub release. Keep each bullet to one short line.
 
 - Telegram message text no longer shows in the process list: curl now reads it on stdin
 - Autonomous jobs no longer queue a reworded copy of work that was done in the last 30 days
+- The dashboard restores the terminal when it is stopped by a signal or its tab is closed, so mouse moves are no longer typed into the shell
 
 ## 1.0.0 - 2026-11-26
 
