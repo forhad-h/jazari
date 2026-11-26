@@ -522,7 +522,7 @@ pub fn tick(d: &Deps) -> anyhow::Result<Tick> {
 fn learn(d: &Deps, now: f64) {
     match super::profile::learn(d.store, d.llm, now) {
         Ok(l) => {
-            let changed = !l.cards.is_empty();
+            let changed = l.changed;
             for c in &l.cards {
                 say(d, c);
             }

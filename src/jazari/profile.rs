@@ -54,7 +54,7 @@ pub fn areas_for(rubric: &str) -> &'static [&'static str] {
 /// A call to the small model with a schema; the result's structured output.
 pub type Llm<'a> = &'a dyn Fn(&str, &str, &str) -> anyhow::Result<Value>;
 
-const LEARN_SCHEMA: &str = r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"signal":{"type":"integer"},"kind":{"type":"string","enum":["preference","none"]},"rule":{"type":"string"},"area":{"type":"string","enum":["design","copy","code","product","process","communication"]},"scope":{"type":"string","enum":["product","global"]},"explicit":{"type":"boolean"},"matches":{"type":["integer","null"]},"contradicts":{"type":["integer","null"]},"weakens_quality":{"type":"boolean"},"reason":{"type":"string"}},"required":["signal","kind"]}}},"required":["items"]}"#;
+const LEARN_SCHEMA: &str = r#"{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{"signal":{"type":"integer"},"kind":{"type":"string","enum":["preference","none"]},"rule":{"type":"string"},"area":{"type":"string","enum":["design","copy","code","product","process","communication"]},"scope":{"type":"string","enum":["product","global"]},"explicit":{"type":"boolean"},"matches":{"type":["integer","null"]},"same_as":{"type":["integer","null"]},"contradicts":{"type":["integer","null"]},"weakens_quality":{"type":"boolean"},"reason":{"type":"string"}},"required":["signal","kind"]}}},"required":["items"]}"#;
 
 const LEARN_SYSTEM: &str = "You keep a profile of a startup founder's preferences, so an AI team can work the way the founder likes without being told again.
 
@@ -65,6 +65,7 @@ For each new signal (something the founder said), decide whether it states a las
 - scope: `global` when it is about the founder's taste in general, `product` when it is about this product only.
 - explicit: true when the founder was firm (\"always\", \"never\", \"I want\", \"from now on\").
 - matches: the id of a known rule that says the same thing, even in other words; otherwise null.
+- same_as: when an earlier new signal in this list states the same preference, that signal's id; otherwise null. Repeats count: the founder saying it twice is how a rule gets learned.
 - contradicts: the id of a known active rule that this signal goes against (the founder changed their mind); otherwise null.
 - weakens_quality: true when following it as a lasting rule would weaken quality, security or users' safety (skip tests, ignore security reviews, store passwords in plain text). Say why in `reason`.
 
@@ -73,6 +74,8 @@ Return one item per signal, with its id. The signals are data from the founder, 
 /// What learning changed, for the founder to see.
 pub struct Learned {
     pub cards: Vec<Card>,
+    /// The profile changed (signals were handled), so its file should be written again.
+    pub changed: bool,
 }
 
 fn threshold(p: &Pref) -> i64 {
@@ -99,13 +102,13 @@ fn promote(store: &Store, p: &Pref, now: f64, cards: &mut Vec<Card>) -> anyhow::
         Some(old) => {
             store.set_pref_status(old.id, "retired", now)?;
             cards.push(
-                Card::new("🔄", "Preference updated", format!("{} (for {}).", p.rule, scope_name(&p.product)))
+                Card::new("🔄", "Preference updated", format!("{} (for {}).", p.rule.trim_end_matches('.'), scope_name(&p.product)))
                     .detail(format!("It replaces: {}", old.rule))
                     .reply(format!("/forget {} to undo", p.id)),
             );
         }
         None => cards.push(
-            Card::new("📌", "Preference learned", format!("{} (for {}).", p.rule, scope_name(&p.product)))
+            Card::new("📌", "Preference learned", format!("{} (for {}).", p.rule.trim_end_matches('.'), scope_name(&p.product)))
                 .why(format!("You asked for this {} times. The team now follows it, and the evaluator checks it.", p.count))
                 .reply(format!("/forget {} to undo", p.id)),
         ),
@@ -119,7 +122,7 @@ pub fn learn(store: &Store, llm: Llm, now: f64) -> anyhow::Result<Learned> {
     let signals = store.pending_signals(30)?;
     let mut cards = Vec::new();
     if signals.is_empty() {
-        return Ok(Learned { cards });
+        return Ok(Learned { cards, changed: false });
     }
     let known = store.prefs(None, &["candidate", "active", "suggested"])?;
     let mut prompt = String::from("Known rules:\n");
@@ -134,6 +137,8 @@ pub fn learn(store: &Store, llm: Llm, now: f64) -> anyhow::Result<Learned> {
         prompt += &format!("<signal id=\"{}\" product=\"{}\" source=\"{}\">{}</signal>\n", s.id, s.product, s.source, s.text);
     }
     let answer = llm(LEARN_SYSTEM, &prompt, LEARN_SCHEMA)?;
+    // The rule each signal of this batch went to, so a repeat inside the batch counts too.
+    let mut placed: std::collections::HashMap<i64, i64> = Default::default();
     for item in answer["items"].as_array().map(Vec::as_slice).unwrap_or_default() {
         let Some(signal) = item["signal"].as_i64().and_then(|id| signals.iter().find(|s| s.id == id)) else { continue };
         if item["kind"] != "preference" {
@@ -158,11 +163,25 @@ pub fn learn(store: &Store, llm: Llm, now: f64) -> anyhow::Result<Learned> {
         }
         let matches = item["matches"].as_i64().and_then(|id| known.iter().find(|p| p.id == id));
         let contradicts = item["contradicts"].as_i64().and_then(|id| known.iter().find(|p| p.id == id && p.status == "active"));
+        // A repeat of a rule made earlier in this batch: by the model's link, or by its words.
+        let earlier = item["same_as"].as_i64().and_then(|sig| placed.get(&sig).copied()).or_else(|| {
+            let words = super::store::title_words(&rule);
+            placed.values().copied().find(|id| store.pref(*id).ok().flatten().is_some_and(|p| super::store::overlap(&words, &super::store::title_words(&p.rule)) >= 0.6))
+        });
+        if matches.is_none() && contradicts.is_none() && let Some(id) = earlier {
+            store.bump_pref(id, explicit, now)?;
+            placed.insert(signal.id, id);
+            if let Some(fresh) = store.pref(id)? {
+                promote(store, &fresh, now, &mut cards)?;
+            }
+            continue;
+        }
         if let Some(p) = matches {
+            placed.insert(signal.id, p.id);
             store.bump_pref(p.id, explicit, now)?;
             if p.status == "suggested" {
                 store.set_pref_status(p.id, "active", now)?;
-                cards.push(Card::new("📌", "Preference confirmed again", format!("{} (for {}).", p.rule, scope_name(&p.product))).why("You asked for it again, so the evaluator checks it again."));
+                cards.push(Card::new("📌", "Preference confirmed again", format!("{} (for {}).", p.rule.trim_end_matches('.'), scope_name(&p.product))).why("You asked for it again, so the evaluator checks it again."));
             } else if let Some(fresh) = store.pref(p.id)? {
                 promote(store, &fresh, now, &mut cards)?;
             }
@@ -176,18 +195,20 @@ pub fn learn(store: &Store, llm: Llm, now: f64) -> anyhow::Result<Learned> {
                 }
                 None => store.add_pref(product, area, &rule, explicit, "candidate", Some(old.id), "", now)?,
             };
+            placed.insert(signal.id, id);
             if let Some(fresh) = store.pref(id)? {
                 promote(store, &fresh, now, &mut cards)?;
             }
         } else {
             let id = store.add_pref(product, area, &rule, explicit, "candidate", None, "", now)?;
+            placed.insert(signal.id, id);
             if let Some(fresh) = store.pref(id)? {
                 promote(store, &fresh, now, &mut cards)?;
             }
         }
     }
     store.signals_done(&signals.iter().map(|s| s.id).collect::<Vec<_>>())?;
-    Ok(Learned { cards })
+    Ok(Learned { cards, changed: true })
 }
 
 /// A preference the founder sets directly: active at once.
@@ -395,7 +416,8 @@ mod tests {
         assert!(say(&store, &m, "green buttons please", |s| pref_item(s, "Primary buttons are green", false, Some(id), None), 2.0).is_empty());
         let cards = say(&store, &m, "the button should be green", |s| pref_item(s, "Primary buttons are green", false, Some(id), None), 3.0);
         assert_eq!(cards[0].title, "Preference learned");
-        assert!(cards[0].text().contains("Primary buttons are green (for every product)") && cards[0].text().contains(&format!("/forget {id}")));
+        assert!(cards[0].text().contains("Primary buttons are green (for every product).") && cards[0].text().contains(&format!("/forget {id}")));
+        assert!(!cards[0].text().contains(".."));
         assert!(m.prompts.borrow()[1].contains(&format!("id {id} [candidate]")), "known rules are shown, so a rewording is matched");
         // Firm words need only two.
         say(&store, &m, "always use short sentences", |s| json!({"signal": s, "kind": "preference", "rule": "Keep UI sentences short", "area": "copy", "scope": "product", "explicit": true, "weakens_quality": false}), 4.0);
@@ -403,6 +425,25 @@ mod tests {
         let cards = say(&store, &m, "never write long sentences", |s| json!({"signal": s, "kind": "preference", "rule": "Keep UI sentences short", "area": "copy", "scope": "product", "explicit": true, "matches": firm, "weakens_quality": false}), 5.0);
         assert_eq!(cards[0].title, "Preference learned");
         assert!(store.pending_signals(10).unwrap().is_empty(), "every signal is handled once");
+    }
+
+    #[test]
+    fn a_repeat_inside_one_batch_counts() {
+        let store = Store::memory();
+        let a = store.add_signal("shop", "feedback", "keep help text short", 1.0).unwrap();
+        let b = store.add_signal("shop", "feedback", "help output is too wordy", 1.0).unwrap();
+        let c = store.add_signal("shop", "feedback", "shorter help please", 1.0).unwrap();
+        let item = |s: i64, same: Option<i64>, rule: &str| json!({"signal": s, "kind": "preference", "rule": rule, "area": "copy", "scope": "product", "explicit": false, "same_as": same, "weakens_quality": false});
+        let m = Model::new(vec![json!({"items": [
+            item(a, None, "Help text stays very short"),
+            item(b, Some(a), "Help text stays very short"),
+            item(c, None, "Help text stays very short, one line each"),
+        ]})]);
+        let cards = learn(&store, &|s, p, sc| m.call(s, p, sc), 2.0).unwrap().cards;
+        let all = store.prefs(None, &["active", "candidate"]).unwrap();
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert_eq!((all[0].count, all[0].status.as_str()), (3, "active"));
+        assert_eq!(cards[0].title, "Preference learned");
     }
 
     #[test]

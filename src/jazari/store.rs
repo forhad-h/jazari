@@ -259,13 +259,13 @@ fn follows_recommendation(question: &str, reply: &str) -> bool {
 }
 
 /// A title's meaningful words: lowercase, 3+ letters, without filler.
-fn title_words(t: &str) -> std::collections::BTreeSet<String> {
+pub fn title_words(t: &str) -> std::collections::BTreeSet<String> {
     const FILLER: [&str; 12] = ["the", "and", "for", "with", "when", "into", "from", "that", "this", "add", "fix", "once"];
     t.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase).filter(|w| w.len() >= 3 && !FILLER.contains(&w.as_str())).collect()
 }
 
 /// How much two word sets share, against the smaller one.
-fn overlap(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>) -> f64 {
+pub fn overlap(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>) -> f64 {
     let small = a.len().min(b.len());
     if small < 2 {
         return 0.0;
