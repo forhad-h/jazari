@@ -777,6 +777,7 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
     };
     println!("jazari supervisor on ({}). Ctrl-C stops it; a task in progress goes back in the queue next start.", profile.plan.label());
     save_audit_head(&audit_path);
+    stop_signal::catch();
     let result = supervise(&deps, once);
     save_audit_head(&audit_path);
     result
@@ -795,10 +796,59 @@ fn save_audit_head(record: &std::path::Path) {
     }
 }
 
+/// A stop asked for by SIGTERM (launchd stopping the service) or SIGINT (Ctrl-C). The supervisor
+/// finishes the task it is on, saves the audit head and exits. A second signal stops it at once.
+mod stop_signal {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub static ASKED: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(unix)]
+    pub fn catch() {
+        extern "C" fn handle(sig: libc::c_int) {
+            if ASKED.swap(true, Ordering::SeqCst) {
+                unsafe { libc::_exit(128 + sig) };
+            }
+        }
+        let handler = handle as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        for sig in [libc::SIGTERM, libc::SIGINT] {
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler;
+                libc::sigemptyset(&mut action.sa_mask);
+                libc::sigaction(sig, &action, std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// Windows: Ctrl-C ends the supervisor at once, as before.
+    #[cfg(not(unix))]
+    pub fn catch() {}
+}
+
+/// Sleeps `secs` in slices of at most 5 seconds. Returns false as soon as `stop` is set.
+fn rest(secs: f64, stop: &std::sync::atomic::AtomicBool) -> bool {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs.max(0.0));
+    loop {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        std::thread::sleep(left.min(std::time::Duration::from_secs(5)));
+    }
+}
+
 /// The supervisor's loop: one task at a time until stopped, or one round with `once`.
 fn supervise(deps: &supervisor::Deps, once: bool) -> anyhow::Result<()> {
     let mut errors = 0u32;
     loop {
+        if stop_signal::ASKED.load(std::sync::atomic::Ordering::SeqCst) {
+            println!("Stopping: the audit head is saved, and a task left running goes back in the queue next start.");
+            return Ok(());
+        }
         let wait = match supervisor::tick(deps) {
             Ok(supervisor::Tick::Ran { .. }) => {
                 errors = 0;
@@ -831,12 +881,23 @@ fn supervise(deps: &supervisor::Deps, once: bool) -> anyhow::Result<()> {
                 (30.0 * f64::from(errors)).min(600.0)
             }
         };
-        std::thread::sleep(std::time::Duration::from_secs_f64(wait));
+        rest(wait, &stop_signal::ASKED);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rest_ends_early_when_a_stop_is_asked() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = AtomicBool::new(false);
+        let t = std::time::Instant::now();
+        assert!(super::rest(0.05, &stop), "a short rest runs to its end");
+        stop.store(true, Ordering::SeqCst);
+        assert!(!super::rest(600.0, &stop), "a stop ends a long rest");
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     #[test]
     fn picking_a_worker_written_option_never_becomes_a_preference_but_typed_answers_do() {
         let store = super::store::Store::memory();
