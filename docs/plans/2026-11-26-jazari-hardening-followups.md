@@ -23,12 +23,12 @@ the fix.
 
 - **Gap:** the hash chain has no key. It shows an edited or removed entry in the middle, but not
   entries cut from the end, or a whole file rewritten by someone with local access.
-- **Fix:**
-  - Keep a separate HMAC key in the Keychain.
-  - Key each entry's hash with it.
-  - Every N entries, and on every Telegram digest, send the founder the current head hash and the
-    entry count. `marsad jazari audit` compares against the last head the founder received.
-- **Done when:** truncating the file, or rewriting it without the key, fails verification.
+- **Done:** replaced by the off-machine head anchor. An HMAC key was dropped, because any program
+  that runs as the same user can read a Keychain item that `security` created, without a prompt.
+  - The supervisor sends the founder the entry count and the head (the last hash) on Telegram when
+    it starts, when its loop ends and every 50 entries, and keeps a copy in `audit-head.json`.
+  - `jazari build audit` fails when the record has fewer entries than that copy, or a different
+    hash at that entry. It prints the exact Telegram line to compare with the founder's chat.
 
 ## 3. Pairing brute force
 
