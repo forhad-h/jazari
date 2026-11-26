@@ -39,6 +39,8 @@ pub enum JazariCmd {
     /// List, write, edit, copy, delete or install skills: `new` writes one from a rough idea with Claude.
     #[command(subcommand)]
     Skill(crate::prompt_gen::SkillCmd),
+    /// The prompts and skills saved for this folder's project: show, edit, add, remove, clear, list.
+    Project(crate::project::ProjectArgs),
     /// Print the `claude` command that starts a session with the coordination rules.
     Coordination(crate::rules::CoordinationArgs),
     /// Connect your Telegram bot: pair a chat, send a test message, check or remove the pairing.
@@ -214,6 +216,7 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
         JazariCmd::Rules(a) => crate::rules::run(a),
         JazariCmd::Prompt(c) => crate::prompt_gen::run(c),
         JazariCmd::Skill(c) => crate::prompt_gen::run_skill(c),
+        JazariCmd::Project(a) => crate::project::run(a),
         JazariCmd::Coordination(a) => crate::rules::run_coordination(a),
         JazariCmd::Telegram(TelegramCmd::Pair) => bridge::pair(&bot()?, &dir()),
         JazariCmd::Telegram(TelegramCmd::Test) => {

@@ -60,6 +60,7 @@ source with `cargo install --git https://github.com/forhad-h/jazari`.
 jazari install     # registers hooks + status line in ~/.claude/settings.json (the first time, your file is backed up alongside), creates the folder for your own prompts, offers to install tmux
 jazari install --no-statusline   # hooks only; context size is then estimated from transcripts
 jazari             # open the dashboard
+jazari claude      # start Claude Code here with the project's prompts and skills (see "Prompts and skills per project")
 jazari uninstall   # removes only jazari's hooks, skill and generated prompt files (your own prompts stay)
 jazari update      # install the latest version (shows current → latest and what's new) and add the hooks it brings
 jazari watch pause --for 2h   # hold what jazari does on its own; `jazari watch resume` turns it back on
@@ -863,6 +864,50 @@ The prompts are added to the session's system prompt, so they survive `/clear` a
 Over SSH, `c` sends the command through your terminal (OSC 52, which kitty, WezTerm, Alacritty and iTerm2 with clipboard access allow; tmux needs `set-clipboard on`) and also shows it so you can copy it by hand. `jazari build rules` lists the prompts and `jazari build rules coordination output-hygiene` prints the command (`--team` for an agent team, `--path` for only the file's path to paste into a running session, `--format json` for scripts); `jazari build coordination` is short for `jazari build rules coordination`.
 
 `b` on a session opens its repo's board, read-only and live: agents with their last-seen times, claims, decisions, messages, conflicts and handoff notes. Agents and their claims not seen for more than 2 hours are marked `[stale]`, and `needs-human` conflicts are tagged in yellow. A relation map at the top shows how the agents are linked: messages one sent another (or everyone), conflicts between them, and claims that cover the same file. jazari never edits the board; the sessions own it. To change output hygiene, save a copy (`e` in the picker, or `jazari build prompt copy`) and tick that instead.
+
+### Prompts and skills per project
+
+Each project can have its own set of prompts and skills. A project is the main checkout of a git
+repo, so all its worktrees share one set. Outside git, the project is the folder itself. jazari
+keeps the set in `~/.jazari/projects/<name>-<hash>.json`, never in the repo. A project without a
+saved set uses the set that you ticked last in `c`.
+
+```sh
+jazari build project                       # the project of this folder, its set, and where the set comes from
+jazari build project edit                  # choose the set in a picker and save it for the project
+jazari build project add easy-english      # add a prompt or skill; a name that is not in your library is refused
+jazari build project remove easy-english   # remove one
+jazari build project clear                 # delete the project's set; the set from `c` applies again
+jazari build project list                  # every project with a saved set
+```
+
+Every command takes `--path <folder>` to work on another project.
+
+`jazari claude` starts Claude Code in the current folder with the project's set. "Working with
+jazari" is always first. The first line that it prints names the set and where it comes from:
+
+```sh
+jazari claude                    # jazari: starting with jazari (always), coordination, easy-english (project shop)
+jazari claude --pick             # choose the set for this start; the last step can save it for the project
+jazari claude -- --model opus    # everything after `--` goes to claude unchanged
+jazari claude -- --resume <id>   # a resumed session keeps its id
+```
+
+jazari installs the ticked skills where Claude Code loads them, as `c` does. A saved name can be missing
+from your library. Then jazari leaves it out with one warning line, and Claude Code still starts. jazari sets
+`--session-id` and `--append-system-prompt-file` itself, so it refuses them after `--`. On Windows,
+jazari waits for Claude Code and exits with its exit code.
+
+For an agent team, `jazari claude --team` starts the lead. The teammates read their own set:
+`jazari build project edit --teammates` saves it for the project, and `--teammates a,b` sets it
+for one start. Without a saved teammates' set, the teammates get the lead's set without
+coordination, as with `c`.
+
+A handoff (`jazari build handoff`) starts the new session with the old session's set plus the
+project's set.
+
+`c` stays as it is. It copies a launch command, or only the path of the prompts' file. You paste
+that path into a session that is already running.
 
 ### Badges and sharing
 

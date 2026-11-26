@@ -19,12 +19,15 @@ mod hook;
 mod install;
 mod jazari;
 mod jsonl;
+mod launch;
 mod live;
 mod model;
+mod pick_term;
 mod pin;
 mod portable;
 mod prompt_gen;
 mod pressure;
+mod project;
 mod prompt_view;
 mod report;
 mod risk;
@@ -68,6 +71,8 @@ enum Top {
     /// Build: products and tasks, Telegram, handoff, prompts and skills.
     #[command(subcommand)]
     Build(jazari::JazariCmd),
+    /// Start Claude Code here with the project's prompts and skills, or your defaults.
+    Claude(launch::ClaudeArgs),
     /// Register jazari's hooks (and status line) in ~/.claude/settings.json.
     Install {
         /// Don't install the status line; context size is then estimated from transcripts.
@@ -102,6 +107,7 @@ impl Top {
         match self {
             Top::Watch { cmd } => cmd,
             Top::Build(c) => Some(Cmd::Build(c)),
+            Top::Claude(a) => Some(Cmd::Claude(a)),
             Top::Install { no_statusline, refresh } => Some(Cmd::Install { no_statusline, refresh }),
             Top::Uninstall => Some(Cmd::Uninstall),
             Top::Update(a) => Some(Cmd::Update(a)),
@@ -193,6 +199,9 @@ enum Cmd {
     /// of a build command slips past the command check.
     #[command(skip)]
     Build(jazari::JazariCmd),
+    /// Never parsed: `jazari claude` reaches it through [`Top::Claude`] only.
+    #[command(skip)]
+    Claude(launch::ClaudeArgs),
 }
 
 /// An environment setting, `JAZARI_<name>`. An empty value counts as unset.
@@ -298,6 +307,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
         Some(Cmd::Resume) => act::run_resume(),
         Some(Cmd::Actions(args)) => act::run_actions(args),
         Some(Cmd::Build(cmd)) => jazari::run(cmd),
+        Some(Cmd::Claude(args)) => launch::run(args),
         None => app::run(),
     }
 }

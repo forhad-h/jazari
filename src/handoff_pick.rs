@@ -41,6 +41,8 @@ pub enum Source {
     Inherited,
     /// The founder ticked it as a default.
     Default,
+    /// Saved for the session's project.
+    Project,
     /// The model added it, for this reason.
     Added(String),
 }
@@ -55,13 +57,17 @@ pub struct Pick {
 }
 
 impl Pick {
-    /// The base set: the old session's keys that are still in the library, then the ticked
-    /// defaults. `inherited` is None when the old session's command line couldn't be read.
-    pub fn base(lib: &[Rule], inherited: Option<&[String]>, ticked: &[String]) -> Pick {
+    /// The base set: the old session's keys that are still in the library, then `ticked`: the
+    /// project's set when `from_project`, else the ticked defaults. `inherited` is None when the
+    /// old session's command line couldn't be read.
+    pub fn base(lib: &[Rule], inherited: Option<&[String]>, ticked: &[String], from_project: bool) -> Pick {
         let mut pick = Pick::default();
         let known = |k: &str| lib.iter().any(|r| r.key == k);
         match inherited {
-            None => pick.notes.push("jazari couldn't read the last session's prompts, so this session starts with your ticked defaults".into()),
+            None => pick.notes.push(format!(
+                "jazari couldn't read the last session's prompts, so this session starts with {}",
+                if from_project { "the project's set" } else { "your ticked defaults" }
+            )),
             Some(keys) => {
                 let gone: Vec<&str> = keys.iter().map(String::as_str).filter(|k| !known(k)).collect();
                 if !gone.is_empty() {
@@ -72,8 +78,9 @@ impl Pick {
                 }
             }
         }
+        let source = if from_project { Source::Project } else { Source::Default };
         for k in ticked.iter().filter(|k| known(k)) {
-            pick.push(k, Source::Default);
+            pick.push(k, source.clone());
         }
         pick
     }
@@ -86,6 +93,22 @@ impl Pick {
         if !self.has(key) {
             self.keys.push((key.to_string(), source));
         }
+    }
+
+    /// Each key with where it came from and why, for the launch-set event.
+    pub fn log_entries(&self) -> Vec<(String, String, String)> {
+        self.keys
+            .iter()
+            .map(|(k, s)| {
+                let (from, why) = match s {
+                    Source::Inherited => ("last session", ""),
+                    Source::Default => ("default", ""),
+                    Source::Project => ("project", ""),
+                    Source::Added(why) => ("added", why.as_str()),
+                };
+                (k.clone(), from.to_string(), why.to_string())
+            })
+            .collect()
     }
 
     pub fn key_list(&self) -> Vec<String> {
@@ -112,6 +135,10 @@ impl Pick {
         let defaults = group(|s| *s == Source::Default);
         if !defaults.is_empty() {
             parts.push(format!("{} (your defaults)", defaults.join(", ")));
+        }
+        let project = group(|s| *s == Source::Project);
+        if !project.is_empty() {
+            parts.push(format!("{} (the project's set)", project.join(", ")));
         }
         for (k, s) in &self.keys {
             if let Source::Added(why) = s {
@@ -315,13 +342,22 @@ mod tests {
     }
 
     #[test]
+    fn the_base_is_the_old_set_union_the_project_set() {
+        let inherited = vec!["coordination".to_string(), "chrome-testing".to_string()];
+        let p = Pick::base(&lib(), Some(&inherited), &["easy-english".into(), "coordination".into()], true);
+        assert_eq!(keys(&p), ["coordination", "chrome-testing", "easy-english"], "the project's set adds and never drops");
+        assert!(p.first_line().contains("easy-english (the project's set)"), "{}", p.first_line());
+        assert!(p.log_entries().contains(&("easy-english".into(), "project".into(), String::new())));
+    }
+
+    #[test]
     fn the_base_is_the_old_set_then_the_defaults() {
         let inherited = vec!["coordination".to_string(), "gone-prompt".to_string()];
-        let p = Pick::base(&lib(), Some(&inherited), &["easy-english".into(), "coordination".into()]);
+        let p = Pick::base(&lib(), Some(&inherited), &["easy-english".into(), "coordination".into()], false);
         assert_eq!(keys(&p), ["coordination", "easy-english"]);
         assert!(p.first_line().contains("coordination (from the last session); easy-english (your defaults)"), "{}", p.first_line());
         assert!(p.first_line().contains("no longer in your library, so left out: gone-prompt"));
-        let unknown = Pick::base(&lib(), None, &["easy-english".into()]);
+        let unknown = Pick::base(&lib(), None, &["easy-english".into()], false);
         assert!(unknown.first_line().contains("couldn't read the last session's prompts"), "{}", unknown.first_line());
     }
 
@@ -357,14 +393,14 @@ mod tests {
 
     #[test]
     fn extras_are_added_and_a_failed_run_keeps_the_old_set() {
-        let mut p = Pick::base(&lib(), Some(&["coordination".to_string()]), &[]);
+        let mut p = Pick::base(&lib(), Some(&["coordination".to_string()]), &[], false);
         let run = |_: &str, _: Duration| Ok(answer(json!({ "add": [{ "key": "chrome-testing", "reason": "UI tests in Chrome" }] })));
         let log = add_extras(&mut p, "test the UI", "shop", &lib(), &run);
         assert_eq!(keys(&p), ["coordination", "chrome-testing"]);
         assert_eq!(log, "added chrome-testing: UI tests in Chrome");
         assert!(p.first_line().ends_with("coordination (from the last session); chrome-testing (added: UI tests in Chrome)."), "{}", p.first_line());
 
-        let mut q = Pick::base(&lib(), Some(&["coordination".to_string()]), &[]);
+        let mut q = Pick::base(&lib(), Some(&["coordination".to_string()]), &[], false);
         let slow = |_: &str, wait: Duration| Err(format!("the model took longer than {} seconds", wait.as_secs()));
         let log = add_extras(&mut q, "x", "shop", &lib(), &slow);
         assert_eq!(keys(&q), ["coordination"], "the old set stays");
