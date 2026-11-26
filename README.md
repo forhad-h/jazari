@@ -19,7 +19,7 @@ doing, which ones are waiting on you, which skills they ran, and how many tokens
 │                                             ││marsad   cpu 0.4% · mem 38 MB · data 12 MB    │
 ╰─────────────────────────────────────────────╯╰──────────────────────────────────────────────╯
  ctx 45% · 552.6k left · 5h 23% ↻7:20pm · 7d 41% ↻Sat 9:00am
- ↑↓ select  enter details  tab subagents  y copy id  u usage  t/x message/stop  …  q quit
+ ↑↓ select  enter details  tab subagents  y copy name+id  u usage  t/x message/stop  …  q quit
 ```
 
 ## Install
@@ -53,7 +53,7 @@ marsad actions     # what marsad did, refused or held, and who asked
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session details · `tab` subagents · `y` copy the session id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts and skills, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new prompt or skill, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session details · `tab` subagents · `y` copy the session name and id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts and skills, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new prompt or skill, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 The mouse wheel works like `↑↓` in every list and pane; to select text with the mouse, hold `Shift` (`Option` in macOS Terminal and iTerm2) while you drag.
 In session details and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
 In session details also: `f` filter by event kind · `J`/`K` scroll the selected event's details.

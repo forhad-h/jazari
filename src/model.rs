@@ -521,11 +521,21 @@ impl Session {
 
     /// The session's name: its title from Claude Code, else the start of its id.
     pub fn name(&self) -> String {
-        self.title
-            .clone()
-            .or_else(|| self.stats.title.clone())
-            .filter(|t| !t.trim().is_empty())
+        self.title_text()
             .unwrap_or_else(|| format!("session {}", self.id.chars().take(8).collect::<String>()))
+    }
+
+    fn title_text(&self) -> Option<String> {
+        self.title.clone().or_else(|| self.stats.title.clone()).filter(|t| !t.trim().is_empty())
+    }
+
+    /// The session as `y` copies it: its title and full id, so a pasted reference shows which
+    /// session it names. Just the id when the session has no title yet.
+    pub fn mention(&self) -> String {
+        match self.title_text() {
+            Some(title) => format!("{title} ({})", self.id),
+            None => self.id.clone(),
+        }
     }
 
     /// Main agent plus all subagents.
@@ -790,6 +800,14 @@ mod tests {
         s.stats.turn_ended_at = ended;
         s.stats.background = background.iter().map(|b| (hook, b.to_string())).collect();
         s
+    }
+
+    #[test]
+    fn mention_names_the_session_with_its_id() {
+        let mut s = Session::new("1234abcd-ef", 0.0);
+        assert_eq!(s.mention(), "1234abcd-ef");
+        s.title = Some("fix login".into());
+        assert_eq!(s.mention(), "fix login (1234abcd-ef)");
     }
 
     #[test]

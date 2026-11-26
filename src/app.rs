@@ -862,11 +862,11 @@ impl App {
 
     /// Copies the selected session's full id, for `claude --resume` or a bug report.
     fn copy_session_id(&mut self) {
-        let Some(id) = self.selected_session().map(|s| s.id.clone()) else { return };
-        match crate::clipboard::copy(&id) {
-            crate::clipboard::Copied::Native(_) => self.info = Some(format!("copied session id {id} ")),
-            crate::clipboard::Copied::Terminal => self.info = Some(format!("sent session id {id} to your terminal's clipboard ")),
-            crate::clipboard::Copied::Failed => self.error = Some(format!("couldn't reach a clipboard; the id is {id} ")),
+        let Some(text) = self.selected_session().map(|s| s.mention()) else { return };
+        match crate::clipboard::copy(&text) {
+            crate::clipboard::Copied::Native(_) => self.info = Some(format!("copied {text} ")),
+            crate::clipboard::Copied::Terminal => self.info = Some(format!("sent {text} to your terminal's clipboard ")),
+            crate::clipboard::Copied::Failed => self.error = Some(format!("couldn't reach a clipboard; the session is {text} ")),
         }
     }
 

@@ -3,6 +3,10 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- `y` copies the session name with its id, e.g. `fix login (1234abcd-…)`
+
 ## 0.21.0 - 2026-11-26
 
 - Each session start installs ticked skills that are missing and updates out-of-date copies, also in the project's `.claude/skills`
