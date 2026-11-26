@@ -6,7 +6,6 @@ use std::process::{Command, Stdio};
 
 pub const TELEGRAM_TOKEN: &str = "marsad-jazari-telegram-token";
 pub const TELEGRAM_CHAT: &str = "marsad-jazari-telegram-chat";
-#[allow(dead_code)] // read by the workers in the next phase
 pub const CLAUDE_TOKEN: &str = "marsad-jazari-claude-token";
 
 /// The environment variable that overrides a Keychain service:
