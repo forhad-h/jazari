@@ -6,6 +6,8 @@ mod app;
 mod badge_art;
 mod badges;
 mod board;
+mod build_ui;
+mod build_view;
 mod card;
 mod channel;
 mod clean;

@@ -74,7 +74,7 @@ pub struct TextBox {
 }
 
 impl TextBox {
-    fn of(text: &str) -> Self {
+    pub(crate) fn of(text: &str) -> Self {
         let chars: Vec<char> = text.chars().collect();
         TextBox { cursor: chars.len(), chars }
     }
@@ -89,7 +89,7 @@ impl TextBox {
     }
 
     /// Handles an editing key; false when the key isn't one.
-    fn on_key(&mut self, key: KeyEvent) -> bool {
+    pub(crate) fn on_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             // Ctrl+Alt together is AltGr on Windows, which types characters such as `@` and `{`.
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) => {

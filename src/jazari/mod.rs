@@ -9,6 +9,7 @@ mod audit;
 mod bridge;
 mod cadence;
 mod card;
+pub mod dashboard;
 mod evals;
 mod git;
 mod limits;
@@ -816,7 +817,10 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
     save_audit_head(&audit_path);
     stop_signal::catch();
     let started_as = binary_stamp();
+    let heartbeat = dashboard::Heartbeat::start();
     let result = supervise(&deps, once, &|| !once && started_as.is_some() && binary_stamp() != started_as);
+    // Before the exit below, which skips destructors.
+    heartbeat.stop();
     save_audit_head(&audit_path);
     if matches!(result, Ok(Stopped::NewBinary)) {
         // launchd's KeepAlive starts it again, on the new binary; `service status` reads this code.
