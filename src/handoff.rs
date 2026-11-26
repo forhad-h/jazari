@@ -285,7 +285,7 @@ fn claude() -> std::ffi::OsString {
 /// it started without one.
 fn old_set(pid: u32) -> Option<Vec<String>> {
     let args = crate::handoff_pick::command_line(pid)?;
-    let lib = crate::rules::library();
+    let lib = crate::rules::pickable();
     Some(crate::handoff_pick::launch_file_in(&args).map(|f| crate::handoff_pick::keys_from_launch_file(Path::new(f), &lib)).unwrap_or_default())
 }
 
@@ -299,7 +299,7 @@ fn resume(id: &str, no_pick: bool) -> anyhow::Result<()> {
     if !cwd.is_dir() {
         bail!("the handoff's folder {} no longer exists", r.cwd);
     }
-    let lib = crate::rules::library();
+    let lib = crate::rules::pickable();
     let mut pick = Pick::base(&lib, r.inherited.as_deref(), &crate::settings::rules());
     if pick_on() && !no_pick {
         println!("Choosing prompts and skills for this session…");

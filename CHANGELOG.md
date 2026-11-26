@@ -3,6 +3,10 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- Every session jazari starts gets "Working with jazari" first; it is no longer a choice in `c` or `jazari build rules`
+
 ## 1.0.6 - 2026-11-26
 
 - `jazari update` starts the background services again on the new version; a busy supervisor finishes its task first
