@@ -12,6 +12,7 @@ mod clean_view;
 mod clipboard;
 mod context;
 mod disk;
+mod entry;
 mod events;
 mod handoff;
 mod hook;
@@ -51,7 +52,11 @@ use std::path::PathBuf;
 
 /// A live dashboard for every Claude Code session on this machine.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(
+    version,
+    about,
+    after_help = "marsad watches and protects. To build products, write prompts and skills, or hand off a session, use `jazari --help` (or `marsad jazari --help`)."
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -104,17 +109,17 @@ enum Cmd {
     },
     /// How full this session's context is, and the automatic handoff warning (--warn).
     Context(context::ContextArgs),
-    /// Save a handoff prompt (stdin or --file) and open a new terminal where a fresh session starts from it.
+    // These moved to jazari (`jazari handoff`, `jazari rules` …). They stay here, hidden, because
+    // Claude sessions and scripts run the `marsad` spelling.
+    #[command(hide = true)]
     Handoff(handoff::HandoffArgs),
-    /// List the rules a Claude Code session can start with, or print the command that loads a chosen set.
+    #[command(hide = true)]
     Rules(rules::RulesArgs),
-    /// Write, edit, copy or delete your own prompts: `new` drafts one from a rough idea with Claude.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Prompt(prompt_gen::PromptCmd),
-    /// List, write, edit, copy, delete or install skills: `new` writes one from a rough idea with Claude.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Skill(prompt_gen::SkillCmd),
-    /// Print the `claude` command that starts a session with the coordination rules (`marsad rules coordination`).
+    #[command(hide = true)]
     Coordination(rules::CoordinationArgs),
     /// Free disk space and the levels at which sessions are warned and stopped (--guard on/off).
     Disk(disk::DiskArgs),
@@ -144,8 +149,8 @@ enum Cmd {
     Resume,
     /// What marsad did, refused or held: messages, stops, cleanups, setting changes and more.
     Actions(act::ActionsArgs),
-    /// jazari: reach and command marsad from Telegram (pair a chat, run the bridge, notify).
-    #[command(subcommand)]
+    /// The old spelling of `jazari …`.
+    #[command(subcommand, hide = true)]
     Jazari(jazari::JazariCmd),
 }
 
@@ -183,8 +188,27 @@ pub fn now() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// jazari's own command line: `jazari …`, or `mamal build …`.
+#[derive(Parser)]
+#[command(version, about = "jazari acts and builds: products and tasks, Telegram, handoff, prompts and skills.")]
+struct JazariCli {
+    #[command(subcommand)]
+    cmd: jazari::JazariCmd,
+}
+
 fn main() -> anyhow::Result<()> {
-    let cmd = Cli::parse().cmd;
+    let argv: Vec<String> = std::env::args().collect();
+    let (entry, tip) = entry::route(&argv);
+    // Only a person at a terminal sees the tip: sessions read stderr as an error.
+    if let Some(tip) = tip
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+    {
+        eprintln!("{tip}");
+    }
+    let cmd = match entry {
+        entry::Entry::Marsad(args) => Cli::parse_from(args).cmd,
+        entry::Entry::Jazari(args) => Some(Cmd::Jazari(JazariCli::parse_from(args).cmd)),
+    };
     // Before anything reads or writes data. The hooks and the status line must stay quiet.
     let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_) | Cmd::Guard { .. }));
     // Claude Code waits on the guard hook before every tool call: it never copies data, which can
