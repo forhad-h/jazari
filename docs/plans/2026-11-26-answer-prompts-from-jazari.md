@@ -64,7 +64,7 @@ The full results are in
 | Prompt | Founder's answer | Hook output |
 |---|---|---|
 | Tool permission | Allow | `decision.behavior: "allow"` |
-| Tool permission | Always allow | `allow` plus `updatedPermissions`. Only a rule from the request's own `permission_suggestions` can be used. |
+| Tool permission | Always allow (dashboard only) | `allow` plus `updatedPermissions`. Only a rule from the request's own `permission_suggestions` can be used. |
 | Tool permission | Deny | `decision.behavior: "deny"` and `message: "Denied from jazari by the user."` |
 | AskUserQuestion | An option per question | `allow` and `updatedInput` with the original `questions` and `answers`. `answers` maps each question text to an option label. For multi-select, the labels are joined with ", ". |
 | ExitPlanMode | none | No output. The terminal answers. |
@@ -91,9 +91,11 @@ Free-text answers ("Type something") are not in the first version. A test must f
    pushes only messages of this kind.
 2. The card shows the session name, the tool, and the full command or file path, redacted with
    `telegram::redact`. For a question it shows each question and its options.
-3. Each button's `callback_data` is `/p <code> <choice>` and at most 64 bytes.
-4. Only the paired chat can answer. An unknown or old code gets the reply "already answered".
-5. When the request closes, jazari edits the card to show the outcome, for example "answered at the
+3. A permission card has two buttons only: Allow and Deny. "Always allow" writes a lasting
+   permission rule, so it is offered only in the dashboard, never on a phone.
+4. Each button's `callback_data` is `/p <code> <choice>` and at most 64 bytes.
+5. Only the paired chat can answer. An unknown or old code gets the reply "already answered".
+6. When the request closes, jazari edits the card to show the outcome, for example "answered at the
    desk", so that a late tap does nothing.
 
 ### The record
@@ -121,8 +123,9 @@ before that card.
 3. The worker writes the question, so a worker can make a risky question look routine. For this
    reason the check reads every option too. One matching option sends the question to the founder.
 4. When the check is not sure, the founder gets the question.
-5. An auto-answer picks the worker's own recommended option. If there is none, it picks the first
-   option. It never writes free text.
+5. An auto-answer picks the worker's own recommended option. If there is no recommended option,
+   the question goes to the founder. jazari never picks the first option instead, because that
+   option is only the worker's choice. An auto-answer never writes free text.
 6. An auto-answer is not pushed to Telegram.
 7. Each auto-answer is written to the audit record and the actions log. The dashboard shows it as
    "answered by jazari". So the founder can review it and give another answer with `/answer`.
@@ -151,6 +154,7 @@ The list lives in one constant in a new module, `src/jazari/routine.rs`, with it
   One example is "Use library A or B?" with the option "B: also rotates the API key". Another is
   "Which file name?" with the option "drop the users table first".
 - A question that is marked `hard_line` or carries `approval_needed` goes to the founder.
+- A routine question with no recommended option goes to the founder.
 - A question with no options goes to the founder.
 - The word check ignores case and matches whole words only.
 - A product with auto-answers turned off sends every question to the founder.
