@@ -17,6 +17,7 @@ mod personas;
 mod profile;
 mod sandbox;
 pub mod secrets;
+mod service;
 mod store;
 mod supervisor;
 pub mod telegram;
@@ -45,6 +46,10 @@ pub enum JazariCmd {
     Telegram(TelegramCmd),
     /// Take commands from the paired Telegram chat and forward sessions' --attention notes (runs until stopped).
     Bridge,
+    /// Run the bridge or the supervisor in the background on macOS: it starts at login and again
+    /// after a crash. Nothing runs this way until you install it.
+    #[command(subcommand)]
+    Service(ServiceCmd),
     /// Send a message to the paired Telegram chat (credentials in it are redacted).
     Notify {
         /// The message; read from stdin when left out.
@@ -167,6 +172,22 @@ pub enum TelegramCmd {
     Unpair,
 }
 
+#[derive(Subcommand)]
+pub enum ServiceCmd {
+    /// Install and start services (default: the bridge only; the supervisor spends usage, so name it).
+    Install {
+        #[arg(value_enum)]
+        parts: Vec<service::Part>,
+    },
+    /// Stop and remove services (default: both). The logs are kept.
+    Uninstall {
+        #[arg(value_enum)]
+        parts: Vec<service::Part>,
+    },
+    /// Whether each service is installed and running, and where its log is.
+    Status,
+}
+
 /// jazari's own files: `~/.jazari/build`.
 pub fn dir() -> PathBuf {
     crate::data_dir().join("build")
@@ -219,6 +240,15 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             Ok(())
         }
         JazariCmd::Bridge => bridge::run(&bot()?, chat()?, &dir()),
+        JazariCmd::Service(cmd) => {
+            let e = service::Env::real()?;
+            let print = &mut |line: String| println!("{line}");
+            match cmd {
+                ServiceCmd::Install { parts } => service::install(&e, if parts.is_empty() { &[service::Part::Bridge] } else { &parts }, print),
+                ServiceCmd::Uninstall { parts } => service::uninstall(&e, if parts.is_empty() { &service::Part::ALL } else { &parts }, print),
+                ServiceCmd::Status => service::status(&e, print),
+            }
+        }
         JazariCmd::Notify { message } => {
             let mut text = message.join(" ");
             if text.trim().is_empty() {
