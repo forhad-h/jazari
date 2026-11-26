@@ -84,6 +84,9 @@ enum Top {
         /// Only bring the hooks of an installed jazari up to date (run by `jazari update`).
         #[arg(long, hide = true)]
         refresh: bool,
+        /// With --refresh: the binary `jazari update` just installed; only that binary may refresh.
+        #[arg(long, hide = true, requires = "refresh")]
+        exe: Option<PathBuf>,
     },
     /// Remove jazari's hooks from ~/.claude/settings.json.
     Uninstall,
@@ -111,7 +114,7 @@ impl Top {
             Top::Watch { cmd } => cmd,
             Top::Build(c) => Some(Cmd::Build(c)),
             Top::Claude(a) => Some(Cmd::Claude(a)),
-            Top::Install { no_statusline, refresh } => Some(Cmd::Install { no_statusline, refresh }),
+            Top::Install { no_statusline, refresh, exe } => Some(Cmd::Install { no_statusline, refresh, exe }),
             Top::Uninstall => Some(Cmd::Uninstall),
             Top::Update(a) => Some(Cmd::Update(a)),
             Top::Hook => Some(Cmd::Hook),
@@ -134,6 +137,8 @@ enum Cmd {
         no_statusline: bool,
         #[arg(long, hide = true)]
         refresh: bool,
+        #[arg(long, hide = true, requires = "refresh")]
+        exe: Option<PathBuf>,
     },
     #[command(hide = true)]
     Uninstall,
@@ -269,10 +274,10 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
             let _ = statusline::run();
             Ok(())
         }
-        Some(Cmd::Install { refresh: true, .. }) => {
-            act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("refresh hooks"), install::refresh_cli)
+        Some(Cmd::Install { refresh: true, exe, .. }) => {
+            act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("refresh hooks"), || install::refresh_cli(exe.as_deref()))
         }
-        Some(Cmd::Install { no_statusline, refresh: false }) => {
+        Some(Cmd::Install { no_statusline, refresh: false, .. }) => {
             act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("install"), || install::install(!no_statusline))
         }
         Some(Cmd::Uninstall) => act::run(&act::Action::new(act::Kind::Install, "~/.claude/settings.json").detail("uninstall"), install::uninstall),

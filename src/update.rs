@@ -341,7 +341,7 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
 /// that release's hooks. It changes nothing when jazari's hooks aren't installed.
 fn refresh_hooks(exe: &Path, quiet: bool) {
     let mut cmd = Command::new(exe);
-    cmd.args(["install", "--refresh"]).stdin(Stdio::null());
+    cmd.args(["install", "--refresh", "--exe"]).arg(exe).stdin(Stdio::null());
     if quiet {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
@@ -367,7 +367,8 @@ fn restart_services(exe: &Path, quiet: bool) {
 /// On the latest version already: this binary is the new one, so it refreshes its own hooks.
 fn refresh_hooks_here() {
     let a = crate::act::Action::new(crate::act::Kind::Install, "~/.claude/settings.json").detail("refresh hooks");
-    if let Err(e) = crate::act::run(&a, crate::install::refresh_cli) {
+    let me = std::env::current_exe().ok();
+    if let Err(e) = crate::act::run(&a, || crate::install::refresh_cli(me.as_deref())) {
         eprintln!("warning: couldn't update the Claude Code hooks: {e:#}");
     }
 }

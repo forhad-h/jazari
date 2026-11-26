@@ -60,8 +60,10 @@ pub fn run() -> anyhow::Result<()> {
             let a = crate::act::Action::new(crate::act::Kind::Install, "~/.claude/settings.json").detail("refresh hooks").on_its_own(true);
             // Only a change is recorded: most session starts find the hooks already current.
             if crate::act::check(&a).is_ok() {
-                match crate::install::refresh() {
+                match crate::install::refresh(None) {
                     Ok(crate::install::Refresh::Updated) => crate::act::record(&a, "done", ""),
+                    // A development build or a scratch run: say why the real settings stayed as they are.
+                    Ok(crate::install::Refresh::Skipped(why)) => crate::act::record(&a, "kept", &why),
                     Err(e) => crate::act::record(&a, "failed", &format!("{e:#}")),
                     Ok(_) => {}
                 }
