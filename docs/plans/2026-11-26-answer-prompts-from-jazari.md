@@ -43,6 +43,10 @@ The full results are in
 4. The wait is short, 120 seconds by default, and set in config. Each waiting hook is a running
    process, so the wait has a limit.
 5. jazari never turns a deny into an allow. A deny and "leave it to the terminal" are always safe.
+6. Every allow and every answer asks for Touch ID or the Mac password, inside the hook, before the
+   hook prints anything. The dialog names the session and the action from the hook's own input, so
+   a fake dashboard or injected key presses cannot approve a tool call. A cancelled or failed check
+   means no output. A deny needs no check. On Linux the dashboard offers only deny.
 
 ### The hook
 

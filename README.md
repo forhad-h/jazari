@@ -333,11 +333,19 @@ you through jazari.
   multi-select question). `esc` leaves the prompt to the terminal. With no answer before the wait
   ends, nothing is decided, and the terminal prompt stays. Plan approvals stay in the terminal.
 
-  Only the dashboard can answer. The hook sends the prompt over a private socket that the dashboard
-  owns. It accepts an answer only from a jazari dashboard that runs as your user and has no Claude
-  Code process among its parent processes. The risk check also refuses tool calls that name that
-  socket or the message inbox. One limit remains: a process of your user that starts a real
-  dashboard outside Claude Code's process tree (for example, detached through tmux) is not stopped.
+  Every allow and every answer asks for Touch ID or your Mac password before it applies. The hook
+  itself asks, and the system dialog names the session and the action, for example "allow Bash
+  `rm -rf build` in session marsad". So a program that types into the dashboard or imitates it
+  cannot approve a tool call. If a dialog names an action you did not choose, cancel it. A deny needs no
+  confirmation. On Linux, where there is no such check, the dashboard can only deny. The box shows
+  the full command, a file's new content or the change, and the rule that `A` adds.
+
+  As defence in depth, the hook talks only to a dashboard that runs as your user, from the same
+  jazari program, with no Claude Code process among its parent processes. The prompt travels over
+  a private socket and never through a file. The risk check also refuses shell commands and file
+  writes that name that socket or the message inbox. It also refuses commands that type keys into
+  other programs: `tmux send-keys`, `screen -X stuff`, AppleScript keystrokes and `xdotool`. These
+  checks only match text, so they are a second layer.
 - **`jazari watch say "…"`**, run by the session, shows what it is doing on its row in the dashboard;
   `--attention` also marks it as needing you, with the question sound and a notification.
 

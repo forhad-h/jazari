@@ -7,16 +7,21 @@
 //! prompt, so only this hook waits. See
 //! `docs/solutions/integration-issues/claude-code-permission-request-hook-races-the-terminal-prompt.md`.
 //!
-//! Every Claude Code session runs as the same user as the dashboard. So an answer is trusted only
-//! from the socket's server process, checked through the kernel's peer credentials: the same user,
-//! a jazari process, and no Claude Code process among its ancestors. The request and its answer
-//! travel only over that socket, never through a file that a session could write.
+//! Every Claude Code session runs as the same user as the dashboard, so no check on the socket can
+//! prove that an answer came from the user. The check that matters runs in the hook itself: before
+//! it allows anything, the hook asks for Touch ID or the Mac password, and the system dialog names
+//! the session and the action from the hook's own input. A fake dashboard can send "allow", but the
+//! user then sees a dialog for an action they did not choose. A deny needs no check, because a deny
+//! is always safe. Systems without such a check (Linux, Windows) only take a deny.
+//!
+//! Defence in depth: the hook talks only to a server that the kernel's peer credentials show as the
+//! same user, running the same jazari executable, with no Claude Code process among its parents.
+//! The request and the answer never go through a file.
 //!
 //! Rules: the feature is off unless turned on, and then the hook reads only the setting and prints
-//! nothing; only the user answers; no dashboard, a failed check, a timeout or a terminal answer
-//! makes the hook exit with no output, so the terminal prompt decides; a plan approval
-//! (ExitPlanMode) is left to the terminal, because a plain `allow` does not approve it. Windows has
-//! no socket here, so there the hook never answers.
+//! nothing; only the user answers; no dashboard, a failed check, a cancelled confirmation, a timeout
+//! or a terminal answer makes the hook exit with no output, so the terminal prompt decides; a plan
+//! approval (ExitPlanMode) is left to the terminal, because a plain `allow` does not approve it.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -33,24 +38,39 @@ pub const CLOSED_EVENT: &str = "JazariPromptClosed";
 pub const DEFAULT_WAIT_SECS: u64 = 120;
 /// The longest wait the setting allows: each waiting hook is a running process.
 pub const MAX_WAIT_SECS: u64 = 600;
+/// How long the user has to confirm an answer with Touch ID or the password.
+pub const CONFIRM_SECS: u64 = 120;
 const POLL: Duration = Duration::from_millis(500);
-/// The most text of a command or input that a request keeps.
-const MAX_PREVIEW_CHARS: usize = 2000;
+/// The most text of a command, a file's content or a change that a request carries.
+const MAX_DETAIL_CHARS: usize = 6000;
+/// The most text of the one-line summary.
+const MAX_SUMMARY_CHARS: usize = 120;
 const DENY_MESSAGE: &str = "Denied from jazari by the user.";
+
+/// jazari's data folder for this feature. A release build ignores `JAZARI_HOME`, so a project's
+/// settings can't move the socket or the setting away from the user's own folder.
+fn data_dir() -> PathBuf {
+    if cfg!(debug_assertions) { crate::data_dir() } else { dirs::home_dir().unwrap_or_default().join(".jazari") }
+}
+
+fn setting(key: &str) -> Option<Value> {
+    let text = std::fs::read_to_string(data_dir().join("settings.json")).ok()?;
+    serde_json::from_str::<Value>(&text).ok()?.get(key).cloned()
+}
 
 /// Whether the hook waits for answers from the dashboard (off unless turned on).
 pub fn enabled() -> bool {
-    crate::settings::get("answer_prompts").and_then(|v| v.as_bool()).unwrap_or(false)
+    setting("answer_prompts").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 /// How long the hook waits, in seconds.
 pub fn wait_secs() -> u64 {
-    crate::settings::get("answer_wait_secs").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_WAIT_SECS).clamp(10, MAX_WAIT_SECS)
+    setting("answer_wait_secs").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_WAIT_SECS).clamp(10, MAX_WAIT_SECS)
 }
 
 /// The dashboard's socket. Its folder is private to the user.
 pub fn socket_path() -> PathBuf {
-    crate::data_dir().join("answer").join("dashboard.sock")
+    data_dir().join("answer").join("dashboard.sock")
 }
 
 /// One question of an AskUserQuestion prompt.
@@ -65,13 +85,17 @@ pub struct Question {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub session: String,
+    /// The session's project folder name, to name it in the confirmation.
+    pub project: String,
     pub tool: String,
-    /// The command, file path or input, with secrets redacted.
-    pub preview: String,
+    /// One line: the command, or the file and what changes in it.
+    pub summary: String,
+    /// The full command, the file's new content or the change, with secrets redacted.
+    pub detail: String,
     /// The questions of an AskUserQuestion prompt; empty for a permission prompt.
     pub questions: Vec<Question>,
-    /// Whether Claude Code offered an "always allow" rule for this prompt.
-    pub always_allow: bool,
+    /// The permission rule that "always allow" adds, when Claude Code offered one.
+    pub rule: Option<String>,
     pub opened: f64,
     pub until: f64,
 }
@@ -94,7 +118,7 @@ pub enum Answer {
 pub fn check(req: &Request, answer: &Answer) -> anyhow::Result<()> {
     match answer {
         Answer::Allow | Answer::Deny => anyhow::ensure!(req.questions.is_empty(), "this prompt is a question: choose an option"),
-        Answer::AlwaysAllow => anyhow::ensure!(req.questions.is_empty() && req.always_allow, "this prompt offers no \"always allow\" rule"),
+        Answer::AlwaysAllow => anyhow::ensure!(req.questions.is_empty() && req.rule.is_some(), "this prompt offers no \"always allow\" rule"),
         Answer::Choose { answers } => {
             anyhow::ensure!(!req.questions.is_empty(), "this prompt is not a question");
             anyhow::ensure!(answers.len() == req.questions.len(), "answer every question");
@@ -109,15 +133,99 @@ pub fn check(req: &Request, answer: &Answer) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What the user confirms with Touch ID or the password before `answer` applies. It is built from
+/// the hook's own request, never from text the dashboard sent.
+pub fn reason(req: &Request, answer: &Answer) -> String {
+    let session = format!("session {} ({})", req.project, req.session.chars().take(8).collect::<String>());
+    match answer {
+        Answer::Choose { answers } => {
+            let picked: Vec<String> = answers.iter().map(|(q, a)| format!("\"{}\": {}", cut(q, 80), cut(a, 80))).collect();
+            format!("answer {} in {session}", picked.join("; "))
+        }
+        Answer::AlwaysAllow => format!("always allow {} in {session}", req.rule.as_deref().unwrap_or("?")),
+        Answer::Allow | Answer::Deny => format!("allow {} {} in {session}", req.tool, req.summary),
+    }
+}
+
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn cut(text: &str) -> String {
-    match text.char_indices().nth(MAX_PREVIEW_CHARS) {
+/// Text without control characters (terminal escapes among them); line breaks and tabs are kept.
+pub fn clean(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect()
+}
+
+/// At most `max` characters, with "…" when cut.
+fn cut(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.to_string(),
     }
+}
+
+fn redacted(text: &str) -> String {
+    clean(&crate::jazari::telegram::redact(text))
+}
+
+/// The one-line summary and the full detail of a permission prompt's input.
+fn describe(tool: &str, input: &Value) -> (String, String) {
+    let s = |k: &str| input[k].as_str().unwrap_or("");
+    let lines = |t: &str| t.lines().count().max(1);
+    let path = || [s("file_path"), s("notebook_path"), s("path")].into_iter().find(|p| !p.is_empty()).unwrap_or("").to_string();
+    let (summary, detail) = match tool {
+        "Bash" => (format!("`{}`", s("command").lines().next().unwrap_or("")), s("command").to_string()),
+        "Write" => (format!("writing {} ({} lines)", path(), lines(s("content"))), s("content").to_string()),
+        "Edit" => {
+            let (old, new) = (s("old_string"), s("new_string"));
+            let diff = old.lines().map(|l| format!("- {l}")).chain(new.lines().map(|l| format!("+ {l}"))).collect::<Vec<_>>().join("\n");
+            (format!("editing {} ({} lines replaced by {})", path(), lines(old), lines(new)), diff)
+        }
+        "MultiEdit" => {
+            let edits = input["edits"].as_array().cloned().unwrap_or_default();
+            let diff = edits
+                .iter()
+                .flat_map(|e| {
+                    let old = e["old_string"].as_str().unwrap_or("").lines().map(|l| format!("- {l}"));
+                    let new = e["new_string"].as_str().unwrap_or("").lines().map(|l| format!("+ {l}"));
+                    old.chain(new).chain(std::iter::once(String::new())).collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (format!("editing {} ({} changes)", path(), edits.len()), diff)
+        }
+        "NotebookEdit" => (format!("editing {}", path()), s("new_source").to_string()),
+        _ => (input.to_string(), serde_json::to_string_pretty(input).unwrap_or_default()),
+    };
+    let summary = redacted(&summary).replace(['\n', '\t'], " ");
+    (cut(&summary, MAX_SUMMARY_CHARS), cut(&redacted(&detail), MAX_DETAIL_CHARS))
+}
+
+/// The rules that "always allow" would add, as text: `Bash(npm test:*) in localSettings`.
+fn rule_text(suggestions: &Value) -> Option<String> {
+    let list = suggestions.as_array().filter(|l| !l.is_empty())?;
+    let parts: Vec<String> = list
+        .iter()
+        .map(|s| {
+            let rules: Vec<String> = s["rules"]
+                .as_array()
+                .map(|rs| {
+                    rs.iter()
+                        .map(|r| match r["ruleContent"].as_str() {
+                            Some(c) => format!("{}({c})", r["toolName"].as_str().unwrap_or("?")),
+                            None => r["toolName"].as_str().unwrap_or("?").to_string(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let what = if rules.is_empty() { s["type"].as_str().unwrap_or("a change").to_string() } else { rules.join(", ") };
+            match s["destination"].as_str() {
+                Some(d) => format!("{what} in {d}"),
+                None => what,
+            }
+        })
+        .collect();
+    Some(clean(&parts.join("; ")))
 }
 
 /// The request for the hook input `raw`, or `None` when jazari leaves the prompt to the terminal.
@@ -134,8 +242,8 @@ fn request_for(raw: &Value, now: f64, wait: u64) -> Option<Request> {
             .iter()
             .map(|q| {
                 Some(Question {
-                    question: q["question"].as_str()?.to_string(),
-                    options: q["options"].as_array()?.iter().filter_map(|o| o["label"].as_str().map(String::from)).collect(),
+                    question: clean(q["question"].as_str()?),
+                    options: q["options"].as_array()?.iter().filter_map(|o| o["label"].as_str().map(clean)).collect(),
                     multi: q["multiSelect"].as_bool().unwrap_or(false),
                 })
             })
@@ -144,20 +252,19 @@ fn request_for(raw: &Value, now: f64, wait: u64) -> Option<Request> {
     } else {
         Vec::new()
     };
-    let preview = if !questions.is_empty() {
-        questions.iter().map(|q| q.question.as_str()).collect::<Vec<_>>().join("\n")
-    } else if let Some(command) = input["command"].as_str() {
-        command.to_string()
-    } else if let Some(path) = input["file_path"].as_str().or(input["path"].as_str()).or(input["notebook_path"].as_str()) {
-        path.to_string()
+    let (summary, detail) = if questions.is_empty() {
+        describe(tool, input)
     } else {
-        input.to_string()
+        (cut(&questions[0].question, MAX_SUMMARY_CHARS), questions.iter().map(|q| q.question.as_str()).collect::<Vec<_>>().join("\n"))
     };
+    let project = raw["cwd"].as_str().and_then(|c| std::path::Path::new(c).file_name()).map_or_else(|| "?".into(), |n| clean(&n.to_string_lossy()));
     Some(Request {
         session: session.to_string(),
-        tool: tool.to_string(),
-        preview: cut(&crate::jazari::telegram::redact(&preview)),
-        always_allow: questions.is_empty() && raw["permission_suggestions"].as_array().is_some_and(|s| !s.is_empty()),
+        project,
+        tool: clean(tool),
+        summary,
+        detail,
+        rule: if questions.is_empty() { rule_text(&raw["permission_suggestions"]) } else { None },
         questions,
         opened: now,
         until: now + wait as f64,
@@ -206,11 +313,16 @@ trait Conn {
     fn send(&mut self, line: &[u8]) -> std::io::Result<()>;
     /// Waits up to [`POLL`] for a line.
     fn recv(&mut self) -> Recv;
+    /// Whether the server is still the process that was checked when the connection opened.
+    fn still_trusted(&self) -> bool;
 }
 
-/// The hook's surroundings, so that tests use no socket, a fixed clock and a scratch event log.
+/// The hook's surroundings, so that tests use no socket, no dialog, a fixed clock and a scratch
+/// event log.
 struct Env {
     connect: Box<dyn FnMut() -> Option<Box<dyn Conn>>>,
+    /// Touch ID or the password, showing the reason; true only when the user confirmed.
+    confirm: Box<dyn FnMut(&str) -> bool>,
     events: PathBuf,
     wait: u64,
     now: Box<dyn FnMut() -> f64>,
@@ -225,6 +337,8 @@ enum Outcome {
     Timeout,
     /// The dashboard closed the connection or sent something that is not a valid answer.
     Dropped,
+    /// The user cancelled or failed the confirmation of an allow or an answer.
+    NotConfirmed,
 }
 
 impl Outcome {
@@ -234,12 +348,14 @@ impl Outcome {
             Outcome::Desk => "desk",
             Outcome::Timeout => "timeout",
             Outcome::Dropped => "dropped",
+            Outcome::NotConfirmed => "not-confirmed",
         }
     }
 }
 
-/// Sends the request to a trusted dashboard and waits for the first answer. Returns the hook
-/// output, or `None` when the terminal prompt decides.
+/// Sends the request to the dashboard and waits for the first answer. An allow or an answer applies
+/// only after the user confirms it with Touch ID or the password. Returns the hook output, or
+/// `None` when the terminal prompt decides.
 fn handle(env: &mut Env, raw: &Value) -> Option<Value> {
     let req = request_for(raw, (env.now)(), env.wait)?;
     let mut conn = (env.connect)()?;
@@ -248,11 +364,11 @@ fn handle(env: &mut Env, raw: &Value) -> Option<Value> {
     conn.send(&line).ok()?;
     (env.log)(json!({ "ts": req.opened, "session_id": req.session, "hook_event_name": OPENED_EVENT, "tool": req.tool }));
     let mut events = crate::jsonl::JsonlTail::at_end(env.events.clone());
-    let outcome = loop {
+    let mut outcome = loop {
         match conn.recv() {
             Recv::Line(bytes) => {
                 break match serde_json::from_slice::<Answer>(&bytes) {
-                    Ok(a) if check(&req, &a).is_ok() => Outcome::Dashboard(a),
+                    Ok(a) if check(&req, &a).is_ok() && conn.still_trusted() => Outcome::Dashboard(a),
                     _ => Outcome::Dropped,
                 };
             }
@@ -266,13 +382,19 @@ fn handle(env: &mut Env, raw: &Value) -> Option<Value> {
             break Outcome::Timeout;
         }
     };
+    if let Outcome::Dashboard(a) = &outcome
+        && *a != Answer::Deny
+        && !(env.confirm)(&reason(&req, a))
+    {
+        outcome = Outcome::NotConfirmed;
+    }
     let answer = match &outcome {
         Outcome::Dashboard(a) => serde_json::to_value(a).ok(),
         _ => None,
     };
     (env.log)(json!({
         "ts": (env.now)(), "session_id": req.session, "hook_event_name": CLOSED_EVENT,
-        "tool": req.tool, "outcome": outcome.key(), "answer": answer, "preview": req.preview,
+        "tool": req.tool, "outcome": outcome.key(), "answer": answer, "summary": req.summary,
     }));
     match outcome {
         Outcome::Dashboard(a) => Some(output(raw, &a)),
@@ -296,21 +418,43 @@ pub struct AnswerArgs {
     wait: Option<u64>,
 }
 
-/// `jazari watch answer`: the hook, or turning the feature on or off.
+fn save_setting(key: &str, value: Value) -> anyhow::Result<()> {
+    let path = data_dir().join("settings.json");
+    let mut map = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<serde_json::Map<String, Value>>(&t).ok()).unwrap_or_default();
+    map.insert(key.into(), value.clone());
+    let a = crate::act::Action::new(crate::act::Kind::Setting, key).detail(value.to_string());
+    crate::act::run(&a, || {
+        std::fs::create_dir_all(data_dir())?;
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_vec_pretty(&Value::Object(map))?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    })
+}
+
+/// `jazari watch answer`: the hook, or turning the feature on or off. Only the user changes the
+/// setting, from a terminal; a Claude Code session or a hook is refused.
 pub fn run(a: AnswerArgs) -> anyhow::Result<()> {
     if a.hook {
         return run_hook(enabled, &mut std::io::stdin(), &mut std::io::stdout());
     }
-    if a.on || a.off {
-        crate::settings::set("answer_prompts", json!(a.on))?;
-    }
-    if let Some(secs) = a.wait {
-        crate::settings::set("answer_wait_secs", json!(secs))?;
+    if a.on || a.off || a.wait.is_some() {
+        anyhow::ensure!(
+            !matches!(crate::act::origin(), crate::act::Origin::Session(_) | crate::act::Origin::Hook),
+            "only the user can change this, from a terminal outside Claude Code"
+        );
+        if a.on || a.off {
+            save_setting("answer_prompts", json!(a.on))?;
+        }
+        if let Some(secs) = a.wait {
+            save_setting("answer_wait_secs", json!(secs))?;
+        }
     }
     if !cfg!(unix) {
         println!("Answering from the dashboard works on macOS and Linux only.");
     } else if enabled() {
-        println!("Answering from the dashboard is on: a prompt waits {} s for an answer in the dashboard (key r), and the terminal prompt stays open.", wait_secs());
+        let how = if crate::presence::available() { "an allow or an answer asks for Touch ID or your password" } else { "only a deny can be sent from here" };
+        println!("Answering from the dashboard is on: a prompt waits {} s for you in the dashboard (key r), {how}, and the terminal prompt stays open.", wait_secs());
     } else {
         println!("Answering from the dashboard is off. Turn it on with `jazari watch answer --on`.");
     }
@@ -328,6 +472,7 @@ fn run_hook(on: fn() -> bool, stdin: &mut dyn std::io::Read, stdout: &mut dyn st
     let Ok(raw) = serde_json::from_str::<Value>(&input) else { return Ok(()) };
     let mut env = Env {
         connect: Box::new(server::connect),
+        confirm: Box::new(crate::presence::confirm),
         events: crate::claude_data_dir().join("events.jsonl"),
         wait: wait_secs(),
         now: Box::new(crate::now),
@@ -348,8 +493,11 @@ fn run_hook(on: fn() -> bool, stdin: &mut dyn std::io::Read, stdout: &mut dyn st
 pub mod server {
     use super::{Answer, Conn, Recv, Request};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, Sender};
+
+    /// The most hook connections the dashboard serves at once.
+    const MAX_CONNECTIONS: usize = 32;
 
     /// A prompt waiting in the dashboard, with the way back to its hook.
     pub struct Pending {
@@ -363,29 +511,39 @@ pub mod server {
     pub struct Server {
         rx: Receiver<Pending>,
         pending: Vec<Pending>,
+        /// The socket file this server bound, to notice when another process replaces it.
+        bound: Option<(u64, u64)>,
     }
 
     impl Server {
-        /// Takes in new prompts and drops those whose hook has gone.
+        /// Takes in new prompts and drops those whose hook has gone. A prompt may wait no longer
+        /// than the longest wait the setting allows, whatever its sender claims.
         pub fn poll(&mut self, now: f64) {
-            while let Ok(p) = self.rx.try_recv() {
+            while let Ok(mut p) = self.rx.try_recv() {
+                p.req.until = p.req.until.min(now + super::MAX_WAIT_SECS as f64);
                 self.pending.push(p);
             }
             self.pending.retain(|p| !p.closed.load(Ordering::SeqCst) && p.req.until > now);
         }
 
-        /// The oldest prompt of `session` that waits for an answer.
-        pub fn waiting(&self, session: &str) -> Option<&Request> {
-            self.pending.iter().map(|p| &p.req).find(|r| r.session == session)
+        /// Every prompt of `session` that waits for an answer, oldest first.
+        pub fn waiting(&self, session: &str) -> Vec<&Request> {
+            self.pending.iter().map(|p| &p.req).filter(|r| r.session == session).collect()
         }
 
         pub fn count(&self) -> usize {
             self.pending.len()
         }
 
-        /// Sends `answer` to the oldest prompt of `session`.
-        pub fn answer(&mut self, session: &str, answer: Answer) -> anyhow::Result<()> {
-            let i = self.pending.iter().position(|p| p.req.session == session && !p.closed.load(Ordering::SeqCst));
+        /// Whether the socket file is still the one this server bound. Another process of the user
+        /// can remove it and bind its own, and hooks would then reach that process instead.
+        pub fn intact(&self) -> bool {
+            self.bound.is_none_or(|b| file_id(&super::socket_path()) == Some(b))
+        }
+
+        /// Sends `answer` to the prompt `req`.
+        pub fn answer(&mut self, req: &Request, answer: Answer) -> anyhow::Result<()> {
+            let i = self.pending.iter().position(|p| p.req == *req && !p.closed.load(Ordering::SeqCst));
             let i = i.ok_or_else(|| anyhow::anyhow!("that prompt was already answered or has closed"))?;
             super::check(&self.pending[i].req, &answer)?;
             let p = self.pending.remove(i);
@@ -401,8 +559,19 @@ pub mod server {
                 tx.send(Pending { req, reply, closed: Arc::default() }).unwrap();
                 answers.push(got);
             }
-            (Server { rx, pending: Vec::new() }, answers)
+            (Server { rx, pending: Vec::new(), bound: None }, answers)
         }
+    }
+
+    #[cfg(unix)]
+    fn file_id(path: &std::path::Path) -> Option<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path).ok().map(|m| (m.dev(), m.ino()))
+    }
+
+    #[cfg(not(unix))]
+    fn file_id(_: &std::path::Path) -> Option<(u64, u64)> {
+        None
     }
 
     /// Starts the dashboard's socket server, unless another dashboard already serves it or the
@@ -421,17 +590,24 @@ pub mod server {
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).ok()?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok()?;
+        let bound = file_id(&path);
         let (tx, rx) = std::sync::mpsc::channel();
+        let open = Arc::new(AtomicUsize::new(0));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                // Only the user's own processes may send prompts.
-                if peer(&stream).is_some_and(|(_, uid)| uid == me()) {
-                    let tx = tx.clone();
-                    std::thread::spawn(move || serve(stream, tx));
+                // Only the user's own processes may send prompts, and only so many at once.
+                if open.load(Ordering::SeqCst) >= MAX_CONNECTIONS || !peer(&stream).is_some_and(|(_, uid)| uid == me()) {
+                    continue;
                 }
+                open.fetch_add(1, Ordering::SeqCst);
+                let (tx, open) = (tx.clone(), open.clone());
+                std::thread::spawn(move || {
+                    serve(stream, tx);
+                    open.fetch_sub(1, Ordering::SeqCst);
+                });
             }
         });
-        Some(Server { rx, pending: Vec::new() })
+        Some(Server { rx, pending: Vec::new(), bound })
     }
 
     #[cfg(not(unix))]
@@ -447,7 +623,7 @@ pub mod server {
         let Ok(read_half) = stream.try_clone() else { return };
         let _ = read_half.set_read_timeout(Some(std::time::Duration::from_secs(2)));
         let mut line = Vec::new();
-        if std::io::BufReader::new(read_half).read_until(b'\n', &mut line).is_err() {
+        if std::io::BufReader::new(read_half.take(64 * 1024)).read_until(b'\n', &mut line).is_err() {
             return;
         }
         let Ok(req) = serde_json::from_slice::<Request>(&line) else { return };
@@ -515,41 +691,55 @@ pub mod server {
         None
     }
 
-    /// Whether `pid` is a jazari dashboard that the user started, not one that a Claude Code
-    /// session started: a jazari process with no Claude Code process among its ancestors.
+    /// The executable and start time of `pid`.
     #[cfg(unix)]
-    fn trusted_dashboard(pid: u32) -> bool {
-        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    fn identity(pid: u32) -> Option<(std::path::PathBuf, u64)> {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
         let mut sys = System::new();
-        let mut at = Pid::from_u32(pid);
-        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[at]), true, ProcessRefreshKind::nothing());
-        if !sys.process(at).is_some_and(|p| p.name().to_string_lossy().to_lowercase().contains("jazari")) {
-            return false;
-        }
-        for _ in 0..64 {
-            if crate::watch::is_claude_process(at.as_u32()) {
-                return false;
-            }
-            sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[at]), true, ProcessRefreshKind::nothing());
-            match sys.process(at).and_then(|p| p.parent()) {
-                Some(parent) if parent != at => at = parent,
-                _ => return true,
-            }
-        }
-        false
+        let pid = Pid::from_u32(pid);
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_exe(UpdateKind::Always));
+        let p = sys.process(pid)?;
+        Some((std::fs::canonicalize(p.exe()?).ok()?, p.start_time()))
     }
 
-    /// The hook's side: connect to the dashboard and check that the server is a trusted dashboard.
+    /// Defence in depth, not proof: whether `pid` runs this same jazari executable, with no Claude
+    /// Code process among its parents. A missing parent before the system's first process fails
+    /// the check.
+    #[cfg(unix)]
+    fn trusted_dashboard(pid: u32) -> Option<(u32, u64)> {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        let mine = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+        let (exe, started) = identity(pid)?;
+        if exe != mine {
+            return None;
+        }
+        let mut sys = System::new();
+        let mut at = Pid::from_u32(pid);
+        for _ in 0..64 {
+            if crate::watch::is_claude_process(at.as_u32()) {
+                return None;
+            }
+            if at.as_u32() <= 1 {
+                return Some((pid, started));
+            }
+            sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[at]), true, ProcessRefreshKind::nothing());
+            at = sys.process(at)?.parent()?;
+        }
+        None
+    }
+
+    /// The hook's side: connect to the dashboard and check its server process.
     #[cfg(unix)]
     pub(super) fn connect() -> Option<Box<dyn Conn>> {
         let stream = std::os::unix::net::UnixStream::connect(super::socket_path()).ok()?;
         let (pid, uid) = peer(&stream)?;
-        if uid != me() || !trusted_dashboard(pid) {
+        if uid != me() {
             return None;
         }
+        let server = trusted_dashboard(pid)?;
         stream.set_read_timeout(Some(super::POLL)).ok()?;
         let reader = std::io::BufReader::new(stream.try_clone().ok()?);
-        Some(Box::new(UnixConn { reader, writer: stream, line: Vec::new() }))
+        Some(Box::new(UnixConn { reader, writer: stream, line: Vec::new(), server }))
     }
 
     #[cfg(not(unix))]
@@ -563,6 +753,8 @@ pub mod server {
         writer: std::os::unix::net::UnixStream,
         /// A line read in parts across timeouts.
         line: Vec<u8>,
+        /// The server's pid and start time when the connection opened.
+        server: (u32, u64),
     }
 
     #[cfg(unix)]
@@ -576,10 +768,16 @@ pub mod server {
             match self.reader.read_until(b'\n', &mut self.line) {
                 Ok(0) => Recv::Closed,
                 Ok(_) if self.line.ends_with(b"\n") => Recv::Line(std::mem::take(&mut self.line)),
+                Ok(_) if self.line.len() > 64 * 1024 => Recv::Closed,
                 Ok(_) => Recv::Wait,
                 Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Recv::Wait,
                 Err(_) => Recv::Closed,
             }
+        }
+
+        /// The same pid with the same start time: a pid reused by a newer process fails.
+        fn still_trusted(&self) -> bool {
+            identity(self.server.0).is_some_and(|(_, started)| started == self.server.1)
         }
     }
 }
@@ -598,12 +796,12 @@ mod tests {
     }
 
     fn bash(cmd: &str) -> Value {
-        json!({ "session_id": "s1", "hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": { "command": cmd },
+        json!({ "session_id": "s1", "cwd": "/w/marsad", "hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": { "command": cmd },
                 "permission_suggestions": [{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "mkdir:*" }], "behavior": "allow", "destination": "localSettings" }] })
     }
 
     fn ask() -> Value {
-        json!({ "session_id": "s1", "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
+        json!({ "session_id": "s1", "cwd": "/w/marsad", "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
                 "tool_input": { "questions": [{ "question": "Pick a fruit", "header": "Fruit", "multiSelect": false,
                                                 "options": [{ "label": "Apple", "description": "" }, { "label": "Pear", "description": "" }] }] } })
     }
@@ -616,6 +814,7 @@ mod tests {
         clock: Rc<RefCell<f64>>,
         on_recv: Box<dyn FnMut(usize)>,
         n: usize,
+        trusted: bool,
     }
 
     impl Conn for Fake {
@@ -629,28 +828,42 @@ mod tests {
             (self.on_recv)(self.n);
             if self.script.is_empty() { Recv::Wait } else { self.script.remove(0) }
         }
+        fn still_trusted(&self) -> bool {
+            self.trusted
+        }
     }
 
     struct Run {
         env: Env,
         sent: Rc<RefCell<Vec<u8>>>,
         logged: Rc<RefCell<Vec<Value>>>,
+        /// The reasons the user was asked to confirm.
+        asked: Rc<RefCell<Vec<String>>>,
     }
 
     fn run(dir: &std::path::Path, wait: u64, script: Vec<Recv>, on_recv: impl FnMut(usize) + 'static) -> Run {
+        run_with(dir, wait, script, on_recv, true, true)
+    }
+
+    fn run_with(dir: &std::path::Path, wait: u64, script: Vec<Recv>, on_recv: impl FnMut(usize) + 'static, confirmed: bool, trusted: bool) -> Run {
         let clock = Rc::new(RefCell::new(1000.0));
         let sent = Rc::new(RefCell::new(Vec::new()));
         let logged = Rc::new(RefCell::new(Vec::new()));
-        let mut fake = Some(Fake { script, sent: sent.clone(), clock: clock.clone(), on_recv: Box::new(on_recv), n: 0 });
-        let l = logged.clone();
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let mut fake = Some(Fake { script, sent: sent.clone(), clock: clock.clone(), on_recv: Box::new(on_recv), n: 0, trusted });
+        let (l, a) = (logged.clone(), asked.clone());
         let env = Env {
             connect: Box::new(move || fake.take().map(|f| Box::new(f) as Box<dyn Conn>)),
+            confirm: Box::new(move |reason| {
+                a.borrow_mut().push(reason.to_string());
+                confirmed
+            }),
             events: dir.join("events.jsonl"),
             wait,
             now: Box::new(move || *clock.borrow()),
             log: Box::new(move |ev| l.borrow_mut().push(ev)),
         };
-        Run { env, sent, logged }
+        Run { env, sent, logged, asked }
     }
 
     fn line(a: &Answer) -> Recv {
@@ -660,19 +873,34 @@ mod tests {
     }
 
     #[test]
-    fn a_dashboard_answer_allows_and_is_logged() {
+    fn an_allow_applies_only_after_the_user_confirms_the_hooks_own_action() {
         let dir = scratch("allow");
         let mut r = run(&dir, 120, vec![Recv::Wait, line(&Answer::Allow)], |_| {});
         let out = handle(&mut r.env, &bash("mkdir out")).unwrap();
         assert_eq!(out["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        assert_eq!(*r.asked.borrow(), ["allow Bash `mkdir out` in session marsad (s1)"]);
         let sent: Request = serde_json::from_slice(r.sent.borrow().strip_suffix(b"\n").unwrap()).unwrap();
-        assert_eq!((sent.preview.as_str(), sent.always_allow), ("mkdir out", true));
-        let closed = r.logged.borrow().last().cloned().unwrap();
-        assert_eq!((closed["hook_event_name"].as_str(), closed["outcome"].as_str()), (Some(CLOSED_EVENT), Some("dashboard")));
+        assert_eq!((sent.summary.as_str(), sent.rule.as_deref()), ("`mkdir out`", Some("Bash(mkdir:*) in localSettings")));
+        assert_eq!(r.logged.borrow().last().unwrap()["outcome"], "dashboard");
+
+        // A cancelled or failed confirmation (or a fake dashboard's allow) allows nothing.
+        let mut r = run_with(&dir, 120, vec![line(&Answer::AlwaysAllow)], |_| {}, false, true);
+        assert_eq!(handle(&mut r.env, &bash("rm -rf build")), None);
+        assert_eq!(*r.asked.borrow(), ["always allow Bash(mkdir:*) in localSettings in session marsad (s1)"]);
+        assert_eq!(r.logged.borrow().last().unwrap()["outcome"], "not-confirmed");
     }
 
     #[test]
-    fn a_terminal_answer_a_timeout_or_a_bad_reply_leaves_the_decision_to_the_terminal() {
+    fn a_deny_needs_no_confirmation() {
+        let dir = scratch("deny");
+        let mut r = run_with(&dir, 120, vec![line(&Answer::Deny)], |_| {}, false, true);
+        let out = handle(&mut r.env, &bash("rm -rf build")).unwrap();
+        assert_eq!(out["hookSpecificOutput"]["decision"], json!({ "behavior": "deny", "message": DENY_MESSAGE }));
+        assert!(r.asked.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_terminal_answer_a_timeout_a_bad_reply_or_a_changed_server_leaves_the_decision_to_the_terminal() {
         let dir = scratch("desk");
         let events = dir.join("events.jsonl");
         std::fs::write(&events, "{\"session_id\":\"s1\",\"hook_event_name\":\"PostToolUse\"}\n").unwrap();
@@ -694,18 +922,20 @@ mod tests {
         assert_eq!(handle(&mut r.env, &bash("ls")), None);
         assert_eq!(r.logged.borrow().last().unwrap()["outcome"], "timeout");
 
-        // A reply that does not fit the prompt, or a closed connection, never allows.
+        // A reply that does not fit the prompt, a closed connection, or a server process that
+        // changed never allows, and no confirmation is asked.
+        let no_rule = json!({ "session_id": "s1", "tool_name": "Write", "tool_input": { "file_path": "/w/a.rs", "content": "x" } });
         let mut r = run(&dir, 120, vec![line(&Answer::AlwaysAllow)], |_| {});
-        let no_rule = json!({ "session_id": "s1", "tool_name": "Write", "tool_input": { "file_path": "/w/a.rs" } });
         assert_eq!(handle(&mut r.env, &no_rule), None);
         let mut r = run(&dir, 120, vec![Recv::Line(b"{\"answer\":\"allow\"".to_vec()), Recv::Closed], |_| {});
         assert_eq!(handle(&mut r.env, &bash("ls")), None);
-        let mut r = run(&dir, 120, vec![Recv::Closed], |_| {});
+        let mut r = run_with(&dir, 120, vec![line(&Answer::Allow)], |_| {}, true, false);
         assert_eq!(handle(&mut r.env, &bash("ls")), None);
+        assert!(r.asked.borrow().is_empty());
     }
 
     #[test]
-    fn without_a_trusted_dashboard_the_hook_does_nothing() {
+    fn without_a_dashboard_the_hook_does_nothing() {
         let dir = scratch("nodash");
         let mut r = run(&dir, 120, vec![], |_| {});
         r.env.connect = Box::new(|| None);
@@ -733,6 +963,7 @@ mod tests {
         assert_eq!(d["behavior"], "allow");
         assert_eq!(d["updatedInput"]["answers"]["Pick a fruit"], "Pear");
         assert_eq!(d["updatedInput"]["questions"][0]["header"], "Fruit", "the original questions are kept");
+        assert_eq!(*r.asked.borrow(), ["answer \"Pick a fruit\": Pear in session marsad (s1)"]);
     }
 
     #[test]
@@ -748,50 +979,47 @@ mod tests {
     }
 
     #[test]
-    fn the_dashboard_server_answers_the_oldest_open_prompt_of_a_session() {
+    fn the_server_clamps_the_wait_and_lists_every_prompt_of_a_session() {
         let a = request_for(&bash("ls"), 10.0, 120).unwrap();
+        let mut far = request_for(&bash("pwd"), 20.0, 120).unwrap();
+        far.until = 1e12;
         let mut b = request_for(&ask(), 20.0, 120).unwrap();
         b.session = "s2".into();
-        let (mut server, answers) = server::Server::for_tests(vec![a, b]);
+        let (mut server, answers) = server::Server::for_tests(vec![a.clone(), far, b.clone()]);
         server.poll(30.0);
-        assert_eq!(server.count(), 2);
-        assert_eq!(server.waiting("s2").unwrap().tool, "AskUserQuestion");
-        assert!(server.answer("s2", Answer::Allow).is_err(), "a question needs a choice");
-        server.answer("s1", Answer::Deny).unwrap();
+        assert_eq!(server.count(), 3);
+        assert_eq!(server.waiting("s1").len(), 2);
+        assert!(server.answer(&b, Answer::Allow).is_err(), "a question needs a choice");
+        server.answer(&a, Answer::Deny).unwrap();
         assert_eq!(answers[0].try_recv().unwrap(), Answer::Deny);
-        assert!(server.answer("s1", Answer::Deny).is_err(), "answered once");
-        server.poll(1000.0);
-        assert_eq!(server.count(), 0, "an expired prompt is dropped");
+        assert!(server.answer(&a, Answer::Deny).is_err(), "answered once");
+        server.poll(30.0 + MAX_WAIT_SECS as f64 + 1.0);
+        assert_eq!(server.count(), 0, "a claimed far deadline is cut to the longest wait");
     }
 
     #[test]
-    fn outputs_match_what_claude_code_accepts() {
-        let deny = output(&bash("x"), &Answer::Deny);
-        assert_eq!(deny["hookSpecificOutput"]["decision"], json!({ "behavior": "deny", "message": DENY_MESSAGE }));
-        let always = output(&bash("x"), &Answer::AlwaysAllow);
-        assert_eq!(always["hookSpecificOutput"]["decision"]["updatedPermissions"], bash("x")["permission_suggestions"]);
-        assert_eq!(always["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
-    }
-
-    #[test]
-    fn plan_approval_and_bad_input_are_left_to_the_terminal() {
+    fn writes_and_edits_show_their_content_and_text_is_cleaned() {
+        let write = json!({ "session_id": "s1", "tool_name": "Write", "tool_input": { "file_path": "/w/a.rs", "content": "fn main() {}\n\u{1b}[2Jgone" } });
+        let r = request_for(&write, 0.0, 120).unwrap();
+        assert_eq!(r.summary, "writing /w/a.rs (2 lines)");
+        assert!(r.detail.contains("fn main() {}") && !r.detail.contains('\u{1b}'), "{:?}", r.detail);
+        let edit = json!({ "session_id": "s1", "tool_name": "Edit", "tool_input": { "file_path": "/w/a.rs", "old_string": "a\nb", "new_string": "c" } });
+        let r = request_for(&edit, 0.0, 120).unwrap();
+        assert_eq!((r.summary.as_str(), r.detail.as_str()), ("editing /w/a.rs (2 lines replaced by 1)", "- a\n- b\n+ c"));
         let plan = json!({ "session_id": "s1", "tool_name": "ExitPlanMode", "tool_input": { "plan": "x" } });
         assert_eq!(request_for(&plan, 0.0, 120), None);
         let bad_id = json!({ "session_id": "../s1", "tool_name": "Bash", "tool_input": { "command": "ls" } });
         assert_eq!(request_for(&bad_id, 0.0, 120), None);
-        let no_options = json!({ "session_id": "s1", "tool_name": "AskUserQuestion", "tool_input": { "questions": [{ "question": "Why?", "options": [] }] } });
-        assert_eq!(request_for(&no_options, 0.0, 120), None);
-        let write = json!({ "session_id": "s1", "tool_name": "Write", "tool_input": { "file_path": "/w/a.rs", "content": "x" } });
-        let req = request_for(&write, 0.0, 120).unwrap();
-        assert_eq!((req.preview.as_str(), req.always_allow), ("/w/a.rs", false));
     }
 
     #[test]
     fn previews_are_redacted_and_cut() {
         let secret = json!({ "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": "curl -H 'Authorization: Bearer sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789'" } });
         let req = request_for(&secret, 0.0, 120).unwrap();
-        assert!(!req.preview.contains("abcdefghijklmnopqrstuvwxyz0123456789"), "{}", req.preview);
-        let long = json!({ "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": "x".repeat(MAX_PREVIEW_CHARS + 10) } });
-        assert_eq!(request_for(&long, 0.0, 120).unwrap().preview.chars().count(), MAX_PREVIEW_CHARS + 1);
+        assert!(!req.detail.contains("abcdefghijklmnopqrstuvwxyz0123456789") && !req.summary.contains("abcdefghijklmnopqrstuvwxyz0123456789"));
+        let long = json!({ "session_id": "s1", "tool_name": "Bash", "tool_input": { "command": "x".repeat(MAX_DETAIL_CHARS + 10) } });
+        let req = request_for(&long, 0.0, 120).unwrap();
+        assert_eq!(req.detail.chars().count(), MAX_DETAIL_CHARS + 1);
+        assert_eq!(req.summary.chars().count(), MAX_SUMMARY_CHARS + 1);
     }
 }

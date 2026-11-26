@@ -74,8 +74,9 @@ fn add_hooks(settings: &mut Map<String, Value>, exe: &str) -> anyhow::Result<()>
             }));
         }
         if *event == "PermissionRequest" {
-            // Longer than the longest wait the setting allows, so Claude Code never cuts it short.
-            let timeout = crate::answer::MAX_WAIT_SECS + 10;
+            // Longer than the longest wait plus the Touch ID confirmation, so Claude Code never cuts
+            // it short.
+            let timeout = crate::answer::MAX_WAIT_SECS + crate::answer::CONFIRM_SECS + 10;
             list.push(json!({
                 "hooks": [{ "type": "command", "command": format!("\"{exe}\"{ANSWER_HOOK}"), "timeout": timeout }]
             }));
@@ -576,7 +577,7 @@ mod tests {
         assert_eq!(after, ["\"/x/jazari\" hook", "\"/x/jazari\" watch context --hook"], "a long turn is warned between tool calls");
         let permission = s["hooks"]["PermissionRequest"].as_array().unwrap();
         let answer = &permission.last().unwrap()["hooks"][0];
-        assert_eq!((permission.len(), answer["command"].as_str(), answer["timeout"].as_u64()), (2, Some("\"/x/jazari\" watch answer --hook"), Some(610)));
+        assert_eq!((permission.len(), answer["command"].as_str(), answer["timeout"].as_u64()), (2, Some("\"/x/jazari\" watch answer --hook"), Some(730)));
         assert!(answer.get("async").is_none(), "the dashboard's answer must reach Claude Code");
         assert_eq!(kind_of(&permission[1]), Some("answer"));
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1, "other events get only the async hook");

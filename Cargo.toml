@@ -27,6 +27,13 @@ sysinfo = "0.39.6"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Touch ID or the Mac password before the dashboard allows a session's tool call.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSError"] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "block2", "LAContext", "LAPublicDefines", "LAError"] }
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

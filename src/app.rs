@@ -1066,8 +1066,14 @@ impl App {
     fn poll_answers(&mut self) {
         let Some(server) = self.answers.as_mut() else { return };
         server.poll(crate::now());
+        if !server.intact() {
+            self.error = Some("another process replaced jazari's answer socket: prompts no longer reach this dashboard; restart it ".into());
+            self.answers = None;
+            self.answer_view = None;
+            return;
+        }
         if let Some(v) = &self.answer_view
-            && server.waiting(&v.session) != Some(&v.req)
+            && !server.waiting(&v.session).contains(&&v.req)
         {
             self.info = Some(format!("{}'s prompt was answered at the terminal or has closed ", v.name));
             self.answer_view = None;
@@ -1081,8 +1087,12 @@ impl App {
             self.info = Some("another jazari dashboard answers prompts, or this system can't (macOS and Linux only) ".into());
             return;
         };
-        match answers.waiting(&s.id) {
-            Some(req) => self.answer_view = Some(crate::answer_view::AnswerView::open(&s.id, s.project(), req.clone())),
+        let waiting = answers.waiting(&s.id);
+        match waiting.first() {
+            Some(req) => {
+                let view = crate::answer_view::AnswerView::open(&s.id, s.project(), (*req).clone(), waiting.len(), crate::presence::available());
+                self.answer_view = Some(view);
+            }
             None if !crate::answer::enabled() => self.info = Some("answering from the dashboard is off: turn it on with `jazari watch answer --on` ".into()),
             None => self.info = Some(format!("{} has no prompt waiting for jazari ", s.project())),
         }
@@ -1095,8 +1105,10 @@ impl App {
             crate::answer_view::Key::Close => self.answer_view = None,
             crate::answer_view::Key::Send(answer) => {
                 let v = self.answer_view.take().unwrap();
-                match self.answers.as_mut().map(|a| a.answer(&v.session, answer)) {
-                    Some(Ok(())) => self.info = Some(format!("answered {}'s prompt ", v.name)),
+                let confirm = !matches!(answer, crate::answer::Answer::Deny);
+                match self.answers.as_mut().map(|a| a.answer(&v.req, answer)) {
+                    Some(Ok(())) if confirm => self.info = Some(format!("sent to {}: confirm it with Touch ID or your password ", v.name)),
+                    Some(Ok(())) => self.info = Some(format!("denied {}'s prompt ", v.name)),
                     Some(Err(e)) => self.error = Some(format!("couldn't answer: {e:#} ")),
                     None => {}
                 }

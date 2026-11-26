@@ -5,8 +5,9 @@ GitHub release. Keep each bullet to one short line.
 
 ## Unreleased
 
-- `r` answers a session's permission prompt or question from the dashboard; turn it on with `jazari watch answer --on` (macOS and Linux)
-- The risk check refuses tool calls that name the dashboard's answer socket or the message inbox
+- `r` answers a session's permission prompt or question from the dashboard; turn it on with `jazari watch answer --on`
+- Each allow or answer from the dashboard asks for Touch ID or your Mac password first; on Linux the dashboard can only deny
+- The risk check refuses commands that type keys into other programs, or that name the dashboard's answer socket or the message inbox
 - Every session jazari starts gets "Working with jazari" first; it is no longer a choice in `c` or `jazari build rules`
 - Telegram controls only jazari's own work: /tell and /stop are gone, and the sessions you start yourself are controlled at your computer
 - /status on Telegram shows products, tasks, usage and the machine's disk and memory; /pause and /resume pause only product work

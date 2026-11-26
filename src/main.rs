@@ -25,6 +25,7 @@ mod live;
 mod model;
 mod pin;
 mod portable;
+mod presence;
 mod prompt_gen;
 mod pressure;
 mod prompt_view;
