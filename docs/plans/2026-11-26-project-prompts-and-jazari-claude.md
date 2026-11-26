@@ -114,8 +114,14 @@ resumed session keeps its id.
 ## How this fits with the handoff
 
 The handoff's base set (#122) is the old session's set plus the global ticked defaults. With this
-plan, the defaults part becomes "the project's set, else the global ticked defaults". Nothing else
-in the handoff changes.
+plan, the base set is the union of:
+
+1. the old session's set;
+2. the project's set, or the global ticked defaults when the project has none.
+
+The project's set only adds keys. It never drops a key that the old session was using.
+`rules::files_for` removes any key that appears twice, and it puts "Working with jazari" first
+(#127). The model's extras come after the base set, as before.
 
 ## Left out on purpose
 
@@ -136,7 +142,8 @@ in the handoff changes.
    from `handoff.rs` (moved to a shared place).
 3. `src/main.rs`: the `Claude` top-level command and the `Project` build command.
 4. `src/app.rs`, `src/ui.rs`: the `s` key in the picker, and the "project set" line.
-5. `src/handoff.rs`: the project's set as the default part of the base set.
+5. `src/handoff.rs`: the base set is the old session's set, then the project's set (or the global
+   defaults).
 6. Docs: README (the key list, a "Per-project prompts" section, `jazari claude`), CHANGELOG,
    `assets/SKILL.md` (a session can start another session with `jazari claude`).
 
@@ -147,6 +154,8 @@ in the handoff changes.
 - The set falls back to the global defaults when the project has none, and back again after
   `clear`.
 - "Working with jazari" is first and once, also when the saved set names it.
+- The handoff's base set keeps every key of the old session, adds the project's keys, and holds each
+  key once.
 - An unknown key is skipped with one warning, and the start goes on.
 - `add` refuses an unknown key; `remove` of a key that isn't there says so.
 - `jazari claude` passes the args after `--` unchanged, refuses a second `--append-system-prompt-file`
