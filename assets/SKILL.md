@@ -122,6 +122,7 @@ marsad skill edit <name> --with "<feedback>" --yes   # revises one of the user's
 marsad skill copy <name> --as <new-name>             # copies a skill (a built-in one, say) into the user's library
 marsad skill rm|versions|restore <name> [<n>]        # as for prompts; a version is the whole folder
 marsad skill install <name>                          # installs it into ~/.claude/skills unless a copy is there already
+marsad skill sync                                    # installs missing ticked skills, updates out-of-date copies (also runs at session start)
 ```
 
 A ticked skill is installed into `~/.claude/skills/<name>/` when its command is copied, unless a copy
