@@ -31,6 +31,11 @@ process (this is already done to close it) and reads its command line. It takes 
 launch file's name and stores them in the handoff record as `inherited`. A session that started
 without a launch file has an empty `inherited` list.
 
+jazari reads the command line with `sysinfo`, which is already a dependency. On Windows, or when
+the command line can't be read, `inherited` stays empty, and the first reply says "jazari couldn't
+read the last session's prompts, so this session starts with your ticked defaults". A `cfg`
+fallback keeps the build working on every system.
+
 A key that is no longer in the library (the founder deleted that prompt) is dropped, and the
 first message says so.
 
@@ -54,8 +59,23 @@ the model.
 6. If the run fails, takes longer than 20 seconds, or returns JSON that jazari can't read, jazari
    starts with the inherited and ticked set only, and prints why.
 
-`jazari build handoff resume <id> --no-pick` skips the model. A setting turns the pick off for
-every handoff: `jazari build handoff --pick off`.
+`jazari build handoff resume <id> --no-pick` skips the model. The setting `handoff_pick` (on by
+default) turns the pick off for every handoff: `jazari build handoff --pick off`. jazari records
+each pick in the actions log (`jazari watch actions`): the keys that it added and the reasons, or
+why it added none.
+
+### Why the model's answer is limited
+
+The old session wrote the handoff text, and that text can contain words from tool output, for
+example a web page or a file. So the text can steer the pick. This is acceptable only because the
+pick can do so little:
+
+- it can add only keys that are in the founder's library;
+- it adds at most 3 keys;
+- it adds only prompts and skills, and it never removes a key from the old set or the defaults.
+
+jazari checks the model's JSON strictly: one object with one `add` list, each item with a `key`
+and a `reason` that are strings. Any other shape counts as a failed run.
 
 ## How the session starts
 
@@ -67,6 +87,7 @@ dashboard's launch commands (`src/rules.rs`). It installs the chosen skills into
 claude --session-id <new uuid> --append-system-prompt-file <launch file> "<first line + handoff text>"
 ```
 
+- jazari makes a new random (v4) UUID for each start.
 - `--session-id` gives the new session an id that jazari knows before the session starts. So the
   dashboard can show the set on the right row from the first second.
 - The first line asks Claude to begin its first reply with the set, for example:
@@ -96,7 +117,8 @@ claude --session-id <new uuid> --append-system-prompt-file <launch file> "<first
 1. `src/handoff.rs`: store `inherited` in the record. In `resume`, run the pick, build the launch
    file, install the skills, and start `claude` with `--session-id`.
 2. `src/handoff_pick.rs` (new): the model input, the JSON check, the 20-second limit and the
-   fallback. The `claude -p` call is an injectable function, so tests never run `claude`.
+   fallback. The `claude -p` call is an injectable function, as in `src/prompt_gen.rs`, so tests
+   never run `claude -p`.
 3. `src/rules.rs`: read the keys from a launch file name (the opposite of the existing naming).
 4. The dashboard (`src/ui.rs`, `src/model.rs`): show the set on the session row and the reasons
    in the details view. jazari logs a `JazariLaunchSet` event with the session id, the keys and
@@ -112,6 +134,11 @@ claude --session-id <new uuid> --append-system-prompt-file <launch file> "<first
 - The fallback: a run that fails, and a run that takes longer than 20 seconds.
 - The first line lists inherited keys, ticked keys and extras with reasons.
 - The model input holds titles and summaries, never prompt bodies.
+
+## Checked by hand before the code relies on it
+
+- `claude --session-id <uuid> --append-system-prompt-file <file> "<text>"` works in the installed
+  Claude Code version: the session gets that id and reads the file.
 
 ## Not checked by tests
 
