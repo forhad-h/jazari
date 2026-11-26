@@ -1,5 +1,7 @@
 mod act;
 mod alerts;
+mod answer;
+mod answer_view;
 mod app;
 mod badge_art;
 mod badges;
@@ -167,6 +169,8 @@ enum Cmd {
     Clean(clean::CleanArgs),
     /// Send a running session a message, or stop (--stop) or interrupt (--interrupt) it.
     Tell(channel::TellArgs),
+    /// Answer permission prompts and questions from the dashboard: turn it on or off, set the wait.
+    Answer(answer::AnswerArgs),
     /// From inside a session: post what it is doing to jazari (--attention: it needs the user).
     Say(channel::SayArgs),
     /// Disk, memory, swap and CPU in one reading, with what to be careful about before heavy work.
@@ -230,11 +234,13 @@ pub fn now() -> f64 {
 
 fn main() -> anyhow::Result<()> {
     let cmd = Cli::parse().top.and_then(Top::into_cmd);
-    let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_) | Cmd::Guard { .. }));
+    let quiet = matches!(cmd, Some(Cmd::Hook | Cmd::Statusline | Cmd::Context(_) | Cmd::Guard { .. }))
+        || matches!(&cmd, Some(Cmd::Answer(a)) if a.hook);
     act::set_origin(match &cmd {
         None => act::Origin::Dashboard,
         Some(Cmd::Guard { hook: false }) => act::Origin::Watcher,
         Some(Cmd::Hook | Cmd::Statusline | Cmd::Guard { hook: true }) => act::Origin::Hook,
+        Some(Cmd::Answer(a)) if a.hook => act::Origin::Hook,
         Some(Cmd::Context(_)) if quiet && std::env::args().any(|a| a == "--hook") => act::Origin::Hook,
         // Anything else is worked out on first use: the user's terminal or a Claude Code session.
         Some(_) => return dispatch(cmd),
@@ -278,6 +284,7 @@ fn dispatch(cmd: Option<Cmd>) -> anyhow::Result<()> {
         Some(Cmd::Disk(args)) => disk::run(args),
         Some(Cmd::System(args)) => system::run(args),
         Some(Cmd::Tell(args)) => channel::run_tell(args),
+        Some(Cmd::Answer(args)) => answer::run(args),
         Some(Cmd::Say(args)) => channel::run_say(args),
         Some(Cmd::Clean(args)) => clean::run(args),
         Some(Cmd::Risk(args)) => risk::run(args),

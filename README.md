@@ -68,7 +68,7 @@ jazari watch actions     # what jazari did, refused or held, and who asked
 
 Restart running Claude Code sessions after `install` so they pick up the hooks.
 
-Keys: `↑↓`/`jk` select · `enter` session details · `tab` subagents · `y` copy the session name and id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts and skills, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new prompt or skill, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
+Keys: `↑↓`/`jk` select · `enter` session details · `tab` subagents · `y` copy the session name and id · `t` send the session a message · `x` stop it before its next tool call · `X` interrupt it now · `r` answer the session's permission prompt or question (after `jazari watch answer --on`) · `u` usage history · `D` disk cleanup (`enter` remove, `A` all tier A, `J` ask Claude, `o` auto-clean on/off, `r` rescan) · `p` badges and share to LinkedIn · `P` pin a status window on top of other apps (macOS) · `b` agent board · `c` copy a launch command with your choice of prompts and skills, for a session or an agent team, or only the prompts' file path to paste into a running session, and write your own (`n` new prompt or skill, `e` edit, `d` delete, `v` versions, `u` undo a delete) · `n` write a new prompt from a rough idea · `a` show/hide ended sessions · `m` alerts on/off · `s` cycle sort column (status → project → context → time → tokens) · `S` reverse sort · `q` quit.
 The mouse wheel works like `↑↓` in every list and pane; to select text with the mouse, hold `Shift` (`Option` in macOS Terminal and iTerm2) while you drag.
 After `kill -9`, the dashboard cannot restore the terminal. Then mouse moves appear in the shell as text such as `35;32;21M`. Run `reset` to fix the terminal.
 In session details and subagents: `↑↓` scroll · `g`/`G` top/bottom · `tab` switch between them · `esc` back.
@@ -324,6 +324,20 @@ you through jazari.
   cleanly and `claude --resume <id>` continues it. A prompt you send the session first cancels it.
 - **`X`** (`jazari watch tell <id> --interrupt`) interrupts it now, as Esc does, after checking the process is
   still that session's Claude Code. Both ask for `y` first.
+- **`r`** answers the selected session's permission prompt or question from the dashboard. Turn it on
+  with `jazari watch answer --on` (macOS and Linux; `--wait <secs>` sets how long a prompt waits,
+  120 s by default, and `--off` turns it off). A prompt then waits for you in the dashboard, and
+  the footer shows how many wait. The terminal prompt stays open too, and the first answer wins.
+  For a permission prompt, `y` allows, `A` allows and adds the rule that Claude Code suggests, and
+  `n` denies. For a question, `1`-`9` chooses an option (or marks it, then `enter`, for a
+  multi-select question). `esc` leaves the prompt to the terminal. With no answer before the wait
+  ends, nothing is decided, and the terminal prompt stays. Plan approvals stay in the terminal.
+
+  Only the dashboard can answer. The hook sends the prompt over a private socket that the dashboard
+  owns. It accepts an answer only from a jazari dashboard that runs as your user and has no Claude
+  Code process among its parent processes. The risk check also refuses tool calls that name that
+  socket or the message inbox. One limit remains: a process of your user that starts a real
+  dashboard outside Claude Code's process tree (for example, detached through tmux) is not stopped.
 - **`jazari watch say "…"`**, run by the session, shows what it is doing on its row in the dashboard;
   `--attention` also marks it as needing you, with the question sound and a notification.
 

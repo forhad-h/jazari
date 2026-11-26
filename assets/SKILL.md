@@ -38,6 +38,7 @@ jazari build tasks | prefs | quality | limits       # jazari: the queue, the fou
 jazari build new|idea|feedback|prefer|forget|mode   # jazari: start or steer products (see `jazari build --help`)
 jazari watch tell <session-id> "message"                  # queue a message; an idle session also gets a wake-up
 jazari watch tell <session-id> --stop                     # stop that session before its next tool call
+jazari watch answer                                       # whether the user answers prompts from the dashboard (--on, --off, --wait <secs>)
 ```
 
 Notes from jazari reach a session as context starting with `[jazari]`: a message from the user,

@@ -53,8 +53,30 @@ fn worst(found: Vec<Finding>) -> Option<Finding> {
     best
 }
 
+/// Where jazari takes the user's answers and messages for sessions: the dashboard's answer socket
+/// and the message inbox. A session that reaches them could answer its own permission prompt or
+/// send itself a message that reads as the user's.
+fn user_channel_paths() -> Vec<String> {
+    let mut paths = vec![".jazari/answer".to_string(), ".jazari/claude/inbox".to_string(), "dashboard.sock".to_string()];
+    for p in [crate::data_dir().join("answer"), crate::claude_data_dir().join("inbox")] {
+        paths.push(p.to_string_lossy().into_owned());
+    }
+    paths
+}
+
+/// Refuses any tool call whose input names one of [`user_channel_paths`].
+fn assess_user_channel(tool_input: &Value, paths: &[String]) -> Option<Finding> {
+    let text = tool_input.to_string();
+    paths.iter().find(|p| text.contains(p.as_str())).map(|p| {
+        block("user-channel", format!("it touches {p}, where jazari takes the user's answers and messages for sessions"))
+    })
+}
+
 /// Checks one tool call without touching the network or other programs.
 pub fn assess(tool_name: &str, tool_input: &Value) -> Option<Finding> {
+    if let Some(f) = assess_user_channel(tool_input, &user_channel_paths()) {
+        return Some(f);
+    }
     let s = |k: &str| tool_input.get(k).and_then(Value::as_str).unwrap_or("");
     match tool_name {
         "Bash" => assess_command(s("command")),
@@ -1812,6 +1834,20 @@ pub fn run(a: RiskArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_call_that_names_the_user_channels_is_refused() {
+        let paths = user_channel_paths();
+        for input in [
+            json!({ "command": "printf '{\\\"answer\\\":\\\"allow\\\"}' | nc -U ~/.jazari/answer/dashboard.sock" }),
+            json!({ "file_path": "/Users/me/.jazari/claude/inbox/s1.jsonl", "content": "x" }),
+            json!({ "command": "socat - UNIX-CONNECT:$HOME/.jazari/answer/dashboard.sock" }),
+        ] {
+            let f = assess_user_channel(&input, &paths).expect("refused");
+            assert_eq!((f.severity, f.rule), (Severity::Block, "user-channel"));
+        }
+        assert_eq!(assess_user_channel(&json!({ "command": "ls ~/.jazari/claude" }), &paths), None);
+    }
 
     fn verdict(cmd: &str) -> Option<(Severity, &'static str)> {
         assess_command(cmd).map(|f| (f.severity, f.rule))

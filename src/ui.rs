@@ -240,7 +240,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         _ => {
             draw_list(f, body, app, &visible);
             let ended = if app.show_ended { "hide ended" } else { "show ended" };
-            vec![
+            // A prompt waiting for an answer comes first, so a narrow footer still shows it.
+            let waiting = app.answers.as_ref().map_or(0, |a| a.count());
+            let answer = if waiting > 0 { vec![("r", format!("answer ({waiting} waiting)"))] } else { Vec::new() };
+            answer.into_iter().chain([
                 ("↑↓", "select".into()),
                 ("enter", "details".into()),
                 ("tab", "subagents".into()),
@@ -257,7 +260,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                 ("m", format!("alerts: {}", if app.alerts_on { "on" } else { "off" })),
                 ("s/S", format!("sort: {}", app.sort.label())),
                 ("q", "quit".into()),
-            ]
+            ])
+            .collect()
         }
     };
     let picker_digits = app.rules_picker.as_ref().map(|p| format!("space/1-{}", p.library.len().clamp(1, 9))).unwrap_or_default();
@@ -297,14 +301,18 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         (None, None, None) => keys,
     };
-    let keys = if app.compose.is_some() {
+    let keys = if let Some(v) = &app.answer_view {
+        v.keys()
+    } else if app.compose.is_some() {
         vec![("enter", "send".into()), ("esc", "cancel".into())]
     } else if let Some(c) = &app.control {
         vec![("y", if c.interrupt { "interrupt now" } else { "stop" }.into()), ("any key", "keep it running".into())]
     } else {
         keys
     };
-    if let Some(c) = &app.compose {
+    if let Some(v) = &app.answer_view {
+        v.draw(f, body, crate::now());
+    } else if let Some(c) = &app.compose {
         draw_compose(f, body, c, app.tick);
     } else if let Some(c) = &app.control {
         draw_control(f, body, c);

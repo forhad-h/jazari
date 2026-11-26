@@ -5,6 +5,8 @@ GitHub release. Keep each bullet to one short line.
 
 ## Unreleased
 
+- `r` answers a session's permission prompt or question from the dashboard; turn it on with `jazari watch answer --on` (macOS and Linux)
+- The risk check refuses tool calls that name the dashboard's answer socket or the message inbox
 - `jazari update` starts the background services again on the new version; a busy supervisor finishes its task first
 
 ## 1.0.5 - 2026-11-26

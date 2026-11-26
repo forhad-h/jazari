@@ -35,7 +35,7 @@ fn settings_path() -> PathBuf {
 fn is_ours(entry: &Value) -> bool {
     entry["hooks"].as_array().is_some_and(|hs| {
         hs.iter().any(|h| {
-            h["command"].as_str().is_some_and(|c| c.contains("jazari") && (c.ends_with(" hook") || c.ends_with(CONTEXT_HOOK) || c.ends_with(GUARD_HOOK)))
+            h["command"].as_str().is_some_and(|c| c.contains("jazari") && (c.ends_with(" hook") || c.ends_with(CONTEXT_HOOK) || c.ends_with(GUARD_HOOK) || c.ends_with(ANSWER_HOOK)))
         })
     })
 }
@@ -46,6 +46,10 @@ const CONTEXT_HOOK: &str = " watch context --hook";
 
 /// Arguments of the hook that checks the disk before each tool call and prompt.
 const GUARD_HOOK: &str = " guard --hook";
+
+/// Arguments of the hook that lets the dashboard answer a permission prompt or question. It is
+/// always registered and exits at once with no output while the feature is off.
+const ANSWER_HOOK: &str = " watch answer --hook";
 
 /// Registers jazari for every event. The context and disk guard hooks are synchronous: only a hook
 /// Claude Code waits for can add text to the prompt or stop a tool call.
@@ -67,6 +71,13 @@ fn add_hooks(settings: &mut Map<String, Value>, exe: &str) -> anyhow::Result<()>
         if matches!(*event, "UserPromptSubmit" | "PreToolUse") {
             list.push(json!({
                 "hooks": [{ "type": "command", "command": format!("\"{exe}\"{GUARD_HOOK}"), "timeout": 5 }]
+            }));
+        }
+        if *event == "PermissionRequest" {
+            // Longer than the longest wait the setting allows, so Claude Code never cuts it short.
+            let timeout = crate::answer::MAX_WAIT_SECS + 10;
+            list.push(json!({
+                "hooks": [{ "type": "command", "command": format!("\"{exe}\"{ANSWER_HOOK}"), "timeout": timeout }]
             }));
         }
     }
@@ -236,6 +247,8 @@ fn kind_of(entry: &Value) -> Option<&'static str> {
         "context"
     } else if command.ends_with(GUARD_HOOK) {
         "guard"
+    } else if command.ends_with(ANSWER_HOOK) {
+        "answer"
     } else {
         "hook"
     })
@@ -561,6 +574,11 @@ mod tests {
         assert_eq!(tool, ["\"/x/jazari\" hook", "\"/x/jazari\" guard --hook"], "the disk guard checks every tool call");
         let after: Vec<&str> = s["hooks"]["PostToolUse"].as_array().unwrap().iter().map(|e| e["hooks"][0]["command"].as_str().unwrap()).collect();
         assert_eq!(after, ["\"/x/jazari\" hook", "\"/x/jazari\" watch context --hook"], "a long turn is warned between tool calls");
+        let permission = s["hooks"]["PermissionRequest"].as_array().unwrap();
+        let answer = &permission.last().unwrap()["hooks"][0];
+        assert_eq!((permission.len(), answer["command"].as_str(), answer["timeout"].as_u64()), (2, Some("\"/x/jazari\" watch answer --hook"), Some(610)));
+        assert!(answer.get("async").is_none(), "the dashboard's answer must reach Claude Code");
+        assert_eq!(kind_of(&permission[1]), Some("answer"));
         assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1, "other events get only the async hook");
         strip(&mut s);
         assert_eq!(s["hooks"]["UserPromptSubmit"], json!([foreign]), "uninstall removes all three");
