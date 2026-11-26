@@ -189,6 +189,7 @@ pub fn install(e: &Env, parts: &[Part], out: &mut dyn FnMut(String)) -> anyhow::
         let (ok, said) = (e.launchctl)(&["bootstrap".into(), e.domain.clone(), path.to_string_lossy().into()]);
         anyhow::ensure!(ok, "launchctl couldn't load {}: {}", path.display(), said.trim());
         out(format!("Installed the {}: it runs now, and again at each login. Log: {}", part.name(), log.display()));
+        out(format!("Stop any {} you started by hand first: only one can run at a time.", part.name()));
     }
     Ok(())
 }
@@ -205,6 +206,17 @@ pub fn uninstall(e: &Env, parts: &[Part], out: &mut dyn FnMut(String)) -> anyhow
     Ok(())
 }
 
+/// The last line with text in a log, from its final 4 KB.
+fn last_log_line(log: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(log).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(4096))).ok()?;
+    let mut tail = Vec::new();
+    f.read_to_end(&mut tail).ok()?;
+    String::from_utf8_lossy(&tail).lines().rev().map(str::trim).find(|l| !l.is_empty()).map(String::from)
+}
+
 /// One line per part: installed or not, running or not, and the log.
 pub fn status(e: &Env, out: &mut dyn FnMut(String)) -> anyhow::Result<()> {
     unsupported()?;
@@ -219,6 +231,10 @@ pub fn status(e: &Env, out: &mut dyn FnMut(String)) -> anyhow::Result<()> {
             "installed, but not loaded (run `jazari build service install` again)".to_string()
         } else if s.running {
             format!("running (pid {})", s.pid.map_or("?".into(), |p| p.to_string()))
+        } else if last_log_line(&log_path(&e.data, part)).is_some_and(|l| l.contains("is already running")) {
+            // The service exits at once because another copy holds the lock, and launchd starts it
+            // again every minute.
+            format!("keeps stopping, because another {0} is already running. Stop the {0} you started by hand, or run `jazari build service uninstall {0}`", part.name())
         } else {
             format!("stopped (last exit code {})", s.last_exit.as_deref().unwrap_or("unknown"))
         };
@@ -276,6 +292,18 @@ mod tests {
         status(&e, &mut |l| lines.push(l)).unwrap();
         assert!(lines.iter().any(|l| l.starts_with("bridge: running (pid 77)")), "{lines:?}");
         assert!(lines.contains(&"supervisor: not installed".to_string()), "{lines:?}");
+
+        // A second copy that can't get the lock: launchd says it isn't running, and the log says why.
+        let stopped = |args: &[String]| if args[0] == "print" { (true, "\tstate = not running\n\tlast exit code = 1\n".to_string()) } else { (true, String::new()) };
+        let e2 = Env { launchctl: &stopped, agents: e.agents.clone(), data: e.data.clone(), exe: e.exe.clone(), env: vec![], domain: e.domain.clone() };
+        let mut after = Vec::new();
+        status(&e2, &mut |l| after.push(l)).unwrap();
+        assert!(after[0].starts_with("bridge: stopped (last exit code 1)"), "{after:?}");
+        std::fs::write(log_path(&e.data, Part::Bridge), "Listening\nError: a jazari bridge is already running\n\n").unwrap();
+        after.clear();
+        status(&e2, &mut |l| after.push(l)).unwrap();
+        assert!(after[0].starts_with("bridge: keeps stopping, because another bridge is already running."), "{after:?}");
+        assert!(lines.iter().any(|l| l.starts_with("Stop any bridge you started by hand first")), "{lines:?}");
 
         uninstall(&e, &Part::ALL, &mut |l| lines.push(l)).unwrap();
         assert!(!plist_path(&e.agents, Part::Bridge).exists());

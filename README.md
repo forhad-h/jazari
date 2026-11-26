@@ -327,8 +327,9 @@ jazari build service uninstall             # stop and remove both; the logs stay
 - Its output goes to `~/.jazari/logs/bridge.log` or `supervisor.log`.
 - The service gets the `PATH` of the shell that installed it, so it finds `docker` and `git`. After
   you update jazari or change your `PATH`, run `install` again.
-- Stop a bridge that runs in a terminal before you install the service. Only one bridge can run
-  at a time.
+- Stop any bridge you started by hand first. Only one bridge can run at a time. If another copy
+  is still running, the service keeps stopping and starting again every minute, and
+  `service status` tells you.
 - Other systems are not supported yet. There, run `jazari build bridge` and `jazari build run` in
   tmux or a terminal that stays open.
 
