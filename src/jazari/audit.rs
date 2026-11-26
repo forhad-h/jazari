@@ -2,11 +2,11 @@
 //! the hash of the one before it, so an edited or removed entry breaks the chain and
 //! `jazari build audit` finds it.
 //!
-//! The chain alone can't show entries cut from the end, or a whole file written again by someone
-//! with access to the Mac. So every [`EVERY`] entries the supervisor sends the founder the entry
-//! count and the head (the last entry's hash) on Telegram, which is off this machine, and keeps a
-//! copy in `audit-head.json`. `jazari build audit` checks the record against that copy and prints
-//! the current head, so the founder can compare it with the last Telegram message.
+//! The chain alone can't show entries cut from the end, or a whole record written again. So the
+//! supervisor saves the entry count and the head (the last entry's hash) in `audit-head.json` when
+//! it starts, when it stops and every [`EVERY`] entries, and `jazari build audit` checks the record
+//! against that copy. Someone with access to this Mac who rewrites both files is not detected:
+//! that needs a copy kept where this machine can't change it.
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -35,7 +35,7 @@ pub fn tail(path: &Path) -> Tail {
     Tail { count: lines.len(), head: head.unwrap_or_else(|| GENESIS.into()) }
 }
 
-/// How often the head is sent to the founder: every 50 entries.
+/// How often the head is saved: every 50 entries.
 pub const EVERY: usize = 50;
 
 /// Appends an entry after `tail`, and moves `tail` to it.
@@ -57,12 +57,7 @@ pub fn short(head: &str) -> &str {
     &head[..head.len().min(16)]
 }
 
-/// The message that gives the founder the head.
-pub fn head_text(count: usize, head: &str) -> String {
-    format!("🔏 Audit record: {count} entries, head {}. `jazari build audit` checks the record against this.", short(head))
-}
-
-/// Where the last head sent to the founder is kept, next to the record.
+/// Where the saved head is kept, next to the record.
 pub fn head_path(record: &Path) -> std::path::PathBuf {
     record.with_file_name("audit-head.json")
 }
@@ -81,9 +76,9 @@ pub struct Whole {
     pub warning: Option<String>,
 }
 
-const NO_HEAD: &str = "the saved Telegram head is missing; compare the head below with your last 🔏 message";
+const NO_HEAD: &str = "the saved head (audit-head.json) is missing, so entries cut from the end or a rewritten record can't be found";
 
-/// Verifies the chain, then checks it against the last head sent to the founder: the record must
+/// Verifies the chain, then checks it against the saved head: the record must
 /// still have that entry, with that hash. Entries cut from the end, or a record written again,
 /// fail here.
 pub fn check(record: &Path) -> Result<Whole, String> {
@@ -91,8 +86,8 @@ pub fn check(record: &Path) -> Result<Whole, String> {
     let mut whole = Whole { count: hashes.len(), head: hashes.last().cloned().unwrap_or_else(|| GENESIS.into()), warning: None };
     let sent = std::fs::read_to_string(head_path(record)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
     let Some((count, head)) = sent.as_ref().and_then(|v| Some((v["count"].as_u64()?, v["head"].as_str()?))) else {
-        // A head is sent at least every EVERY entries, so a record this long must have one. Deleting
-        // the copy must not hide a rewrite.
+        // A head is saved at least every EVERY entries, so a record this long must have one.
+        // Deleting the copy must not hide a rewrite.
         if hashes.len() >= EVERY {
             return Err(NO_HEAD.into());
         }
@@ -103,10 +98,10 @@ pub fn check(record: &Path) -> Result<Whole, String> {
     };
     let count = count as usize;
     if count > hashes.len() {
-        return Err(format!("the record has {} entries, but {count} were sent to you on Telegram: entries were removed", hashes.len()));
+        return Err(format!("the record has {} entries, but {count} were saved earlier: entries were removed", hashes.len()));
     }
     if count > 0 && hashes[count - 1] != head {
-        return Err(format!("entry {count} doesn't match the head sent to you on Telegram: the record was written again"));
+        return Err(format!("entry {count} doesn't match the saved head: the record was written again"));
     }
     Ok(whole)
 }
@@ -156,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn the_head_sent_to_the_founder_catches_cut_and_rewritten_records() {
+    fn the_saved_head_catches_cut_and_rewritten_records() {
         let dir = std::env::temp_dir().join(format!("jazari-audit-head-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("audit.jsonl");
@@ -175,15 +170,15 @@ mod tests {
         let lines: Vec<_> = text.lines().collect();
         std::fs::write(&path, format!("{}\n{}\n", lines[0], lines[1])).unwrap();
         assert_eq!(chain(&path).map(|h| h.len()), Ok(2));
-        assert_eq!(check(&path), Err("the record has 2 entries, but 3 were sent to you on Telegram: entries were removed".into()));
+        assert_eq!(check(&path), Err("the record has 2 entries, but 3 were saved earlier: entries were removed".into()));
 
-        // Written again with other entries: a whole chain, but not the one the founder was sent.
+        // Written again with other entries: a whole chain, but not the one that was saved.
         std::fs::remove_file(&path).unwrap();
         let mut t = tail(&path);
         for i in 0..4 {
             append(&path, &mut t, i as f64, "task.start", json!({ "task": i + 100 })).unwrap();
         }
-        assert_eq!(check(&path), Err("entry 3 doesn't match the head sent to you on Telegram: the record was written again".into()));
+        assert_eq!(check(&path), Err("entry 3 doesn't match the saved head: the record was written again".into()));
 
         // Deleting the saved head too: a caution for a short record, an error from EVERY entries on.
         std::fs::remove_file(head_path(&path)).unwrap();
@@ -197,7 +192,6 @@ mod tests {
         save_head(&path, t.count, &t.head).unwrap();
         assert_eq!(check(&path).map(|w| (w.count, w.warning)), Ok((EVERY, None)));
         assert_eq!(short(&heads[0]).len(), 16);
-        assert!(head_text(50, &heads[0]).contains(&format!("50 entries, head {}", short(&heads[0]))));
         std::fs::remove_dir_all(dir).ok();
     }
 }

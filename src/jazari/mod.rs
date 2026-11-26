@@ -346,11 +346,9 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
         JazariCmd::Audit => match audit::check(&dir().join("audit.jsonl")) {
             Ok(w) => {
                 if let Some(warning) = &w.warning {
-                    println!("⚠️ Check by hand: {warning}.");
+                    println!("⚠️ {warning}.");
                 }
-                println!("The audit record is whole: {} entries.", w.count);
-                println!("The supervisor sends you its count and head on Telegram when it starts, when it stops and every {} entries.", audit::EVERY);
-                println!("If the last such message there isn't this line, the record was changed:\n\n    {}", audit::head_text(w.count, &w.head));
+                println!("The audit record is whole: {} entries, head {}.", w.count, audit::short(&w.head));
                 Ok(())
             }
             Err(e) => anyhow::bail!("the audit record was changed: {e}"),
@@ -752,8 +750,6 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
         let mut t = audit_tail.borrow_mut();
         match audit::append(&audit_path, &mut t, crate::now(), kind, data) {
             Ok(()) if t.count.is_multiple_of(audit::EVERY) => {
-                // The head goes off this machine, so a record written again here can't match it.
-                tell_founder(&audit::head_text(t.count, &t.head), &[]);
                 if let Err(e) = audit::save_head(&audit_path, t.count, &t.head) {
                     eprintln!("[jazari] couldn't save the audit head: {e}");
                 }
@@ -780,18 +776,17 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
         audit: &audit,
     };
     println!("jazari supervisor on ({}). Ctrl-C stops it; a task in progress goes back in the queue next start.", profile.plan.label());
-    send_audit_head(&audit_path);
+    save_audit_head(&audit_path);
     let result = supervise(&deps, once);
-    send_audit_head(&audit_path);
+    save_audit_head(&audit_path);
     result
 }
 
-/// Sends the founder the audit record's count and head on Telegram and keeps a copy, so a record
-/// cut or written again later doesn't match. When the record is already broken, says so instead.
-fn send_audit_head(record: &std::path::Path) {
+/// Saves the audit record's count and head, so a record cut or written again later doesn't match.
+/// The founder hears about it only when the record is already broken, because then they must act.
+fn save_audit_head(record: &std::path::Path) {
     match audit::check(record) {
         Ok(w) => {
-            tell_founder(&audit::head_text(w.count, &w.head), &[]);
             if let Err(e) = audit::save_head(record, w.count, &w.head) {
                 eprintln!("[jazari] couldn't save the audit head: {e}");
             }

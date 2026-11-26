@@ -23,12 +23,15 @@ the fix.
 
 - **Gap:** the hash chain has no key. It shows an edited or removed entry in the middle, but not
   entries cut from the end, or a whole file rewritten by someone with local access.
-- **Done:** replaced by the off-machine head anchor. An HMAC key was dropped, because any program
-  that runs as the same user can read a Keychain item that `security` created, without a prompt.
-  - The supervisor sends the founder the entry count and the head (the last hash) on Telegram when
-    it starts, when its loop ends and every 50 entries, and keeps a copy in `audit-head.json`.
-  - `jazari build audit` fails when the record has fewer entries than that copy, or a different
-    hash at that entry. It prints the exact Telegram line to compare with the founder's chat.
+- **Done in part:** the supervisor saves the entry count and the head in `audit-head.json`. The
+  head is the last hash. It is saved when the supervisor starts, when it stops and every 50 entries.
+  `jazari build audit` fails when the record is shorter than that copy, or differs at that entry.
+  From 50 entries on, a missing copy fails too.
+- **Not done:** an HMAC key in the Keychain doesn't help. Any program that runs as the same user
+  can read a Keychain item that `security` created, and macOS shows no prompt. A head sent to
+  Telegram doesn't help either: the same attacker has the bot token, and a bot can delete its own
+  recent messages. The founder also wants Telegram only for decisions.
+- **Left:** a copy of the head kept where this machine can't change it.
 
 ## 3. Pairing brute force
 

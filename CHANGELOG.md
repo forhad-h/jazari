@@ -8,7 +8,7 @@ GitHub release. Keep each bullet to one short line.
 - `jazari update` adds the Claude Code hooks a new version brings, so context warnings, messages and stops work without `jazari install`
 - A new session adds missing jazari hooks too; a hook you removed yourself stays removed
 - settings.json is written in one step, and its backup is made only the first time
-- The supervisor sends the audit record's head to Telegram, and `jazari build audit` finds entries cut from the end or a record written again
+- `jazari build audit` finds entries cut from the end of the audit record, or a record written again
 
 ## 1.0.2 - 2026-11-26
 
