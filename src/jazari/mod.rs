@@ -7,6 +7,7 @@
 
 mod audit;
 mod bridge;
+mod card;
 mod evals;
 mod git;
 mod limits;
@@ -361,6 +362,38 @@ fn products_dir() -> PathBuf {
     crate::settings::get("jazari").and_then(|j| j["products_dir"].as_str().map(PathBuf::from)).unwrap_or_else(|| dir().join("products"))
 }
 
+/// The skills workers get: `jazari.skills` in settings.json (`["all"]` for the whole library),
+/// or Easy English. They load a skill only when they need it, so each one costs a line of its
+/// description per run.
+fn worker_skills() -> Vec<String> {
+    crate::settings::get("jazari")
+        .and_then(|j| j["skills"].as_array().map(|a| a.iter().filter_map(|k| k.as_str().map(String::from)).collect::<Vec<_>>()))
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| vec!["easy-english".into()])
+}
+
+/// Writes the chosen skills from marsad's library into `<work>/.skills`, replacing what was there,
+/// so a worker that changed them doesn't pass the change on.
+fn write_skills(work: &std::path::Path) -> anyhow::Result<()> {
+    let dir = work.join(".skills");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    let keys = worker_skills();
+    let all = keys.iter().any(|k| k == "all");
+    for skill in crate::skills::library().into_iter().filter(|s| all || keys.contains(&s.key)) {
+        for f in &skill.files {
+            let path = dir.join(&skill.key).join(&f.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, &f.bytes)?;
+        }
+    }
+    std::fs::create_dir_all(&dir)?;
+    Ok(())
+}
+
 /// A product's work folder: the task clones its container sees, in jazari's data folder.
 pub fn work_dir(product: &str) -> PathBuf {
     let dir = dir().join("work").join(product);
@@ -492,6 +525,7 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
     let paused = crate::act::paused;
     let ensure = |p: &str, work: &str| sandbox::ensure(p, work);
     let reset = |name: &str| sandbox::reset(name);
+    let skills = |work: &std::path::Path| write_skills(work);
     let work = |p: &str| work_dir(p);
     let audit = |kind: &str, data: serde_json::Value| {
         if let Err(e) = audit::append(&audit_path, crate::now(), kind, data) {
@@ -509,6 +543,7 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
         work: &work,
         ensure: &ensure,
         reset: &reset,
+        skills: &skills,
         notify: &tell_founder,
         audit: &audit,
     };
@@ -548,5 +583,23 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
             }
         };
         std::thread::sleep(std::time::Duration::from_secs_f64(wait));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_chosen_skills_are_written_fresh_into_the_work_folder() {
+        let work = std::env::temp_dir().join(format!("marsad-jazari-skills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(work.join(".skills/old")).unwrap();
+        std::fs::write(work.join(".skills/old/SKILL.md"), "changed by a worker").unwrap();
+        super::write_skills(&work).unwrap();
+        assert!(!work.join(".skills/old").exists(), "what a worker left there is replaced");
+        if super::worker_skills().iter().any(|k| k == "easy-english" || k == "all") {
+            assert!(work.join(".skills/easy-english/SKILL.md").is_file());
+            assert!(work.join(".skills/easy-english/scripts/check.py").is_file());
+        }
+        std::fs::remove_dir_all(work).ok();
     }
 }

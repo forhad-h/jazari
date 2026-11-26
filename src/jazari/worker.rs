@@ -9,10 +9,56 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 /// The shape of a worker's final answer.
-pub const RESULT_SCHEMA: &str = r#"{"type":"object","properties":{"status":{"type":"string","enum":["done","blocked","failed"]},"summary":{"type":"string"},"verdict":{"type":"string","enum":["approve","changes"]},"score":{"type":"integer","minimum":1,"maximum":5},"criteria":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"pass":{"type":"boolean"},"evidence":{"type":"string"}},"required":["name","pass"]}},"follow_ups":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"role":{"type":"string"},"title":{"type":"string"},"brief":{"type":"string"}},"required":["role","title"]}},"needs_founder":{"type":"string"},"approval_needed":{"type":"object","properties":{"kind":{"type":"string","enum":["deploy","spend","contact"]},"detail":{"type":"string"}},"required":["kind","detail"]}},"required":["status","summary"]}"#;
+pub const RESULT_SCHEMA: &str = r#"{"type":"object","properties":{"status":{"type":"string","enum":["done","blocked","failed"]},"summary":{"type":"string"},"verdict":{"type":"string","enum":["approve","changes"]},"score":{"type":"integer","minimum":1,"maximum":5},"criteria":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"pass":{"type":"boolean"},"evidence":{"type":"string"}},"required":["name","pass"]}},"follow_ups":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"role":{"type":"string"},"title":{"type":"string"},"brief":{"type":"string"}},"required":["role","title"]}},"needs_founder":{"type":"object","properties":{"question":{"type":"string"},"why":{"type":"string"},"options":{"type":"array","maxItems":4,"items":{"type":"object","properties":{"label":{"type":"string"},"effect":{"type":"string"}},"required":["label","effect"]}},"recommend":{"type":"string"},"recommend_why":{"type":"string"},"hard_line":{"type":"boolean"}},"required":["question"]},"approval_needed":{"type":"object","properties":{"kind":{"type":"string","enum":["deploy","spend","contact"]},"detail":{"type":"string"}},"required":["kind","detail"]}},"required":["status","summary"]}"#;
 
 /// The longest a run may take before it is stopped, in seconds.
 pub const RUN_TIMEOUT_SECS: u64 = 45 * 60;
+
+/// A question for the founder: what to decide, why, the options with what each changes, the
+/// recommendation, and whether going against the recommendation crosses a hard line (a known
+/// critical vulnerability, a committed secret, harm to user data, anything illegal), which needs
+/// a written override.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Ask {
+    pub question: String,
+    pub why: String,
+    pub options: Vec<super::card::Choice>,
+    pub recommend: Option<(String, String)>,
+    pub hard_line: bool,
+}
+
+impl Ask {
+    fn parse(v: &Value) -> Option<Ask> {
+        if let Some(text) = v.as_str() {
+            return Some(Ask { question: crate::hook::truncate(text, 600), ..Default::default() }).filter(|a| !a.question.is_empty());
+        }
+        let question = crate::hook::truncate(v["question"].as_str()?, 400);
+        let short = |k: &str, n: usize| crate::hook::truncate(v[k].as_str().unwrap_or(""), n);
+        let options = v["options"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|o| Some(super::card::Choice { label: crate::hook::truncate(o["label"].as_str()?, 80), effect: crate::hook::truncate(o["effect"].as_str().unwrap_or(""), 160) }))
+            .filter(|c| !c.label.is_empty())
+            .take(4)
+            .collect::<Vec<_>>();
+        let recommend = Some(short("recommend", 80)).filter(|r| options.iter().any(|o| o.label == *r)).map(|r| (r, short("recommend_why", 160)));
+        Some(Ask { question, why: short("why", 300), options, recommend, hard_line: v["hard_line"] == true }).filter(|a| !a.question.is_empty())
+    }
+
+    /// The question as stored with the task, so a reply like "option 2" can be read later.
+    pub fn stored(&self) -> String {
+        let mut q = self.question.clone();
+        for (i, o) in self.options.iter().enumerate() {
+            q += &format!("\n{}. {}: {}", i + 1, o.label, o.effect);
+        }
+        if let Some((r, _)) = &self.recommend {
+            q += &format!("\nRecommended: {r}");
+        }
+        q
+    }
+}
 
 /// A follow-up task a run asked for.
 #[derive(Clone, Debug, PartialEq)]
@@ -51,7 +97,7 @@ pub struct Outcome {
     pub score: Option<i64>,
     pub failed: Vec<String>,
     pub follow_ups: Vec<FollowUp>,
-    pub needs_founder: Option<String>,
+    pub needs_founder: Option<Ask>,
     /// `(kind, detail)`: deploy, spend or contact.
     pub approval: Option<(String, String)>,
     pub limits: Option<Limits>,
@@ -217,7 +263,7 @@ impl Reader {
                     .filter(|c| c["pass"] == false)
                     .filter_map(|c| c["name"].as_str().map(|n| crate::hook::truncate(n, 80)))
                     .collect();
-                o.needs_founder = s["needs_founder"].as_str().filter(|n| !n.trim().is_empty()).map(|n| crate::hook::truncate(n, 600));
+                o.needs_founder = Ask::parse(&s["needs_founder"]);
                 let a = &s["approval_needed"];
                 o.approval = a["kind"].as_str().filter(|k| ["deploy", "spend", "contact"].contains(k)).map(|k| (k.to_string(), crate::hook::truncate(a["detail"].as_str().unwrap_or(""), 600)));
                 o.follow_ups = s["follow_ups"]
@@ -354,7 +400,15 @@ pub mod tests {
         assert_eq!((o.kind, o.summary.as_str()), (Kind::Failed, "error_max_turns"));
         assert_eq!(read(&[]).kind, Kind::Failed);
         let blocked = read(&[result_line(json!({"status": "blocked", "summary": "Need a key.", "needs_founder": "Which SMS provider?"}))]);
-        assert_eq!((blocked.kind, blocked.needs_founder.as_deref()), (Kind::Blocked, Some("Which SMS provider?")));
+        assert_eq!((blocked.kind, blocked.needs_founder.map(|a| a.question)), (Kind::Blocked, Some("Which SMS provider?".to_string())));
+        let ask = read(&[result_line(json!({"status": "blocked", "summary": "x", "needs_founder": {
+            "question": "Remove the login rate limit?", "why": "You asked for it, but threat model T3 lists password guessing.",
+            "options": [{"label": "Raise the limit to 10", "effect": "keeps the protection"}, {"label": "Remove it", "effect": "allows guessing"}],
+            "recommend": "Raise the limit to 10", "recommend_why": "it solves the complaint safely", "hard_line": false}}))])
+        .needs_founder
+        .unwrap();
+        assert_eq!((ask.options.len(), ask.recommend.as_ref().map(|r| r.0.as_str())), (2, Some("Raise the limit to 10")));
+        assert_eq!(ask.stored(), "Remove the login rate limit?\n1. Raise the limit to 10: keeps the protection\n2. Remove it: allows guessing\nRecommended: Raise the limit to 10");
         let ask = read(&[result_line(json!({"status": "blocked", "summary": "Ready to ship.", "approval_needed": {"kind": "deploy", "detail": "Deploy v1 to fly.io"}}))]);
         assert_eq!(ask.approval, Some(("deploy".into(), "Deploy v1 to fly.io".into())));
         let odd = read(&[result_line(json!({"status": "blocked", "summary": "x", "approval_needed": {"kind": "rm -rf", "detail": "y"}}))]);

@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS kv (
 ";
 
 /// Columns added after the first schema, so older databases gain them.
-const NEW_COLUMNS: [(&str, &str); 9] = [
+const NEW_COLUMNS: [(&str, &str); 10] = [
     ("kind", "TEXT NOT NULL DEFAULT 'work'"),
     ("owner_role", "TEXT"),
     ("round", "INTEGER NOT NULL DEFAULT 0"),
@@ -68,6 +68,7 @@ const NEW_COLUMNS: [(&str, &str); 9] = [
     ("landed", "INTEGER NOT NULL DEFAULT 0"),
     ("spec", "TEXT NOT NULL DEFAULT ''"),
     ("head", "TEXT"),
+    ("hard_line", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 /// What a task is: `work` builds; `eval`, `review` and `security` judge a branch before it merges.
@@ -151,6 +152,18 @@ pub struct Run {
 
 pub struct Store {
     conn: Connection,
+}
+
+/// Whether a reply picks the recommended option of a stored question: its label, or its number
+/// ("option 2", "2").
+fn follows_recommendation(question: &str, reply: &str) -> bool {
+    let Some(rec) = question.lines().find_map(|l| l.strip_prefix("Recommended: ")) else { return false };
+    let reply = reply.trim().to_lowercase();
+    let number = question.lines().find_map(|l| {
+        let (n, rest) = l.split_once(". ")?;
+        (n.chars().all(|c| c.is_ascii_digit()) && rest.split(": ").next()? == rec).then(|| n.to_string())
+    });
+    reply == rec.to_lowercase() || number.is_some_and(|n| reply == n || reply == format!("option {n}"))
 }
 
 /// A title's meaningful words: lowercase, 3+ letters, without filler.
@@ -266,9 +279,15 @@ impl Store {
 
     /// Sets a task aside until the founder answers a question or decides on an approval.
     pub fn wait_for_founder(&self, id: i64, question: Option<&str>, approval: Option<&str>, now: f64) -> anyhow::Result<()> {
+        self.wait_for_founder_on(id, question, approval, false, now)
+    }
+
+    /// Like [`Store::wait_for_founder`]. With `hard_line`, choosing anything but the recommended
+    /// option needs a written override (`override: <reason>`).
+    pub fn wait_for_founder_on(&self, id: i64, question: Option<&str>, approval: Option<&str>, hard_line: bool, now: f64) -> anyhow::Result<()> {
         self.conn.execute(
-            "UPDATE tasks SET status = 'blocked', question = ?2, approval = ?3, updated = ?4 WHERE id = ?1",
-            params![id, question, approval, now],
+            "UPDATE tasks SET status = 'blocked', question = ?2, approval = ?3, hard_line = ?4, updated = ?5 WHERE id = ?1",
+            params![id, question, approval, hard_line, now],
         )?;
         Ok(())
     }
@@ -278,6 +297,14 @@ impl Store {
     pub fn reply(&self, id: i64, reply: &str, now: f64) -> anyhow::Result<Task> {
         let t = self.task(id)?.ok_or_else(|| anyhow::anyhow!("no task #{id}"))?;
         anyhow::ensure!(t.status == "blocked", "task #{id} is {}, not waiting for you", t.status);
+        let hard: bool = self.conn.query_row("SELECT hard_line FROM tasks WHERE id = ?1", [id], |r| r.get(0))?;
+        if hard && !follows_recommendation(t.question.as_deref().unwrap_or(""), reply) {
+            let given = reply.trim().to_ascii_lowercase();
+            anyhow::ensure!(
+                given.starts_with("override:") && given.len() > "override:".len() + 10,
+                "this choice crosses a hard line (for example a known critical vulnerability, a secret in the code, or harm to user data). If you are sure, reply: /answer {id} override: <your reason>"
+            );
+        }
         let asked = t.question.as_deref().or(t.approval.as_deref()).map(|q| format!("You asked: {q}\n")).unwrap_or_default();
         let brief = format!("{}\n\n{asked}The founder replied: {}", t.brief, reply.trim());
         self.conn.execute(
@@ -501,6 +528,26 @@ mod tests {
         let t = s.task(id).unwrap().unwrap();
         assert_eq!((t.status.as_str(), t.question, t.attempts), ("queued", None, 0));
         assert_eq!(t.brief, "Send codes.\n\nYou asked: Which SMS provider?\nThe founder replied: Twilio");
+    }
+
+    #[test]
+    fn a_hard_line_needs_a_written_override_unless_the_recommendation_is_chosen() {
+        let s = Store::memory();
+        s.add_product("shop", "/r", 0.0).unwrap();
+        let q = "Ship with the known SQL injection?\n1. Fix it first: one more day\n2. Ship now: users at risk\nRecommended: Fix it first";
+        for reply in ["Fix it first", "option 1", "1"] {
+            let id = s.add_task(&NewTask { product: "shop", role: "e", title: "Ship", ..Default::default() }, 1.0).unwrap();
+            s.wait_for_founder_on(id, Some(q), None, true, 2.0).unwrap();
+            assert!(s.reply(id, reply, 3.0).is_ok(), "{reply}");
+        }
+        let id = s.add_task(&NewTask { product: "shop", role: "e", title: "Ship", ..Default::default() }, 1.0).unwrap();
+        s.wait_for_founder_on(id, Some(q), None, true, 2.0).unwrap();
+        let err = s.reply(id, "option 2", 3.0).unwrap_err().to_string();
+        assert!(err.contains("hard line") && err.contains(&format!("/answer {id} override:")), "{err}");
+        assert!(s.reply(id, "override: the demo is offline only", 3.0).is_ok());
+        let soft = s.add_task(&NewTask { product: "shop", role: "e", title: "Ship", ..Default::default() }, 1.0).unwrap();
+        s.wait_for_founder(soft, Some(q), None, 2.0).unwrap();
+        assert!(s.reply(soft, "option 2", 3.0).is_ok(), "without a hard line, any choice goes");
     }
 
     #[test]

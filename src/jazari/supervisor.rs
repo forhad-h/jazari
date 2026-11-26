@@ -22,6 +22,7 @@
 //! Every judgment is recorded per role and prompt version. A role that keeps failing evaluation
 //! moves up to the plan's lead model.
 
+use super::card::Card;
 use super::git::{Stage, Staged};
 use super::limits::{self, Decision, Limits, Profile};
 use super::personas::{self, Tier};
@@ -125,6 +126,8 @@ pub struct Deps<'a> {
     pub ensure: &'a dyn Fn(&str, &str) -> anyhow::Result<String>,
     /// Restarts a container, ending anything a worker left running.
     pub reset: &'a dyn Fn(&str) -> anyhow::Result<()>,
+    /// Writes the skills the workers get into the product's work folder (`.skills/`).
+    pub skills: &'a dyn Fn(&Path) -> anyhow::Result<()>,
     pub notify: &'a dyn Fn(&str, &[Button]),
     pub audit: &'a dyn Fn(&str, serde_json::Value),
 }
@@ -145,12 +148,17 @@ fn clock(ts: f64) -> String {
     chrono::DateTime::from_timestamp(ts as i64, 0).map(|t| t.with_timezone(&chrono::Local).format("%a %H:%M").to_string()).unwrap_or_default()
 }
 
-/// Says something once per `key`, however often it is true again.
-fn once(d: &Deps, key: &str, text: &str, buttons: &[Button]) {
+/// Sends the founder a card.
+fn say(d: &Deps, card: &Card) {
+    (d.notify)(&card.text(), &card.buttons());
+}
+
+/// Sends a card once per `key`, however often it is true again.
+fn once(d: &Deps, key: &str, card: &Card) {
     let key = format!("told:{key}");
     if d.store.get(&key).ok().flatten().is_none() {
         let _ = d.store.put(&key, "1");
-        (d.notify)(text, buttons);
+        say(d, card);
     }
 }
 
@@ -158,7 +166,7 @@ fn announce_sleep(d: &Deps, until: f64, reason: &str, key: &str) {
     if d.store.get(&format!("told:sleep:{key}")).ok().flatten().is_none() {
         (d.audit)("sleep", json!({ "until": until, "reason": reason }));
     }
-    once(d, &format!("sleep:{key}"), &format!("😴 jazari sleeps until {}: {reason}.", clock(until)), &[]);
+    once(d, &format!("sleep:{key}"), &Card::new("😴", "jazari is paused for usage", format!("It starts again at {}.", clock(until))).why(format!("{}.", capital(reason))));
 }
 
 // ---------- the harness's own checks ----------
@@ -224,14 +232,30 @@ pub fn run_checks(d: &Deps, container: &str, dir: &str, script: Option<&str>) ->
 }
 
 /// Clones `rev` into a scratch folder of the work area, runs the checks there, and removes it.
-fn checks_on(d: &Deps, container: &str, work: &Path, name: &str, clone: impl FnOnce(&Path) -> anyhow::Result<()>, script: Option<&str>) -> Checks {
+fn checks_on(d: &Deps, container: &str, work: &Path, name: &str, clone: impl FnOnce(&Path) -> anyhow::Result<()>, script: Option<&str>, docs: &[String]) -> (Checks, String) {
     let dir = work.join(name);
     let result = match clone(&dir) {
-        Ok(()) => run_checks(d, container, &super::sandbox::inside(name), script),
-        Err(e) => Checks { passed: false, missing: false, log: format!("the checks couldn't be set up: {e}") },
+        Ok(()) => {
+            let checks = run_checks(d, container, &super::sandbox::inside(name), script);
+            (checks, easy_english(d, container, &super::sandbox::inside(name), docs))
+        }
+        Err(e) => (Checks { passed: false, missing: false, log: format!("the checks couldn't be set up: {e}") }, String::new()),
     };
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+/// The Easy English checker's report on the changed docs, run in the container. It is evidence
+/// for the evaluator, not a gate: the checker can't see meaning.
+fn easy_english(d: &Deps, container: &str, dir: &str, docs: &[String]) -> String {
+    if docs.is_empty() {
+        return String::new();
+    }
+    let mut command: Vec<String> = ["timeout", "120", "sh", "-c", "python3 \"$HOME/.claude/skills/easy-english/scripts/check.py\" \"$@\" 2>&1", "sh"].map(String::from).to_vec();
+    command.extend(docs.iter().take(20).cloned());
+    let mut out = Vec::new();
+    let _ = d.runner.run(container, dir, &command, false, &mut |l| out.push(l.to_string()));
+    crate::hook::truncate(&out.join("\n"), 1500)
 }
 
 /// The gates a built branch must pass before an evaluator spends tokens on it.
@@ -255,9 +279,12 @@ fn gates(d: &Deps, task: &Task, container: &str, repo: &Path, work: &Path, base:
     let (script, first) = checks_script(d, repo, base, &rev);
     if files.iter().any(|f| f == CHECKS) {
         let what = if first { "adds" } else { "changes" };
-        once(d, &format!("checks:{}:{rev}", task.id), &format!("🛡 Task #{} {what} `{CHECKS}`, the quality gate every branch must pass. It gets full code and security review before it counts.", task.id), &[]);
+        let card = Card::new("🛡", format!("Task #{} {what} the quality checks", task.id), format!("`{CHECKS}` decides what every branch must pass."))
+            .why("A change to the checks changes the rules for all later work. So it gets a full code review and security review before it counts.");
+        once(d, &format!("checks:{}:{rev}", task.id), &card);
     }
-    let checks = checks_on(d, container, work, &format!("check-{}", task.id), |dir| d.repo.clone_for_task(repo, dir, branch, base), script.as_deref());
+    let docs_changed: Vec<String> = files.iter().filter(|f| f.ends_with(".md")).cloned().collect();
+    let (checks, plain) = checks_on(d, container, work, &format!("check-{}", task.id), |dir| d.repo.clone_for_task(repo, dir, branch, base), script.as_deref(), &docs_changed);
     let failure = if !secrets.is_empty() {
         Some(format!(
             "The secret scan found credentials in: {}. Remove them and read them from the environment instead. This branch isn't merged, so rewrite its own commits so the secret is gone from its history.",
@@ -280,8 +307,9 @@ fn gates(d: &Deps, task: &Task, container: &str, repo: &Path, work: &Path, base:
     } else {
         "FAILED".into()
     };
+    let plain = if plain.is_empty() { String::new() } else { format!("\n\nThe Easy English checker on the changed docs (hints, not a gate; judge the meaning yourself):\n```\n{plain}\n```") };
     let report = format!(
-        "Evidence the harness gathered itself (trust this over the worker's claims):\n- `{CHECKS}`: {status}\n- secret scan: {}\n- changed files: {}\n```\n{}\n```",
+        "Evidence the harness gathered itself (trust this over the worker's claims):\n- `{CHECKS}`: {status}\n- secret scan: {}\n- changed files: {}\n```\n{}\n```{plain}",
         if secrets.is_empty() { "clean" } else { "credentials found" },
         crate::hook::truncate(&files.join(", "), 600),
         checks.log
@@ -326,7 +354,8 @@ fn park(d: &Deps, p: Pending, why: &str) -> anyhow::Result<()> {
         list.push(p.clone());
         set_pending(d.store, &list)?;
     }
-    once(d, &format!("park:{}:{}", p.branch, p.head), &format!("⏸ {} is approved but not merged yet: {why}. jazari keeps trying.", p.title), &[]);
+    let card = Card::new("⏸", format!("Not merged yet: {}", p.title), "The work is approved, but jazari can't merge it now.").why(capital(why)).detail("jazari tries again by itself.");
+    once(d, &format!("park:{}:{}", p.branch, p.head), &card);
     Ok(())
 }
 
@@ -343,7 +372,7 @@ fn retry_merges(d: &Deps) -> anyhow::Result<()> {
             Ok(Merged::Done | Merged::Handled) => {}
             Ok(Merged::Waiting) => left.push(p),
             Err(e) => {
-                once(d, &format!("merge-error:{}:{}", p.branch, p.head), &format!("⚠️ Merging {} keeps failing: {e}", p.title), &[]);
+                once(d, &format!("merge-error:{}:{}", p.branch, p.head), &Card::new("⚠️", format!("Merge keeps failing: {}", p.title), capital(&e.to_string())).detail("jazari keeps trying."));
                 left.push(p);
             }
         }
@@ -355,7 +384,7 @@ fn retry_merges(d: &Deps) -> anyhow::Result<()> {
 fn merge_or_park(d: &Deps, task: &Task, branch: &str, head: &str, title: &str) -> anyhow::Result<()> {
     let p = || Pending { task: task.id, branch: branch.into(), title: title.into(), head: head.into() };
     match merge(d, task, branch, head, title) {
-        Ok(Merged::Waiting) => park(d, p(), "the base branch's checkout has uncommitted changes; commit or stash them"),
+        Ok(Merged::Waiting) => park(d, p(), "your checkout of the base branch has uncommitted changes. Commit or stash them"),
         Ok(_) => Ok(()),
         Err(e) => park(d, p(), &format!("{e}")),
     }
@@ -376,7 +405,7 @@ fn merge(d: &Deps, task: &Task, branch: &str, head: &str, title: &str) -> anyhow
             let work = (d.work)(&product.name);
             let container = (d.ensure)(&product.name, &work.to_string_lossy())?;
             let script = d.repo.show(&repo, &base, CHECKS).or_else(|| d.repo.show(&repo, &staged.new, CHECKS));
-            let checks = checks_on(d, &container, &work, "merge", |dir| d.repo.clone_at(&repo, dir, &staged.new), script.as_deref());
+            let (checks, _) = checks_on(d, &container, &work, "merge", |dir| d.repo.clone_at(&repo, dir, &staged.new), script.as_deref(), &[]);
             if !checks.passed && !checks.missing {
                 d.repo.discard(&repo, &staged);
                 judged(d, task, "merge", false, None, "checks fail on the merged result")?;
@@ -390,7 +419,7 @@ fn merge(d: &Deps, task: &Task, branch: &str, head: &str, title: &str) -> anyhow
             let sha = d.repo.advance(&repo, &base, &staged)?;
             d.store.land_branch(branch)?;
             (d.audit)("merge", json!({ "task": task.id, "branch": branch, "approved": head, "base": base, "commit": sha }));
-            (d.notify)(&format!("🚀 Merged into {base}: {title}\n{branch} · {}", &sha[..sha.len().min(10)]), &[]);
+            say(d, &Card::new("🚀", format!("Merged: {title}"), format!("It is now on {base}.")).detail(format!("{branch} · {}", &sha[..sha.len().min(10)])));
             Ok(Merged::Done)
         }
         Stage::Conflict => {
@@ -403,6 +432,12 @@ fn merge(d: &Deps, task: &Task, branch: &str, head: &str, title: &str) -> anyhow
 }
 
 // ---------- the tick ----------
+
+/// The text with its first letter in upper case, for a reason that starts a sentence.
+fn capital(text: &str) -> String {
+    let mut c = text.trim().chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
 
 /// The role that built the branch a task is about.
 fn owner(task: &Task) -> String {
@@ -459,7 +494,10 @@ pub fn tick(d: &Deps) -> anyhow::Result<Tick> {
                 d.store.set_status(task.id, "queued", None, None, now)?;
                 d.store.put(&format!("hold:{}", task.product), &(now + HOLD_SECS).to_string())?;
                 (d.audit)("product.held", json!({ "product": task.product, "task": task.id, "why": e.to_string() }));
-                once(d, &format!("hold:{}:{}", task.product, (now / 3600.0) as i64), &format!("⚠️ {} is on hold for 10 minutes: {e}", task.product), &[]);
+                let card = Card::new("⚠️", format!("{} is on hold for 10 minutes", task.product), "jazari couldn't prepare its container or its copy of the repo.")
+                    .why(capital(&e.to_string()))
+                    .detail("Other products keep working.");
+                once(d, &format!("hold:{}:{}", task.product, (now / 3600.0) as i64), &card);
                 held.push(task.product.clone());
             }
         }
@@ -486,7 +524,11 @@ fn run_task(d: &Deps, task: &Task, now: f64) -> anyhow::Result<Tick> {
     let item = format!("task-{}", task.id);
     let clone = work.join(&item);
     d.repo.clone_for_task(&repo, &clone, &branch, &base)?;
+    (d.skills)(&work)?;
     (d.reset)(&container)?;
+    // Claude Code in the container finds the skills in its own folder.
+    let link: Vec<String> = ["sh", "-c", &format!("mkdir -p \"$HOME/.claude\" && ln -sfn {} \"$HOME/.claude/skills\"", super::sandbox::inside(".skills"))].map(String::from).to_vec();
+    d.runner.run(&container, super::sandbox::WORK, &link, false, &mut |_| {})?;
     let since = d.repo.head(&repo, &format!("refs/heads/{branch}")).or_else(|| d.repo.head(&repo, &base)).unwrap_or_default();
     d.store.set_status(task.id, "running", None, Some(&branch), now)?;
     (d.audit)("task.start", json!({ "task": task.id, "product": task.product, "role": task.role, "kind": task.kind, "title": task.title, "branch": branch }));
@@ -551,9 +593,12 @@ fn fix(d: &Deps, task: &Task, branch: &str, title: &str, findings: &str) -> anyh
         (d.now)(),
     )?;
     if round >= MAX_ROUNDS {
-        let q = format!("`{branch}` failed its gates {round} times. Latest: {}", crate::hook::truncate(findings, 500));
+        let q = format!("`{branch}` failed its checks or reviews {round} times. Latest: {}", crate::hook::truncate(findings, 500));
         d.store.wait_for_founder(id, Some(&q), None, (d.now)())?;
-        (d.notify)(&format!("❓ #{id} {}\n{q}\nReply /answer {id} <guidance> to try again.", feature(title)), &[]);
+        let card = Card::new("❓", format!("#{id} {}: still failing", feature(title)), format!("It failed its checks or reviews {round} times. The team needs your guidance."))
+            .why(crate::hook::truncate(findings, 400))
+            .reply(format!("/answer {id} <what to do>"));
+        say(d, &card);
     }
     Ok(id)
 }
@@ -577,7 +622,9 @@ fn maybe_upgrade(d: &Deps, role: &str) -> anyhow::Result<()> {
     if recent.len() >= 6 && passed * 2 < recent.len() {
         d.store.put(&key, d.profile.lead_model)?;
         (d.audit)("upgrade", json!({ "role": role, "passed": passed, "of": recent.len(), "model": d.profile.lead_model }));
-        (d.notify)(&format!("📈 {} passed only {passed} of its last {} evaluations; it now runs on {}.", persona.title, recent.len(), d.profile.lead_model), &[]);
+        let card = Card::new("📈", format!("{} now uses a stronger model", persona.title), format!("It passed only {passed} of its last {} evaluations.", recent.len()))
+            .detail(format!("New model: {}", d.profile.lead_model));
+        say(d, &card);
     }
     Ok(())
 }
@@ -636,7 +683,7 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                         maybe_upgrade(d, &owner)?;
                         let version = super::evals::version(&personas::find(&owner));
                         if let Some(warning) = super::evals::canary(s, &owner, &version)? {
-                            (d.notify)(&warning, &[]);
+                            say(d, &Card::new("⚠️", format!("{} got worse after a change", personas::find(&owner).title), warning).detail("Check the last change to personas.md, or undo it."));
                         }
                     }
                     let head = task.head.as_deref();
@@ -659,7 +706,7 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                 _ => match gates {
                     None => {
                         s.land(task.id)?;
-                        (d.notify)(&format!("✅ {name}\n{}{more}", o.summary), &[]);
+                        say(d, &Card::new("✅", format!("Done: {name}"), o.summary.clone()).detail(more.trim()));
                     }
                     Some(Gates { failure: Some(f), .. }) => {
                         (d.audit)("gate.failed", json!({ "task": task.id, "branch": branch, "why": crate::hook::truncate(&f, 300) }));
@@ -675,7 +722,7 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                             if docs { "\n\nThis change is documentation only." } else { "" }
                         );
                         next("evaluator", format!("Evaluate: {}", feature(&task.title)), &brief, "eval", head.as_deref())?;
-                        (d.notify)(&format!("✅ {name}\n{}\nChecks passed; now evaluated and reviewed.{more}", o.summary), &[]);
+                        say(d, &Card::new("✅", format!("Built: {name}"), o.summary.clone()).detail("The checks passed. Next: evaluation and reviews.").detail(more.trim()));
                     }
                 },
             }
@@ -684,12 +731,23 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
             s.set_status(task.id, "blocked", Some(&o.summary), None, now)?;
             if let Some((kind, detail)) = &o.approval {
                 s.wait_for_founder(task.id, None, Some(&format!("{kind}: {detail}")), now)?;
-                let buttons = [("✅ Approve".to_string(), format!("/approve {}", task.id)), ("❌ Deny".to_string(), format!("/deny {}", task.id))];
-                (d.notify)(&format!("🔐 {name} needs your approval to {kind}:\n{detail}\n\n{}", o.summary), &buttons);
+                let card = Card::new("🔐", format!("#{} needs your approval", task.id), format!("It wants to {kind}: {detail}"))
+                    .why(o.summary.clone())
+                    .detail(format!("Task: {}", task.title))
+                    .actions(vec![("✅ Approve".into(), format!("/approve {}", task.id)), ("❌ Deny".into(), format!("/deny {}", task.id))]);
+                say(d, &card);
             } else {
-                let q = o.needs_founder.clone().unwrap_or_else(|| o.summary.clone());
-                s.wait_for_founder(task.id, Some(&q), None, now)?;
-                (d.notify)(&format!("❓ {name}\n{q}\nReply /answer {} <your answer>", task.id), &[]);
+                let ask = o.needs_founder.clone().unwrap_or_else(|| worker::Ask { question: o.summary.clone(), ..Default::default() });
+                s.wait_for_founder_on(task.id, Some(&ask.stored()), None, ask.hard_line, now)?;
+                let mut card = Card::new("❓", format!("#{} {}", task.id, task.title), ask.question.clone())
+                    .why(ask.why.clone())
+                    .choices(ask.options.clone(), ask.recommend.clone())
+                    .task(task.id)
+                    .reply(if ask.options.is_empty() { format!("/answer {} <your answer>", task.id) } else { format!("tap a button, or /answer {} <your answer>", task.id) });
+                if ask.hard_line {
+                    card = card.detail(format!("⚠️ Choosing against the recommendation crosses a hard line. To do it anyway, reply: /answer {} override: <your reason>", task.id));
+                }
+                say(d, &card);
             }
         }
         Kind::Failed => {
@@ -697,7 +755,10 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
             if attempts >= MAX_ATTEMPTS {
                 let q = format!("It failed {attempts} times. Last error: {}", o.summary);
                 s.wait_for_founder(task.id, Some(&q), None, now)?;
-                (d.notify)(&format!("⛔ {name}\n{q}\nReply /answer {} <guidance> to try again.", task.id), &[]);
+                let card = Card::new("⛔", format!("#{} failed {attempts} times", task.id), format!("{} is set aside until you say how to go on.", task.title))
+                    .why(format!("Last error: {}", o.summary))
+                    .reply(format!("/answer {} <what to do>", task.id));
+                say(d, &card);
             } else {
                 s.set_status(task.id, "queued", Some(&o.summary), None, now)?;
             }
@@ -774,9 +835,12 @@ mod tests {
     }
 
     fn kind(command: &[String]) -> &'static str {
-        if command.iter().any(|a| a == "claude") {
+        let at = |i: usize| command.get(i).map(String::as_str).unwrap_or("");
+        if at(3) == "claude" {
             "claude"
-        } else if command.iter().any(|a| a == "bundle") {
+        } else if (at(0) == "sh" && at(2).contains("ln -sfn")) || at(4).contains("check.py") {
+            "setup"
+        } else if at(1) == "bundle" {
             "bundle"
         } else {
             "checks"
@@ -796,6 +860,12 @@ mod tests {
                     Ok(code)
                 }
                 "bundle" => Ok(if self.no_bundle.get() { 128 } else { 0 }),
+                "setup" => {
+                    if command.get(4).is_some_and(|c| c.contains("check.py")) {
+                        line("company/VISION.md: 4 sentences, average 12.0 words, 0 findings");
+                    }
+                    Ok(0)
+                }
                 _ => {
                     let lines = {
                         let mut s = self.runs.borrow_mut();
@@ -909,6 +979,7 @@ mod tests {
                 self.resets.set(self.resets.get() + 1);
                 Ok(())
             };
+            let skills = |_w: &Path| Ok(());
             let notify = |t: &str, b: &[Button]| self.sent.borrow_mut().push((t.to_string(), b.len()));
             let audit = |k: &str, _v: serde_json::Value| self.audit.borrow_mut().push(k.to_string());
             let d = Deps {
@@ -921,6 +992,7 @@ mod tests {
                 work: &work,
                 ensure: &ensure,
                 reset: &reset,
+                skills: &skills,
                 notify: &notify,
                 audit: &audit,
             };
@@ -987,6 +1059,9 @@ mod tests {
         assert!(!checks[0].with_token, "the checks never see the login token");
         assert!(checks[0].command.last().unwrap().ends_with("make test"), "the base branch's checks script runs");
         assert!(w.resets.get() >= 2, "the container restarts before the worker and before the checks");
+        let setup = w.runner.of("setup");
+        assert!(setup[0].command[2].contains("ln -sfn /work/.skills"), "the skills are linked into the worker's Claude folder");
+        assert!(!setup[0].with_token);
         let eval = w.next();
         assert_eq!((eval.kind.as_str(), eval.role.as_str(), eval.head.as_deref()), ("eval", "evaluator", Some("sha1")), "the checked commit is pinned");
         assert!(eval.brief.contains("Accept: 5 tries a minute.") && eval.brief.contains("`company/checks.sh`: passed (the base branch's script)"));
@@ -1002,7 +1077,7 @@ mod tests {
         assert_eq!(*w.repo.staged_commits.borrow(), vec!["sha1"], "the approved commit is merged, not the branch name");
         assert_eq!(*w.repo.merged.borrow(), vec!["abc123def456"]);
         assert_eq!(w.runner.of("checks").last().unwrap().dir, "/work/merge", "the checks ran on the merged result");
-        assert!(w.last().starts_with("🚀 Merged into main: Build login"), "{}", w.last());
+        assert!(w.last().starts_with("🚀 Merged: Build login\nIt is now on main."), "{}", w.last());
         let next = w.next();
         assert_eq!((next.title.as_str(), next.after_task), ("Test it", Some(id)));
     }
@@ -1035,7 +1110,7 @@ mod tests {
         w.add("Skeleton");
         w.tick();
         assert!(w.runner.of("checks")[0].command.last().unwrap().ends_with("pytest"), "with no base script, the branch's first one runs");
-        assert!(w.said("Task #1 adds `company/checks.sh`, the quality gate"), "{:?}", w.sent.borrow());
+        assert!(w.said("🛡 Task #1 adds the quality checks"), "{:?}", w.sent.borrow());
         assert!(w.next().brief.contains("the branch's own new script"));
         w.tick();
         assert_eq!(w.next().kind, "review", "a checks.sh change is not documentation");
@@ -1073,6 +1148,9 @@ mod tests {
         w.tick();
         let eval = w.next();
         assert!(eval.brief.contains("not set up") && eval.brief.contains("documentation only"));
+        let plain = w.runner.of("setup").into_iter().find(|e| e.command.get(4).is_some_and(|c| c.contains("check.py"))).expect("the Easy English checker ran");
+        assert!(plain.command.contains(&"company/VISION.md".to_string()) && plain.dir == "/work/check-1" && !plain.with_token);
+        assert!(eval.brief.contains("The Easy English checker on the changed docs"));
         w.tick();
         assert_eq!(w.repo.merged.borrow().len(), 1, "docs merge after the evaluator alone");
         let w = World::new(vec![done(json!({}))]);
@@ -1081,7 +1159,7 @@ mod tests {
         w.tick();
         assert_eq!(w.repo.imports.get(), 0);
         assert_eq!(w.store.next_task().unwrap(), None);
-        assert!(w.last().starts_with(&format!("✅ #{id} Look into it")));
+        assert!(w.last().starts_with(&format!("✅ Done: #{id} Look into it")), "{}", w.last());
     }
 
     #[test]
@@ -1101,7 +1179,7 @@ mod tests {
             assert_eq!(fix.role, "backend-engineer");
             w.store.set_status(fix.id, "done", None, None, 0.0).unwrap();
         }
-        assert!(w.said("📈 Backend Engineer passed only 0 of its last 6 evaluations"));
+        assert!(w.said("📈 Backend Engineer now uses a stronger model\nIt passed only 0 of its last 6 evaluations."));
         assert_eq!(w.store.get("upgrade:backend-engineer").unwrap().as_deref(), Some("claude-opus-5-5"));
     }
 
@@ -1130,7 +1208,7 @@ mod tests {
         // The retry of Login fails; Signup's merge then fails too: both are kept, nothing is lost.
         w.tick();
         assert_eq!(pending(&w.store).len(), 2, "{:?}", pending(&w.store));
-        assert!(w.said("Merging Login keeps failing: disk full"));
+        assert!(w.said("⚠️ Merge keeps failing: Login\nDisk full"), "{:?}", w.sent.borrow());
         assert_eq!(w.tick(), Tick::Idle);
         assert!(pending(&w.store).is_empty(), "both merged once the error cleared");
         assert_eq!(w.repo.merged.borrow().len(), 2);
@@ -1157,7 +1235,7 @@ mod tests {
         let fine = w.store.add_task(&NewTask { product: "site", role: "engineer", title: "Landing page", ..Default::default() }, 0.0).unwrap();
         assert_eq!(w.tick(), Tick::Ran { task: fine, kind: Kind::Done });
         assert_eq!(w.store.task(broken).unwrap().unwrap().status, "queued");
-        assert!(w.said("shop is on hold for 10 minutes: clone failed"));
+        assert!(w.said("⚠️ shop is on hold for 10 minutes") && w.said("Why: Clone failed") && w.said("Other products keep working."));
         assert_eq!(w.tick(), Tick::Idle, "still held");
         w.now.set(1000.0 + HOLD_SECS + 1.0);
         w.repo.broken.borrow_mut().clear();
@@ -1213,7 +1291,7 @@ mod tests {
         w.tick();
         assert_eq!(w.store.task(a).unwrap().unwrap().approval.as_deref(), Some("deploy: Deploy v1 to fly.io"));
         let (text, buttons) = w.sent.borrow().last().unwrap().clone();
-        assert!(text.starts_with(&format!("🔐 #{a} Ship v1 needs your approval to deploy")) && buttons == 2);
+        assert!(text.starts_with(&format!("🔐 #{a} needs your approval\nIt wants to deploy: Deploy v1 to fly.io")) && buttons == 2, "{text}");
         assert_eq!(w.tick(), Tick::Idle);
     }
 
