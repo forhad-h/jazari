@@ -32,12 +32,24 @@ fn settings_path() -> PathBuf {
     crate::claude_dir().join("settings.json")
 }
 
+/// A hook or status line entry is jazari's when its command runs a file named `jazari`, wherever
+/// that file is: the installed binary, an older install, or a development build. A refresh by the
+/// installed binary then replaces every such entry with its own.
 fn is_ours(entry: &Value) -> bool {
-    entry["hooks"].as_array().is_some_and(|hs| {
-        hs.iter().any(|h| {
-            h["command"].as_str().is_some_and(|c| c.contains("jazari") && (c.ends_with(" hook") || c.ends_with(CONTEXT_HOOK) || c.ends_with(GUARD_HOOK) || c.ends_with(ANSWER_HOOK)))
-        })
-    })
+    entry["hooks"].as_array().is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().and_then(jazari_args).is_some()))
+}
+
+/// The arguments of `command` when it runs a file named `jazari` (`jazari.exe` on Windows), quoted
+/// or not; None for any other program.
+fn jazari_args(command: &str) -> Option<&str> {
+    let c = command.trim_start();
+    let (program, rest) = match c.strip_prefix('"') {
+        Some(quoted) => quoted.split_once('"')?,
+        None => c.split_once(char::is_whitespace).unwrap_or((c, "")),
+    };
+    // Split at both separators: a settings.json can hold a Windows path on any system.
+    let name = program.rsplit(['/', '\\']).next()?;
+    (name == "jazari" || name.eq_ignore_ascii_case("jazari.exe")).then(|| rest.trim())
 }
 
 /// Arguments of the hook that adds the handoff warning to a session's context, on each prompt and
@@ -148,7 +160,7 @@ fn strip(settings: &mut Map<String, Value>) {
 }
 
 fn is_our_statusline(v: &Value) -> bool {
-    v["command"].as_str().is_some_and(|c| c.contains("jazari") && c.ends_with(" statusline"))
+    v["command"].as_str().and_then(jazari_args) == Some("statusline")
 }
 
 /// Points statusLine at jazari. An existing, foreign status line is saved and
@@ -222,6 +234,8 @@ pub enum Refresh {
     Unchanged,
     /// The hooks were replaced with this version's set.
     Updated,
+    /// This binary may not touch the user's settings (see `skip_reason`); nothing was read or written.
+    Skipped(String),
 }
 
 /// jazari's own hook entries, by event, in the order they appear.
@@ -239,19 +253,19 @@ fn ours_by_event(settings: &Map<String, Value>) -> Vec<(String, Vec<Value>)> {
 }
 
 /// Which of jazari's hooks an entry is: the async event log, the context warning or the guard.
+/// A jazari entry of any other kind (a newer version's, after a rollback) is `"unknown"`; a
+/// refresh removes it.
 fn kind_of(entry: &Value) -> Option<&'static str> {
     if !is_ours(entry) {
         return None;
     }
-    let command = entry["hooks"][0]["command"].as_str()?;
-    Some(if command.ends_with(CONTEXT_HOOK) {
-        "context"
-    } else if command.ends_with(GUARD_HOOK) {
-        "guard"
-    } else if command.ends_with(ANSWER_HOOK) {
-        "answer"
-    } else {
-        "hook"
+    let args = entry["hooks"][0]["command"].as_str().and_then(jazari_args)?;
+    Some(match args {
+        "hook" => "hook",
+        a if a == CONTEXT_HOOK.trim() => "context",
+        a if a == GUARD_HOOK.trim() => "guard",
+        a if a == ANSWER_HOOK.trim() => "answer",
+        _ => "unknown",
     })
 }
 
@@ -259,15 +273,28 @@ fn kind_of(entry: &Value) -> Option<&'static str> {
 /// record that is missing from settings.json was removed by the user, so a refresh leaves it out.
 type Record = std::collections::BTreeSet<String>;
 
+/// What `installed-hooks.json` holds: the installed binary, which alone may refresh the hooks, and
+/// the hooks it registered. Versions before 1.0.9 wrote only the list of hooks.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone, Debug, PartialEq)]
+struct Installed {
+    #[serde(default)]
+    exe: Option<String>,
+    #[serde(default)]
+    hooks: Record,
+}
+
 fn record_path() -> PathBuf {
     crate::data_dir().join("installed-hooks.json")
 }
 
-fn load_record(path: &Path) -> Option<Record> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+fn load_record(path: &Path) -> Option<Installed> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<Installed>(&bytes)
+        .ok()
+        .or_else(|| serde_json::from_slice::<Record>(&bytes).ok().map(|hooks| Installed { exe: None, hooks }))
 }
 
-fn save_record(path: &Path, record: &Record) -> anyhow::Result<()> {
+fn save_record(path: &Path, record: &Installed) -> anyhow::Result<()> {
     std::fs::create_dir_all(path.parent().context("the record has no folder")?)?;
     std::fs::write(path, serde_json::to_vec_pretty(record)?)?;
     Ok(())
@@ -340,15 +367,50 @@ fn refresh_settings(settings: &mut Map<String, Value>, exe: &str, record: Option
     Ok((Refresh::Updated, next))
 }
 
+/// Why this binary must not touch the user's Claude Code settings, or None when it may: it is the
+/// installed jazari. A development build (under a cargo `target/` folder), a run with
+/// `JAZARI_HOME` (a scratch data folder for tests and development), and any binary other than the
+/// one recorded at install time never refresh. `installed` is the path `jazari update` names for
+/// the binary it just installed.
+fn skip_reason(exe: &Path, recorded: Option<&str>, installed: Option<&Path>, scratch_home: bool) -> Option<String> {
+    if scratch_home {
+        return Some("JAZARI_HOME is set, so this is a scratch run".into());
+    }
+    if in_cargo_target(exe) {
+        return Some(format!("{} is a development build", exe.display()));
+    }
+    let same = |a: &Path, b: &Path| std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b) || a == b;
+    if let Some(installed) = installed {
+        return (!same(exe, installed)).then(|| format!("{} is not the binary that was just installed ({})", exe.display(), installed.display()));
+    }
+    match recorded {
+        Some(r) if !same(exe, Path::new(r)) => Some(format!("{} is not the installed jazari ({r})", exe.display())),
+        _ => None,
+    }
+}
+
+/// Whether `exe` sits in a cargo build folder: under a folder named `target` that cargo marked with
+/// its `CACHEDIR.TAG`, or at `target/<profile>/jazari`.
+fn in_cargo_target(exe: &Path) -> bool {
+    let tagged = exe.ancestors().skip(1).any(|d| d.file_name().is_some_and(|n| n == "target") && d.join("CACHEDIR.TAG").is_file());
+    let shaped = exe.parent().and_then(Path::parent).and_then(Path::file_name).is_some_and(|n| n == "target");
+    tagged || shaped
+}
+
 /// Refreshes the hooks in the settings.json at `path` (see [`refresh_settings`]), with the record
-/// at `record_at`. It only writes when something changed, so running it again is safe.
-fn refresh_at(path: &Path, record_at: &Path, exe: &str) -> anyhow::Result<Refresh> {
-    let mut settings = load_at(path)?;
+/// at `record_at`, unless [`skip_reason`] says this binary must not. It only writes when something
+/// changed, so running it again is safe.
+fn refresh_at(path: &Path, record_at: &Path, exe: &str, installed: Option<&Path>, scratch_home: bool) -> anyhow::Result<Refresh> {
     let record = load_record(record_at);
-    let (outcome, next) = refresh_settings(&mut settings, exe, record.as_ref())?;
+    if let Some(why) = skip_reason(Path::new(exe), record.as_ref().and_then(|r| r.exe.as_deref()), installed, scratch_home) {
+        return Ok(Refresh::Skipped(why));
+    }
+    let mut settings = load_at(path)?;
+    let (outcome, hooks) = refresh_settings(&mut settings, exe, record.as_ref().map(|r| &r.hooks))?;
     if outcome == Refresh::Updated {
         save_at(path, settings)?;
     }
+    let next = Installed { exe: Some(exe.to_string()), hooks };
     if outcome != Refresh::NotInstalled && record.as_ref() != Some(&next) {
         save_record(record_at, &next)?;
     }
@@ -358,10 +420,10 @@ fn refresh_at(path: &Path, record_at: &Path, exe: &str) -> anyhow::Result<Refres
 /// Brings an installed jazari's hooks and usage skill up to date with this binary. `jazari update`
 /// runs it with the new binary, and the SessionStart hook runs it for users who never update.
 /// Prints nothing, so a hook can call it.
-pub fn refresh() -> anyhow::Result<Refresh> {
+pub fn refresh(installed: Option<&Path>) -> anyhow::Result<Refresh> {
     let exe = std::env::current_exe()?.canonicalize()?.display().to_string();
-    let outcome = refresh_at(&settings_path(), &record_path(), &exe)?;
-    if outcome != Refresh::NotInstalled {
+    let outcome = refresh_at(&settings_path(), &record_path(), &exe, installed, crate::home_override().is_some())?;
+    if matches!(outcome, Refresh::Unchanged | Refresh::Updated) {
         let skill = SKILL_MD.replace("{{JAZARI_EXE}}", &exe);
         let file = skill_dir().join("SKILL.md");
         if std::fs::read_to_string(&file).ok().as_deref() != Some(skill.as_str()) {
@@ -373,8 +435,9 @@ pub fn refresh() -> anyhow::Result<Refresh> {
 }
 
 /// `jazari install --refresh`: one line saying what changed.
-pub fn refresh_cli() -> anyhow::Result<()> {
-    match refresh()? {
+pub fn refresh_cli(installed: Option<&Path>) -> anyhow::Result<()> {
+    match refresh(installed)? {
+        Refresh::Skipped(why) => println!("Left Claude Code's settings as they are: {why}."),
         Refresh::NotInstalled => println!("jazari's hooks aren't installed, so Claude Code's settings were left as they are (`jazari install` adds them)."),
         Refresh::Unchanged => println!("Claude Code hooks are up to date."),
         Refresh::Updated => println!(
@@ -402,8 +465,8 @@ pub fn install(with_statusline: bool) -> anyhow::Result<()> {
 
     add_hooks(&mut settings, &exe.display().to_string())?;
     save(&path, settings)?;
-    let record: Record = wanted_hooks(&exe.display().to_string())?.into_iter().map(|(_, key, _)| key).collect();
-    save_record(&record_path(), &record)?;
+    let hooks: Record = wanted_hooks(&exe.display().to_string())?.into_iter().map(|(_, key, _)| key).collect();
+    save_record(&record_path(), &Installed { exe: Some(exe.display().to_string()), hooks })?;
     std::fs::create_dir_all(crate::data_dir())?;
     std::fs::create_dir_all(skill_dir())?;
     std::fs::write(skill_dir().join("SKILL.md"), SKILL_MD.replace("{{JAZARI_EXE}}", &exe.display().to_string()))?;
@@ -615,7 +678,7 @@ mod tests {
     #[test]
     fn refresh_adds_missing_hooks_and_keeps_the_users_own() {
         let path = temp_settings("adds", &old_install("/x/jazari"));
-        assert_eq!(refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari").unwrap(), Refresh::Updated);
+        assert_eq!(refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari", None, false).unwrap(), Refresh::Updated);
         let s = load_at(&path).unwrap();
         assert_eq!(commands(&s, "PreToolUse"), ["rtk hook claude", "\"/x/jazari\" hook", "\"/x/jazari\" guard --hook"]);
         assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "Bash", "the rtk entry is kept whole");
@@ -631,10 +694,10 @@ mod tests {
     #[test]
     fn refresh_twice_changes_nothing_the_second_time() {
         let path = temp_settings("twice", &old_install("/x/jazari"));
-        refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari").unwrap();
+        refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari", None, false).unwrap();
         let first = std::fs::read(&path).unwrap();
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari").unwrap(), Refresh::Unchanged);
+        assert_eq!(refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari", None, false).unwrap(), Refresh::Unchanged);
         assert_eq!(std::fs::read(&path).unwrap(), first);
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified, "an unchanged file isn't rewritten");
         let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("tmp")).collect();
@@ -647,7 +710,7 @@ mod tests {
         let rtk = json!({ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "rtk hook claude" }] }] } });
         let path = temp_settings("none", &rtk);
         let before = std::fs::read(&path).unwrap();
-        assert_eq!(refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari").unwrap(), Refresh::NotInstalled);
+        assert_eq!(refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari", None, false).unwrap(), Refresh::NotInstalled);
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(!path.with_extension("json.jazari-backup").exists());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -671,7 +734,7 @@ mod tests {
         let path = temp_settings("link", &old_install("/x/jazari"));
         let link = path.with_file_name("linked.json");
         std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert_eq!(refresh_at(&link, &path.with_file_name("record.json"), "/x/jazari").unwrap(), Refresh::Updated);
+        assert_eq!(refresh_at(&link, &path.with_file_name("record.json"), "/x/jazari", None, false).unwrap(), Refresh::Updated);
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
         assert_eq!(commands(&load_at(&path).unwrap(), "PostToolUse").len(), 2);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -681,16 +744,16 @@ mod tests {
     fn refresh_never_adds_back_a_hook_the_user_removed() {
         let path = temp_settings("removed", &old_install("/x/jazari"));
         let record = path.with_file_name("record.json");
-        refresh_at(&path, &record, "/x/jazari").unwrap();
-        assert!(load_record(&record).unwrap().contains("PreToolUse guard"), "the first refresh writes the record");
+        refresh_at(&path, &record, "/x/jazari", None, false).unwrap();
+        assert!(load_record(&record).unwrap().hooks.contains("PreToolUse guard"), "the first refresh writes the record");
         // The user removes the guard hook from PreToolUse by hand.
         let mut s = load_at(&path).unwrap();
         s["hooks"]["PreToolUse"].as_array_mut().unwrap().retain(|e| kind_of(e) != Some("guard"));
         save_at(&path, s).unwrap();
-        assert_eq!(refresh_at(&path, &record, "/x/jazari").unwrap(), Refresh::Unchanged);
+        assert_eq!(refresh_at(&path, &record, "/x/jazari", None, false).unwrap(), Refresh::Unchanged);
         assert_eq!(commands(&load_at(&path).unwrap(), "PreToolUse"), ["rtk hook claude", "\"/x/jazari\" hook"]);
         // A newer binary in another place keeps it out too, and moves the rest.
-        assert_eq!(refresh_at(&path, &record, "/new/jazari").unwrap(), Refresh::Updated);
+        assert_eq!(refresh_at(&path, &record, "/new/jazari", Some(Path::new("/new/jazari")), false).unwrap(), Refresh::Updated);
         assert_eq!(commands(&load_at(&path).unwrap(), "PreToolUse"), ["rtk hook claude", "\"/new/jazari\" hook"]);
         assert_eq!(commands(&load_at(&path).unwrap(), "UserPromptSubmit").len(), 3, "the guard on prompts was not removed, so it stays");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -706,5 +769,105 @@ mod tests {
         assert_eq!(commands(&s, "PreToolUse"), ["rtk hook claude", "\"/x/jazari\" hook", "\"/x/jazari\" guard --hook"]);
         assert_eq!(s["hooks"].as_object().unwrap().len(), EVENTS.len(), "events new to the record get their hooks");
         assert!(next.contains("PostToolUse context") && next.contains("Stop hook"));
+    }
+
+    #[test]
+    fn a_development_build_or_a_scratch_run_never_writes() {
+        let path = temp_settings("dev", &old_install("/x/jazari"));
+        let before = std::fs::read(&path).unwrap();
+        let record = path.with_file_name("record.json");
+        // A cargo build folder, marked as cargo marks it.
+        let target = path.parent().unwrap().join("repo/target");
+        std::fs::create_dir_all(target.join("debug")).unwrap();
+        std::fs::write(target.join("CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55").unwrap();
+        let debug = target.join("debug/jazari");
+        std::fs::write(&debug, b"").unwrap();
+        let out = refresh_at(&path, &record, &debug.display().to_string(), None, false).unwrap();
+        assert!(matches!(&out, Refresh::Skipped(why) if why.contains("development build")), "{out:?}");
+        let out = refresh_at(&path, &record, "/x/jazari", None, true).unwrap();
+        assert!(matches!(&out, Refresh::Skipped(why) if why.contains("JAZARI_HOME")), "{out:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "settings.json is untouched");
+        assert!(!record.exists(), "the record is untouched");
+        assert!(in_cargo_target(Path::new("/w/repo/target/release/jazari")), "the shape alone counts");
+        assert!(!in_cargo_target(Path::new("/Users/me/.jazari/bin/jazari")));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn only_the_installed_binary_refreshes() {
+        let path = temp_settings("owner", &old_install("/x/jazari"));
+        let record = path.with_file_name("record.json");
+        refresh_at(&path, &record, "/x/jazari", None, false).unwrap();
+        assert_eq!(load_record(&record).unwrap().exe.as_deref(), Some("/x/jazari"), "a missing exe is recorded");
+        let before = std::fs::read(&path).unwrap();
+        let out = refresh_at(&path, &record, "/other/jazari", None, false).unwrap();
+        assert!(matches!(&out, Refresh::Skipped(why) if why.contains("not the installed jazari")), "{out:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        // `jazari update` names the binary it installed, which may be in a new place.
+        assert_eq!(refresh_at(&path, &record, "/new/jazari", Some(Path::new("/new/jazari")), false).unwrap(), Refresh::Updated);
+        assert_eq!(load_record(&record).unwrap().exe.as_deref(), Some("/new/jazari"));
+        let out = refresh_at(&path, &record, "/x/jazari", Some(Path::new("/new/jazari")), false).unwrap();
+        assert!(matches!(out, Refresh::Skipped(_)), "only the binary that was just installed");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_record_from_before_holds_only_the_hooks() {
+        let path = std::env::temp_dir().join(format!("jazari-old-record-{}.json", std::process::id()));
+        std::fs::write(&path, r#"["PreToolUse guard","Stop hook"]"#).unwrap();
+        let r = load_record(&path).unwrap();
+        assert_eq!(r.exe, None);
+        assert!(r.hooks.contains("PreToolUse guard"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_real_refresh_replaces_stray_and_unknown_jazari_entries() {
+        let mut v = old_install("/x/jazari");
+        let stray = |cmd: &str| json!({ "hooks": [{ "type": "command", "command": cmd, "timeout": 5 }] });
+        v["hooks"]["PermissionRequest"] = json!([stray("/w/jazari-answer-prompts/target/debug/jazari watch answer --hook")]);
+        v["hooks"]["PreToolUse"].as_array_mut().unwrap().push(stray("\"/w/repo/target/debug/jazari\" guard --hook"));
+        v["hooks"]["Stop"] = json!([stray("/opt/jazari-next/jazari watch future --hook"), stray("/usr/local/bin/jazari.sh hook"), stray("my-jazari-notes hook")]);
+        let path = temp_settings("stray", &v);
+        let record = path.with_file_name("record.json");
+        assert_eq!(refresh_at(&path, &record, "/x/jazari", None, false).unwrap(), Refresh::Updated);
+        let s = load_at(&path).unwrap();
+        let all: Vec<String> = s["hooks"].as_object().unwrap().values().flat_map(|l| l.as_array().unwrap().iter().map(|e| e["hooks"][0]["command"].as_str().unwrap().to_string())).collect();
+        assert!(all.iter().all(|c| !c.contains("target/debug") && !c.contains("watch future")), "{all:?}");
+        assert_eq!(commands(&s, "PreToolUse"), ["rtk hook claude", "\"/x/jazari\" hook", "\"/x/jazari\" guard --hook"]);
+        assert_eq!(commands(&s, "PermissionRequest"), ["\"/x/jazari\" hook", "\"/x/jazari\" watch answer --hook"], "the debug answer hook now runs the installed binary");
+        assert_eq!(commands(&s, "Stop"), ["/usr/local/bin/jazari.sh hook", "my-jazari-notes hook", "\"/x/jazari\" hook"], "files not named jazari are the user's own");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn ownership_goes_by_the_program_file_name() {
+        assert_eq!(jazari_args("\"/Users/me/.jazari/bin/jazari\" guard --hook"), Some("guard --hook"));
+        assert_eq!(jazari_args("/a b/../jazari hook"), None, "an unquoted path with a space is cut at the space");
+        assert_eq!(jazari_args("jazari statusline"), Some("statusline"));
+        assert_eq!(jazari_args("\"C:\\Tools\\jazari.exe\" hook"), Some("hook"));
+        for not in ["jazari.sh hook", "/bin/jazari-dev hook", "echo jazari hook", "\"/x/jazari", ""] {
+            assert_eq!(jazari_args(not), None, "{not}");
+        }
+        assert_eq!(kind_of(&json!({ "hooks": [{ "command": "/w/target/debug/jazari watch answer --hook" }] })), Some("answer"));
+        assert_eq!(kind_of(&json!({ "hooks": [{ "command": "/w/target/debug/jazari watch future --hook" }] })), Some("unknown"));
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_answer_hook() {
+        let mut v = old_install("/x/jazari");
+        let mut installed = Map::new();
+        add_hooks(&mut installed, "/x/jazari").unwrap();
+        v["hooks"]["PermissionRequest"] = installed["hooks"]["PermissionRequest"].clone();
+        let answer = |s: &Map<String, Value>| s["hooks"]["PermissionRequest"].as_array().unwrap().iter().find(|e| kind_of(e) == Some("answer")).cloned();
+        let before = answer(&settings(v.clone())).expect("the fixture has the answer hook");
+        let path = temp_settings("answer", &v);
+        let record = path.with_file_name("record.json");
+        refresh_at(&path, &record, "/x/jazari", None, false).unwrap();
+        assert!(load_record(&record).unwrap().hooks.contains("PermissionRequest answer"));
+        assert_eq!(answer(&load_at(&path).unwrap()), Some(before.clone()), "kept as it was, timeout included");
+        assert_eq!(refresh_at(&path, &record, "/x/jazari", None, false).unwrap(), Refresh::Unchanged);
+        assert_eq!(answer(&load_at(&path).unwrap()), Some(before));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

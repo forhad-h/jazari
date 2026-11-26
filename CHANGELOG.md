@@ -8,6 +8,8 @@ GitHub release. Keep each bullet to one short line.
 - `r` answers a session's permission prompt or question from the dashboard; turn it on with `jazari watch answer --on`
 - Each allow or answer from the dashboard asks for Touch ID or your Mac password first; on Linux the dashboard can only deny
 - The risk check refuses commands that type keys into other programs, or that name the dashboard's answer socket or the message inbox
+- Only the installed jazari updates the hooks in ~/.claude/settings.json; development builds and test runs never touch it
+- A refresh replaces every hook that runs a file named jazari, so stray paths and unknown hook kinds are removed
 
 ## 1.0.8 - 2026-11-26
 
