@@ -1,0 +1,163 @@
+# Prompts and skills per project, and a `jazari claude` launcher
+
+Status: plan, not built. It needs a review before any code is written.
+
+## Goal
+
+Today the founder ticks one set of prompts and skills for every project (the `c` picker saves it as
+the global ticked defaults). Different projects need different sets: a Rust tool needs other skills
+than a web app. Starting a session with the right set also takes two steps: copy the command with
+`c`, then paste it in a terminal.
+
+This plan adds:
+
+1. **A set per project.** jazari stores the chosen prompts and skills for each project in its own
+   data folder, never in the repo.
+2. **`jazari claude`.** One command that starts Claude Code in the current folder with the project's
+   set, or with the global defaults when the project has none.
+
+## What a project is
+
+A project is the main checkout of a git repo:
+
+1. jazari runs `git rev-parse --git-common-dir` and takes the folder that holds the `.git` folder.
+   So all worktrees of one repo share one project. (`--show-toplevel` would give each worktree its
+   own project. The board uses `--git-common-dir` for the same reason.)
+2. Outside git, or when git is missing, the project is the current folder.
+3. jazari uses the canonical path (symlinks resolved), so the same repo opened through two paths is
+   one project.
+
+## Where the set is stored
+
+`<data dir>/projects/<name>-<hash>.json`, for example `~/.jazari/projects/shop-3f9a1c2e.json`:
+
+- `<name>` is the project folder's name, cut to a safe file name, so a person recognizes the file.
+- `<hash>` is the first 8 hex digits of the FNV-1a hash of the canonical path (`rules::fnv1a`). It
+  keeps the name stable and unique.
+
+```json
+{ "path": "/Users/me/Projects/shop", "keys": ["coordination", "easy-english"], "updated": 1795690000 }
+```
+
+The file never goes into the repo, so a set is personal and can't leak through a commit.
+
+## Commands to manage the set: `jazari build project`
+
+The prompt and skill library is managed under `jazari build` already (`build rules`, `build prompt`,
+`build skill`). A project's set is a choice from that library, so it lives next to them. The top
+level stays for the lifecycle (`install`, `update`) and for `jazari claude`.
+
+```sh
+jazari build project                  # the project of this folder, its set, and where it comes from
+jazari build project edit             # the same picker as `c`; saving writes the project's set
+jazari build project add <key>        # add a prompt or skill
+jazari build project remove <key>     # remove one
+jazari build project clear            # delete the project's set: the global defaults apply again
+jazari build project list             # every project with a saved set
+```
+
+Every command takes `--path <folder>` to work on another project. `jazari build project` also
+prints "Working with jazari" as the first line, marked "(always)", because every launch file starts
+with it (#127).
+
+`add` refuses a key that is not in the library, with the list of keys, like `jazari build rules`.
+
+## `jazari claude`
+
+```sh
+jazari claude                   # start Claude Code here with the project's set
+jazari claude --pick            # choose the set for this start only, in the picker
+jazari claude -- --model opus   # anything after `--` goes to claude unchanged
+```
+
+Steps:
+
+1. Find the project of the current folder.
+2. Take its set. Without a saved set, take the global ticked defaults.
+3. Skip keys that are no longer in the library, with one warning line:
+   `jazari: left out "old-prompt" (no longer in your library); jazari build project remove old-prompt cleans it up`.
+   An unknown key never stops the start.
+4. Write the launch file with `rules::ensure`. "Working with jazari" is always first, once
+   (`rules::files_for`, #127).
+5. Install the chosen skills where Claude Code loads them, with `skills::provide`, as `c` does.
+6. Make a new random (v4) session id, and log the set as a `JazariLaunchSet` event under that id,
+   so the dashboard shows it from the session's first second (as the handoff does, #122).
+7. Print one line with the set in use and where it comes from, for example:
+   `jazari: starting with jazari (always), coordination, easy-english (project shop)`.
+8. Start `claude --session-id <id> --append-system-prompt-file <file> <args>` in the current folder.
+   - macOS and Linux: `exec`, so Claude Code takes over the terminal and gets its signals.
+   - Windows: `exec` doesn't exist there. jazari starts `claude` (or `claude.cmd`), waits, and exits
+     with the same exit code.
+
+`--pick` opens the `c` picker in the terminal before step 4, with the project's set ticked. The
+picker's last step has a choice "use for this start only" (the default) or "save for this project".
+
+If `claude` is not found, `jazari claude` says so and prints the command, so the founder can start it
+by hand.
+
+### Arguments that conflict
+
+`jazari claude` sets `--session-id` and `--append-system-prompt-file` itself. If the arguments after
+`--` hold either one, jazari stops with a message, because Claude Code reads only the last
+`--append-system-prompt-file`, and a second session id would break the dashboard's link. `--resume`
+and `--continue` are passed on unchanged, and then jazari doesn't set `--session-id`, because a
+resumed session keeps its id.
+
+## The dashboard
+
+- The session details view (`enter`) already shows a "started" line from `JazariLaunchSet` (#122).
+  For a session that has no such event (started without jazari), the line shows the project's
+  saved set, marked "project set, not confirmed".
+- The `c` picker gets a key, `s`, on its last step: "save for this project". The project is that of
+  the selected session's folder. The footer hint and README key list name it.
+
+## How this fits with the handoff
+
+The handoff's base set (#122) is the old session's set plus the global ticked defaults. With this
+plan, the defaults part becomes "the project's set, else the global ticked defaults". Nothing else
+in the handoff changes.
+
+## Left out on purpose
+
+- **`--remote`** (control of a session from Telegram). The founder's rule of 2026-11-26 16:29 lets
+  Telegram control only jazari's own sandbox work. Opening it to sessions started with
+  `jazari claude` comes after the approval socket, as a per-project opt-in. It is not part of this
+  plan.
+- **A set stored in the repo** (for example `.jazari.json`). That would share a personal choice with
+  everyone who clones the repo.
+
+## Parts
+
+1. `src/project.rs` (new): find the project, read and write the set, the `jazari build project`
+   commands. The git call and the file system root are passed in, so tests use temp folders and a
+   fake git.
+2. `src/launch.rs` (new): `jazari claude`. The step that starts `claude` is an injectable function,
+   so tests never run `claude`. It reuses `handoff_pick::new_session_id` and the launch-set event
+   from `handoff.rs` (moved to a shared place).
+3. `src/main.rs`: the `Claude` top-level command and the `Project` build command.
+4. `src/app.rs`, `src/ui.rs`: the `s` key in the picker, and the "project set" line.
+5. `src/handoff.rs`: the project's set as the default part of the base set.
+6. Docs: README (the key list, a "Per-project prompts" section, `jazari claude`), CHANGELOG,
+   `assets/SKILL.md` (a session can start another session with `jazari claude`).
+
+## Tests
+
+- The project of a subfolder is its repo's main checkout; a worktree gives the same project; a
+  folder outside git is itself; two paths to one folder give one project.
+- The set falls back to the global defaults when the project has none, and back again after
+  `clear`.
+- "Working with jazari" is first and once, also when the saved set names it.
+- An unknown key is skipped with one warning, and the start goes on.
+- `add` refuses an unknown key; `remove` of a key that isn't there says so.
+- `jazari claude` passes the args after `--` unchanged, refuses a second `--append-system-prompt-file`
+  or `--session-id`, and leaves out `--session-id` with `--resume`.
+- On Windows (a `cfg` test of the spawn path): the exit code is passed through.
+- main.rs's test that parses every documented command stays green.
+
+## Open questions for the review
+
+- Should `jazari claude` without a saved project set and without global defaults start with only
+  "Working with jazari", or ask once to save a set? This plan says: start, and print a hint.
+- `s` is free in both steps of the `c` picker today (checked in `src/app.rs`: the list uses n, e,
+  d, v, u, j, k, x, space and digits; the last step uses j, k, tab and digits). Should "save for this
+  project" be the `s` key, or a fourth numbered choice next to session, team and path?
