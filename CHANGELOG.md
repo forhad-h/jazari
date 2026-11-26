@@ -3,7 +3,7 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 1.0.5 - 2026-11-26
 
 - `jazari watch tell` and `t` send an idle session a wake-up, so it can read the message now (macOS and Linux)
 - After a handoff, the new session starts with the old session's prompts and skills, your defaults, and up to 3 that a small model picks for the next step (`--pick off` turns this off)
