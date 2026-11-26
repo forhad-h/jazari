@@ -13,7 +13,7 @@ GitHub release. Keep each bullet to one short line.
 - Telegram gets a message only when you must decide or act; ask with /status, /tasks or /prefs for the rest
 - At 90% context a session must hand off: jazari refuses other tool calls until it does (`jazari watch context --block`)
 - `jazari watch context --allow <session>` lets a session keep going past the block until its next compact
-- A handoff now ends the old session by default (`--keep` keeps it)
+- After a handoff, the old session now ends; `--keep` keeps it
 
 ## 1.0.2 - 2026-11-26
 

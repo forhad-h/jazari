@@ -246,7 +246,7 @@ const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead",
 
 /// Whether this tool call may run in a session that is past the block: a read-only tool, the
 /// handoff itself, or a jazari command that only reads (`jazari watch context` and the like).
-fn allowed_past_block(raw: &Value) -> bool {
+fn allowed_past_block(raw: &Value, me: &Path) -> bool {
     let Some(tool) = raw["tool_name"].as_str() else { return false };
     if READ_ONLY_TOOLS.contains(&tool) {
         return true;
@@ -255,34 +255,40 @@ fn allowed_past_block(raw: &Value) -> bool {
         return false;
     }
     let Some(cmd) = raw["tool_input"]["command"].as_str() else { return false };
-    is_handoff(cmd) || is_jazari_read(cmd) || is_read_only_git(cmd)
+    is_handoff_as(cmd, me) || is_jazari_read(cmd, me) || is_read_only_git(cmd)
 }
 
 /// `jazari build handoff [flags] <<'EOF'` followed by the prompt and the closing `EOF`. The
 /// delimiter must be quoted, so the shell runs nothing inside the prompt, and nothing may follow
 /// the closing line.
 pub(crate) fn is_handoff(cmd: &str) -> bool {
+    std::env::current_exe().is_ok_and(|me| is_handoff_as(cmd, &me))
+}
+
+/// [`is_handoff`], with `me` as the jazari binary that the command must run.
+fn is_handoff_as(cmd: &str, me: &Path) -> bool {
     let cmd = cmd.trim_end();
     let (first, rest) = cmd.split_once('\n').unwrap_or((cmd, ""));
     let Some((head, delim)) = first.split_once("<<") else { return false };
     let delim = delim.trim();
     let quoted = ['\'', '"'].iter().find_map(|q| delim.strip_prefix(*q).and_then(|d| d.strip_suffix(*q)));
     let Some(word) = quoted.filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) else { return false };
-    handoff_head(head) && rest.lines().last().is_some_and(|l| l == word) && rest.lines().filter(|l| *l == word).count() == 1
+    handoff_head(head, me) && rest.lines().last().is_some_and(|l| l == word) && rest.lines().filter(|l| *l == word).count() == 1
 }
 
 /// `<jazari> build handoff` with only its own flags, and no other shell syntax.
-fn handoff_head(head: &str) -> bool {
+fn handoff_head(head: &str, me: &Path) -> bool {
     if head.contains([';', '&', '|', '`', '$', '<', '>', '(', ')']) {
         return false;
     }
-    let Some((_, mut words)) = jazari_words(head) else { return false };
+    let Some((_, mut words)) = jazari_words(head, me) else { return false };
     words.next() == Some("build") && words.next() == Some("handoff") && words.all(|w| matches!(w, "--close" | "--keep" | "--no-launch"))
 }
 
-/// The words after the program, when `cmd` starts with jazari: a bare name or path, or a path in
-/// quotes (`'/opt/my tools/jazari'`, as the notes print it).
-fn jazari_words(cmd: &str) -> Option<(&str, std::str::SplitWhitespace<'_>)> {
+/// The words after the program, when `cmd` runs this jazari: a bare `jazari` (found on PATH), or a
+/// path, quoted or not, that leads to the same file as `me`. A handoff skips the command checks,
+/// so another program named `jazari` in some folder, or `jazari.sh`, must never count.
+fn jazari_words<'a>(cmd: &'a str, me: &Path) -> Option<(&'a str, std::str::SplitWhitespace<'a>)> {
     let cmd = cmd.trim_start();
     let (exe, rest) = match cmd.chars().next()? {
         q @ ('\'' | '"') => {
@@ -291,16 +297,26 @@ fn jazari_words(cmd: &str) -> Option<(&str, std::str::SplitWhitespace<'_>)> {
         }
         _ => cmd.split_once(char::is_whitespace).unwrap_or((cmd, "")),
     };
-    Path::new(exe).file_stem().is_some_and(|n| n == "jazari").then(|| (exe, rest.split_whitespace()))
+    is_this_jazari(exe, me).then(|| (exe, rest.split_whitespace()))
+}
+
+fn is_this_jazari(exe: &str, me: &Path) -> bool {
+    let named = |name: &str| name == "jazari" || (cfg!(windows) && name.eq_ignore_ascii_case("jazari.exe"));
+    if !exe.contains(['/', '\\']) {
+        return named(exe);
+    }
+    let path = Path::new(exe);
+    path.file_name().and_then(|n| n.to_str()).is_some_and(named)
+        && matches!((std::fs::canonicalize(path), std::fs::canonicalize(me)), (Ok(a), Ok(b)) if a == b)
 }
 
 /// A jazari command that only reads, or `jazari watch context --allow` (which asks the user
 /// first): `jazari watch context|status|system|say`, with no other shell syntax.
-fn is_jazari_read(cmd: &str) -> bool {
+fn is_jazari_read(cmd: &str, me: &Path) -> bool {
     if cmd.contains([';', '&', '|', '`', '$', '<', '>', '(', ')', '\n']) {
         return false;
     }
-    let Some((_, mut words)) = jazari_words(cmd) else { return false };
+    let Some((_, mut words)) = jazari_words(cmd, me) else { return false };
     let sub = match words.next() {
         Some("watch") => words.next(),
         other => other,
@@ -342,7 +358,7 @@ fn block_decision(raw: &Value, id: &str, pct: f64, block: u32, dir: &Path, exe: 
         let _ = std::fs::remove_file(&marker);
         return None;
     }
-    if marker.exists() || allowed_past_block(raw) {
+    if marker.exists() || allowed_past_block(raw, Path::new(exe)) {
         return None;
     }
     let jazari = crate::terminal::sh_quote(exe);
@@ -522,8 +538,16 @@ mod tests {
 
     #[test]
     fn only_a_quoted_heredoc_handoff_counts_as_the_handoff() {
-        assert!(is_handoff("jazari build handoff <<'EOF'\nGoal: x\nrun `rm -rf /` later\nEOF"));
-        assert!(is_handoff("'/opt/my tools/jazari' build handoff --keep <<\"END_1\"\nhi\nEND_1\n"));
+        let dir = std::env::temp_dir().join(format!("jazari-me-{}", std::process::id())).join("my tools");
+        std::fs::create_dir_all(&dir).unwrap();
+        let me = dir.join("jazari");
+        std::fs::write(&me, b"").unwrap();
+        let quoted = format!("'{}' build handoff --keep <<\"END_1\"\nhi\nEND_1\n", me.display());
+        assert!(is_handoff_as("jazari build handoff <<'EOF'\nGoal: x\nrun `rm -rf /` later\nEOF", &me));
+        assert!(is_handoff_as(&quoted, &me), "{quoted}");
+        let other = dir.parent().unwrap().join("jazari");
+        std::fs::write(&other, b"").unwrap();
+        let elsewhere = format!("{} build handoff <<'EOF'\nx\nEOF", other.display());
         for bad in [
             "jazari build handoff <<EOF\n$(touch /tmp/x)\nEOF",           // unquoted: the shell expands it
             "jazari build handoff <<'EOF'\nhi\nEOF\nrm -rf ~",           // a command after the prompt
@@ -532,9 +556,14 @@ mod tests {
             "jazari build handoff --session other <<'EOF'\nhi\nEOF",     // another session's handoff
             "evil build handoff <<'EOF'\nhi\nEOF",
             "jazari build handoff --file p.md",
+            "./jazari.sh build handoff <<'EOF'\nx\nEOF",                 // another program, named like jazari
+            "jazari.sh build handoff <<'EOF'\nx\nEOF",
+            "/tmp/x/jazari build handoff <<'EOF'\nx\nEOF",               // a jazari that isn't this binary
+            elsewhere.as_str(),
         ] {
-            assert!(!is_handoff(bad), "{bad}");
+            assert!(!is_handoff_as(bad, &me), "{bad}");
         }
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
     #[test]
@@ -552,7 +581,8 @@ mod tests {
         for ok in ["jazari build handoff <<'EOF'\nhi\nEOF", "jazari watch context", "git status", "git diff --stat"] {
             assert_eq!(block_decision(&bash(ok), "s1", 95.0, 90, &dir, "jazari"), None, "{ok}");
         }
-        assert_eq!(block_decision(&bash("'/opt/my tools/jazari' watch context --allow s1"), "s1", 95.0, 90, &dir, "jazari"), None);
+        assert_eq!(block_decision(&bash("jazari watch context --allow s1"), "s1", 95.0, 90, &dir, "jazari"), None);
+        assert!(block_decision(&bash("./jazari.sh watch context"), "s1", 95.0, 90, &dir, "jazari").is_some());
         for no in ["cargo build", "jazari watch context --block off", "git commit -m x", "git diff --output=x", "git status; rm x", "jazari watch clean --run"] {
             assert!(block_decision(&bash(no), "s1", 95.0, 90, &dir, "jazari").is_some(), "{no}");
         }
