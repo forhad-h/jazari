@@ -226,36 +226,117 @@ fn ours_by_event(settings: &Map<String, Value>) -> Vec<(String, Vec<Value>)> {
     out
 }
 
-/// Replaces jazari's hooks with the set this version registers, when jazari is installed. The
-/// user's own hooks and settings stay as they are. Of the status line, only jazari's own command
-/// is pointed at `exe`; a missing one is not added, and a foreign one is not wrapped.
-fn refresh_settings(settings: &mut Map<String, Value>, exe: &str) -> anyhow::Result<Refresh> {
-    let current = ours_by_event(settings);
-    if current.is_empty() {
-        return Ok(Refresh::NotInstalled);
+/// Which of jazari's hooks an entry is: the async event log, the context warning or the guard.
+fn kind_of(entry: &Value) -> Option<&'static str> {
+    if !is_ours(entry) {
+        return None;
     }
+    let command = entry["hooks"][0]["command"].as_str()?;
+    Some(if command.ends_with(CONTEXT_HOOK) {
+        "context"
+    } else if command.ends_with(GUARD_HOOK) {
+        "guard"
+    } else {
+        "hook"
+    })
+}
+
+/// The hooks jazari has registered, as `<event> <kind>` keys (`PreToolUse guard`). A hook in this
+/// record that is missing from settings.json was removed by the user, so a refresh leaves it out.
+type Record = std::collections::BTreeSet<String>;
+
+fn record_path() -> PathBuf {
+    crate::data_dir().join("installed-hooks.json")
+}
+
+fn load_record(path: &Path) -> Option<Record> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn save_record(path: &Path, record: &Record) -> anyhow::Result<()> {
+    std::fs::create_dir_all(path.parent().context("the record has no folder")?)?;
+    std::fs::write(path, serde_json::to_vec_pretty(record)?)?;
+    Ok(())
+}
+
+/// Every hook this version registers, in order, with its record key.
+fn wanted_hooks(exe: &str) -> anyhow::Result<Vec<(String, String, Value)>> {
     let mut wanted = Map::new();
     add_hooks(&mut wanted, exe)?;
+    let mut out = Vec::new();
+    let Some(Value::Object(wanted)) = wanted.remove("hooks") else { return Ok(out) };
+    for (event, list) in wanted {
+        for entry in list.as_array().into_iter().flatten() {
+            let kind = kind_of(entry).context("add_hooks made an entry that isn't jazari's")?;
+            out.push((event.clone(), format!("{event} {kind}"), entry.clone()));
+        }
+    }
+    Ok(out)
+}
+
+/// Brings jazari's hooks up to date with this version, when jazari is installed:
+/// - a hook that is in settings.json is kept, pointed at `exe`;
+/// - a hook new in this version (not in `record`) is added;
+/// - a hook in `record` but missing from settings.json was removed by the user and stays out;
+/// - a jazari hook this version no longer registers is removed.
+///
+/// With no record (installs from before the record existed), every hook is added one time. The
+/// user's own hooks and settings stay as they are. Of the status line, only jazari's own command
+/// is pointed at `exe`; a missing one is not added, and a foreign one is not wrapped. Returns the
+/// outcome and the record to keep.
+fn refresh_settings(settings: &mut Map<String, Value>, exe: &str, record: Option<&Record>) -> anyhow::Result<(Refresh, Record)> {
+    let current = ours_by_event(settings);
+    if current.is_empty() {
+        return Ok((Refresh::NotInstalled, record.cloned().unwrap_or_default()));
+    }
+    let present: Record = current
+        .iter()
+        .flat_map(|(event, list)| list.iter().filter_map(move |e| Some(format!("{event} {}", kind_of(e)?))))
+        .collect();
+    let wanted = wanted_hooks(exe)?;
+    let mut next = record.cloned().unwrap_or_default();
+    let mut keep = Map::new();
+    for (event, key, entry) in wanted {
+        let removed_by_user = record.is_some_and(|r| r.contains(&key)) && !present.contains(&key);
+        if !removed_by_user {
+            let list = keep.entry(event).or_insert_with(|| json!([]));
+            if let Value::Array(list) = list {
+                list.push(entry);
+            }
+        }
+        next.insert(key);
+    }
     let line = format!("\"{exe}\" statusline");
     let line_moved = settings.get("statusLine").is_some_and(|v| is_our_statusline(v) && v["command"] != json!(line));
-    if current == ours_by_event(&wanted) && !line_moved {
-        return Ok(Refresh::Unchanged);
+    let keep_settings: Map<String, Value> = [("hooks".to_string(), Value::Object(keep.clone()))].into_iter().collect();
+    if current == ours_by_event(&keep_settings) && !line_moved {
+        return Ok((Refresh::Unchanged, next));
     }
     strip(settings);
-    add_hooks(settings, exe)?;
+    let hooks = settings.entry("hooks").or_insert_with(|| json!({}));
+    let Value::Object(hooks) = hooks else { bail!("`hooks` in settings.json is not an object") };
+    for (event, entries) in keep {
+        let list = hooks.entry(event.clone()).or_insert_with(|| json!([]));
+        let Value::Array(list) = list else { bail!("hooks.{event} is not an array") };
+        list.extend(entries.as_array().into_iter().flatten().cloned());
+    }
     if line_moved && let Some(v) = settings.get_mut("statusLine") {
         v["command"] = json!(line);
     }
-    Ok(Refresh::Updated)
+    Ok((Refresh::Updated, next))
 }
 
-/// Refreshes the hooks in the settings.json at `path` (see [`refresh_settings`]). It only writes
-/// when something changed, so running it again is safe.
-fn refresh_at(path: &Path, exe: &str) -> anyhow::Result<Refresh> {
+/// Refreshes the hooks in the settings.json at `path` (see [`refresh_settings`]), with the record
+/// at `record_at`. It only writes when something changed, so running it again is safe.
+fn refresh_at(path: &Path, record_at: &Path, exe: &str) -> anyhow::Result<Refresh> {
     let mut settings = load_at(path)?;
-    let outcome = refresh_settings(&mut settings, exe)?;
+    let record = load_record(record_at);
+    let (outcome, next) = refresh_settings(&mut settings, exe, record.as_ref())?;
     if outcome == Refresh::Updated {
         save_at(path, settings)?;
+    }
+    if outcome != Refresh::NotInstalled && record.as_ref() != Some(&next) {
+        save_record(record_at, &next)?;
     }
     Ok(outcome)
 }
@@ -265,7 +346,7 @@ fn refresh_at(path: &Path, exe: &str) -> anyhow::Result<Refresh> {
 /// Prints nothing, so a hook can call it.
 pub fn refresh() -> anyhow::Result<Refresh> {
     let exe = std::env::current_exe()?.canonicalize()?.display().to_string();
-    let outcome = refresh_at(&settings_path(), &exe)?;
+    let outcome = refresh_at(&settings_path(), &record_path(), &exe)?;
     if outcome != Refresh::NotInstalled {
         let skill = SKILL_MD.replace("{{JAZARI_EXE}}", &exe);
         let file = skill_dir().join("SKILL.md");
@@ -307,6 +388,8 @@ pub fn install(with_statusline: bool) -> anyhow::Result<()> {
 
     add_hooks(&mut settings, &exe.display().to_string())?;
     save(&path, settings)?;
+    let record: Record = wanted_hooks(&exe.display().to_string())?.into_iter().map(|(_, key, _)| key).collect();
+    save_record(&record_path(), &record)?;
     std::fs::create_dir_all(crate::data_dir())?;
     std::fs::create_dir_all(skill_dir())?;
     std::fs::write(skill_dir().join("SKILL.md"), SKILL_MD.replace("{{JAZARI_EXE}}", &exe.display().to_string()))?;
@@ -326,6 +409,7 @@ pub fn uninstall() -> anyhow::Result<()> {
     strip(&mut settings);
     uninstall_statusline(&mut settings, &crate::statusline::original_path());
     save(&path, settings)?;
+    let _ = std::fs::remove_file(record_path());
     println!("Removed jazari hooks from {}", path.display());
     if skill_dir().exists() {
         std::fs::remove_dir_all(skill_dir())?;
@@ -512,7 +596,7 @@ mod tests {
     #[test]
     fn refresh_adds_missing_hooks_and_keeps_the_users_own() {
         let path = temp_settings("adds", &old_install("/x/jazari"));
-        assert_eq!(refresh_at(&path, "/x/jazari").unwrap(), Refresh::Updated);
+        assert_eq!(refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari").unwrap(), Refresh::Updated);
         let s = load_at(&path).unwrap();
         assert_eq!(commands(&s, "PreToolUse"), ["rtk hook claude", "\"/x/jazari\" hook", "\"/x/jazari\" guard --hook"]);
         assert_eq!(s["hooks"]["PreToolUse"][0]["matcher"], "Bash", "the rtk entry is kept whole");
@@ -528,10 +612,10 @@ mod tests {
     #[test]
     fn refresh_twice_changes_nothing_the_second_time() {
         let path = temp_settings("twice", &old_install("/x/jazari"));
-        refresh_at(&path, "/x/jazari").unwrap();
+        refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari").unwrap();
         let first = std::fs::read(&path).unwrap();
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(refresh_at(&path, "/x/jazari").unwrap(), Refresh::Unchanged);
+        assert_eq!(refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari").unwrap(), Refresh::Unchanged);
         assert_eq!(std::fs::read(&path).unwrap(), first);
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified, "an unchanged file isn't rewritten");
         let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("tmp")).collect();
@@ -544,7 +628,7 @@ mod tests {
         let rtk = json!({ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "rtk hook claude" }] }] } });
         let path = temp_settings("none", &rtk);
         let before = std::fs::read(&path).unwrap();
-        assert_eq!(refresh_at(&path, "/x/jazari").unwrap(), Refresh::NotInstalled);
+        assert_eq!(refresh_at(&path, &path.with_file_name("record.json"), "/x/jazari").unwrap(), Refresh::NotInstalled);
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(!path.with_extension("json.jazari-backup").exists());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -553,12 +637,12 @@ mod tests {
     #[test]
     fn refresh_points_the_hooks_and_our_status_line_at_a_moved_binary() {
         let mut s = settings(old_install("/old/jazari"));
-        assert_eq!(refresh_settings(&mut s, "/new/jazari").unwrap(), Refresh::Updated);
+        assert_eq!(refresh_settings(&mut s, "/new/jazari", None).unwrap().0, Refresh::Updated);
         assert!(commands(&s, "SessionStart").iter().all(|c| c.starts_with("\"/new/jazari\"")));
         assert_eq!(s["statusLine"]["command"], "\"/new/jazari\" statusline");
         assert_eq!(s["statusLine"]["padding"], 0, "the status line's other fields are kept");
         let mut foreign = settings(json!({ "statusLine": { "type": "command", "command": "my-line" }, "hooks": old_install("/x/jazari")["hooks"] }));
-        refresh_settings(&mut foreign, "/x/jazari").unwrap();
+        refresh_settings(&mut foreign, "/x/jazari", None).unwrap();
         assert_eq!(foreign["statusLine"]["command"], "my-line", "a foreign status line is not wrapped by a refresh");
     }
 
@@ -568,9 +652,40 @@ mod tests {
         let path = temp_settings("link", &old_install("/x/jazari"));
         let link = path.with_file_name("linked.json");
         std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert_eq!(refresh_at(&link, "/x/jazari").unwrap(), Refresh::Updated);
+        assert_eq!(refresh_at(&link, &path.with_file_name("record.json"), "/x/jazari").unwrap(), Refresh::Updated);
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
         assert_eq!(commands(&load_at(&path).unwrap(), "PostToolUse").len(), 2);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn refresh_never_adds_back_a_hook_the_user_removed() {
+        let path = temp_settings("removed", &old_install("/x/jazari"));
+        let record = path.with_file_name("record.json");
+        refresh_at(&path, &record, "/x/jazari").unwrap();
+        assert!(load_record(&record).unwrap().contains("PreToolUse guard"), "the first refresh writes the record");
+        // The user removes the guard hook from PreToolUse by hand.
+        let mut s = load_at(&path).unwrap();
+        s["hooks"]["PreToolUse"].as_array_mut().unwrap().retain(|e| kind_of(e) != Some("guard"));
+        save_at(&path, s).unwrap();
+        assert_eq!(refresh_at(&path, &record, "/x/jazari").unwrap(), Refresh::Unchanged);
+        assert_eq!(commands(&load_at(&path).unwrap(), "PreToolUse"), ["rtk hook claude", "\"/x/jazari\" hook"]);
+        // A newer binary in another place keeps it out too, and moves the rest.
+        assert_eq!(refresh_at(&path, &record, "/new/jazari").unwrap(), Refresh::Updated);
+        assert_eq!(commands(&load_at(&path).unwrap(), "PreToolUse"), ["rtk hook claude", "\"/new/jazari\" hook"]);
+        assert_eq!(commands(&load_at(&path).unwrap(), "UserPromptSubmit").len(), 3, "the guard on prompts was not removed, so it stays");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn refresh_adds_a_hook_that_is_new_in_this_version() {
+        let mut s = settings(old_install("/x/jazari"));
+        // The record of an older version that had only the async hook on these three events.
+        let record: Record = ["SessionStart hook", "PreToolUse hook", "PostToolUse hook"].map(String::from).into();
+        let (outcome, next) = refresh_settings(&mut s, "/x/jazari", Some(&record)).unwrap();
+        assert_eq!(outcome, Refresh::Updated);
+        assert_eq!(commands(&s, "PreToolUse"), ["rtk hook claude", "\"/x/jazari\" hook", "\"/x/jazari\" guard --hook"]);
+        assert_eq!(s["hooks"].as_object().unwrap().len(), EVENTS.len(), "events new to the record get their hooks");
+        assert!(next.contains("PostToolUse context") && next.contains("Stop hook"));
     }
 }

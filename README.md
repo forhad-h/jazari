@@ -57,11 +57,11 @@ source with `cargo install --git https://github.com/forhad-h/jazari`.
 ## Usage
 
 ```sh
-jazari install     # registers hooks + status line in ~/.claude/settings.json (backup saved alongside), creates the folder for your own prompts, offers to install tmux
+jazari install     # registers hooks + status line in ~/.claude/settings.json (the first time, your file is backed up alongside), creates the folder for your own prompts, offers to install tmux
 jazari install --no-statusline   # hooks only; context size is then estimated from transcripts
 jazari             # open the dashboard
 jazari uninstall   # removes only jazari's hooks, skill and generated prompt files (your own prompts stay)
-jazari update      # install the latest version (shows current → latest and what's new)
+jazari update      # install the latest version (shows current → latest and what's new) and add the hooks it brings
 jazari watch pause --for 2h   # hold what jazari does on its own; `jazari watch resume` turns it back on
 jazari watch actions     # what jazari did, refused or held, and who asked
 ```
@@ -104,6 +104,14 @@ The dashboard checks GitHub for a new release once a day and shows a yellow
 ``v0.3.0 available · run `jazari update` `` notice in the bottom right. `jazari update` shows your
 current and the latest version, a short "What's new", and installs it with the release's installer
 (into the same directory as the running binary). `jazari update --check` only shows the versions.
+
+After it installs, the new version updates jazari's hooks in `~/.claude/settings.json`. It adds
+the hooks that are new in that version and points the others at the new binary. Your own hooks
+and the status line stay as they are. A jazari hook that you removed yourself stays removed:
+jazari keeps a list of the hooks it added in `~/.jazari/installed-hooks.json`. Each new session
+does the same check, so the hooks also stay current if you never run `jazari update`. After
+`jazari uninstall`, nothing is added back. Sessions that are already running use the new hooks
+after a restart (or `/hooks reload`).
 
 ```sh
 jazari update --auto on    # the dashboard installs new versions in the background
