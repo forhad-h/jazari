@@ -3,7 +3,7 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 1.0.9 - 2026-11-26
 
 - `r` answers a session's permission prompt or question from the dashboard; turn it on with `jazari watch answer --on`
 - Each allow or answer from the dashboard asks for Touch ID or your Mac password first; on Linux the dashboard can only deny
