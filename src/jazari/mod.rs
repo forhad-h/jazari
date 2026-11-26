@@ -7,7 +7,9 @@
 
 mod audit;
 mod bridge;
+mod git;
 mod limits;
+mod personas;
 mod sandbox;
 pub mod secrets;
 mod store;
@@ -67,6 +69,22 @@ pub enum JazariCmd {
     },
     /// Check that the audit record is whole.
     Audit,
+    /// Start a product from an idea: a new git repo, and a task for the Chief of Staff to plan it.
+    New {
+        name: String,
+        /// The idea, in your own words.
+        idea: Vec<String>,
+    },
+    /// Give an existing product a new idea for the Chief of Staff to plan.
+    Idea { product: String, idea: Vec<String> },
+    /// Answer a blocked task's question; it goes back in the queue with your answer.
+    Answer { task: i64, answer: Vec<String> },
+    /// Approve a task's deploy, spend or contact request.
+    Approve { task: i64 },
+    /// Deny a task's deploy, spend or contact request.
+    Deny { task: i64 },
+    /// List the roles workers can take, with their model tier.
+    Personas,
 }
 
 #[derive(Subcommand)]
@@ -151,15 +169,18 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             Ok(())
         }
         JazariCmd::Task { product, title, role, priority, brief } => {
-            let id = open()?.add_task(&product, &role, &title.join(" "), &brief, priority, None, crate::now())?;
+            let title = title.join(" ");
+            let task = store::NewTask { product: &product, role: &role, title: &title, brief: &brief, priority, ..Default::default() };
+            let id = open()?.add_task(&task, crate::now())?;
             println!("Queued task #{id} for {product}.");
             Ok(())
         }
         JazariCmd::Tasks { product, limit } => {
             let store = open()?;
             for t in store.tasks(product.as_deref(), limit)? {
-                let note = if t.summary.is_empty() { String::new() } else { format!(" — {}", crate::hook::truncate(&t.summary, 70)) };
-                println!("#{:<4} {:<8} {:<10} {:<14} {}{note}", t.id, t.status, t.product, crate::hook::truncate(&t.role, 14), t.title);
+                let waiting = t.question.as_deref().or(t.approval.as_deref()).map(|q| format!(" — waits for you: {}", crate::hook::truncate(q, 70)));
+                let note = waiting.unwrap_or_else(|| if t.summary.is_empty() { String::new() } else { format!(" — {}", crate::hook::truncate(&t.summary, 70)) });
+                println!("#{:<4} {:<8} {:<10} {:<16} {}{note}", t.id, t.status, t.product, crate::hook::truncate(&t.role, 16), t.title);
             }
             let counts: Vec<String> = store.counts()?.iter().map(|(s, n)| format!("{n} {s}")).collect();
             println!("{}", if counts.is_empty() { "No tasks yet.".to_string() } else { counts.join(" · ") });
@@ -200,7 +221,134 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             }
             Err(e) => anyhow::bail!("the audit record was changed: {e}"),
         },
+        JazariCmd::New { name, idea } => {
+            let (repo, id) = create_product(&open()?, &name, &idea.join(" "))?;
+            println!("Created {name} in {}. Task #{id}: the Chief of Staff turns the idea into a plan.", repo.display());
+            Ok(())
+        }
+        JazariCmd::Idea { product, idea } => {
+            let id = queue_idea(&open()?, &product, &idea.join(" "))?;
+            println!("Queued task #{id}: the Chief of Staff turns the idea into a plan and the first tasks.");
+            Ok(())
+        }
+        JazariCmd::Answer { task, answer } => {
+            open()?.reply(task, &answer.join(" "), crate::now())?;
+            println!("Task #{task} is back in the queue with your answer.");
+            Ok(())
+        }
+        JazariCmd::Approve { task } => {
+            println!("{}", decide(&open()?, task, true)?);
+            Ok(())
+        }
+        JazariCmd::Deny { task } => {
+            println!("{}", decide(&open()?, task, false)?);
+            Ok(())
+        }
+        JazariCmd::Personas => {
+            for p in personas::all() {
+                println!("{:<26} {:<6} {}", p.key, format!("{:?}", p.tier).to_lowercase(), p.title);
+            }
+            Ok(())
+        }
     }
+}
+
+/// What the Chief of Staff is asked to do with a new idea.
+const INTAKE: &str = "This is a new idea from the founder. Turn it into a plan the team can build:
+1. Write or update company/VISION.md, company/ROADMAP.md (first milestone small, shippable and testable),
+   company/DECISIONS/ (an ADR for the architecture), company/THREAT-MODEL.md and company/SECURITY.md.
+   For an existing product, read them first and change only what the idea changes.
+2. Commit them.
+3. Return the first milestone's tasks as follow-ups, in build order. Each task is small, concrete and
+   testable, has the right role, and has a brief with acceptance criteria.
+If the idea is unclear, make the simplest useful reading, write the assumption in VISION.md, and go on.
+
+The founder's idea:
+";
+
+pub(crate) fn queue_idea(store: &store::Store, product: &str, idea: &str) -> anyhow::Result<i64> {
+    anyhow::ensure!(!idea.trim().is_empty(), "describe the idea");
+    let brief = format!("{INTAKE}{}", idea.trim());
+    let title = format!("Plan: {}", crate::hook::truncate(idea.lines().next().unwrap_or(idea), 80));
+    store.add_task(&store::NewTask { product, role: "chief-of-staff", title: &title, brief: &brief, priority: 100, ..Default::default() }, crate::now())
+}
+
+/// Where new products' repos go: `jazari.products_dir`, or `~/jazari-products`.
+fn products_dir() -> PathBuf {
+    crate::settings::get("jazari")
+        .and_then(|j| j["products_dir"].as_str().map(PathBuf::from))
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("jazari-products"))
+}
+
+/// Makes a git repo for a new product, registers it and queues the idea.
+pub(crate) fn create_product(store: &store::Store, name: &str, idea: &str) -> anyhow::Result<(PathBuf, i64)> {
+    anyhow::ensure!(store::valid_name(name), "a product name uses lowercase letters, digits and dashes: {name:?}");
+    anyhow::ensure!(store.product(name)?.is_none(), "there is already a product called {name}");
+    anyhow::ensure!(!idea.trim().is_empty(), "describe the idea");
+    let repo = products_dir().join(name);
+    anyhow::ensure!(!repo.exists(), "{} already exists", repo.display());
+    std::fs::create_dir_all(&repo)?;
+    std::fs::write(repo.join("README.md"), format!("# {name}\n\n{}\n", idea.trim()))?;
+    std::fs::write(repo.join(".gitignore"), ".jazari/\n.env\n.env.*\n")?;
+    let git = |args: &[&str]| -> anyhow::Result<()> {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=jazari", "-c", "user.email=jazari@localhost", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()?
+            .success();
+        anyhow::ensure!(ok, "git {} failed", args.join(" "));
+        Ok(())
+    };
+    git(&["init", "-q", "-b", "main"])?;
+    git(&["add", "README.md", ".gitignore"])?;
+    git(&["commit", "-q", "-m", "chore: start the product"])?;
+    let repo = std::fs::canonicalize(&repo)?;
+    store.add_product(name, &repo.to_string_lossy(), crate::now())?;
+    Ok((repo.clone(), queue_idea(store, name, idea)?))
+}
+
+/// Approves or denies a task's request; the task goes back in the queue with the decision.
+pub(crate) fn decide(store: &store::Store, task: i64, approve: bool) -> anyhow::Result<String> {
+    let t = store.task(task)?.ok_or_else(|| anyhow::anyhow!("no task #{task}"))?;
+    let what = t.approval.clone().ok_or_else(|| anyhow::anyhow!("task #{task} isn't waiting for an approval"))?;
+    let reply = if approve {
+        "Approved. Production, payment and outreach credentials are not in your container: prepare everything, write the exact steps in company/RUNBOOKS/, and report what the founder must run."
+    } else {
+        "Denied. Don't do it. Finish the task without it, or explain the alternative."
+    };
+    store.reply(task, reply, crate::now())?;
+    let verdict = if approve { "Approved" } else { "Denied" };
+    Ok(format!("{verdict}: #{task} {what}"))
+}
+
+/// The tasks running, waiting for the founder, and queued next, for Telegram.
+pub(crate) fn task_summary(store: &store::Store) -> anyhow::Result<String> {
+    let tasks = store.tasks(None, 200)?;
+    let mut out = Vec::new();
+    let line = |t: &store::Task| format!("#{} {} · {} · {}", t.id, t.product, t.role, crate::hook::truncate(&t.title, 70));
+    let running: Vec<_> = tasks.iter().filter(|t| t.status == "running").map(line).collect();
+    let waiting: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.status == "blocked")
+        .map(|t| format!("{}\n   ↳ {}", line(t), crate::hook::truncate(t.question.as_deref().or(t.approval.as_deref()).unwrap_or(&t.summary), 120)))
+        .collect();
+    let queued: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.status == "queued")
+        .take(8)
+        .map(|t| format!("{}{}", line(t), t.after_task.map(|a| format!(" (after #{a})")).unwrap_or_default()))
+        .collect();
+    for (head, list) in [("Running", running), ("Waiting for you", waiting), ("Next up", queued)] {
+        if !list.is_empty() {
+            out.push(format!("{head}:\n{}", list.join("\n")));
+        }
+    }
+    let counts: Vec<String> = store.counts()?.iter().map(|(s, n)| format!("{n} {s}")).collect();
+    out.push(if counts.is_empty() { "No tasks yet. Send /new <name> <idea> to start.".into() } else { counts.join(" · ") });
+    Ok(out.join("\n\n"))
 }
 
 fn open() -> anyhow::Result<store::Store> {
@@ -208,10 +356,10 @@ fn open() -> anyhow::Result<store::Store> {
 }
 
 /// Tells the founder on Telegram when it is set up, and always prints it.
-fn tell_founder(text: &str) {
+fn tell_founder(text: &str, buttons: &[supervisor::Button]) {
     println!("{text}");
     if let (Ok(bot), Ok(chat)) = (bot(), chat())
-        && let Err(e) = bot.send(chat, text)
+        && let Err(e) = bot.send_with_buttons(chat, text, buttons)
     {
         eprintln!("[jazari] couldn't reach Telegram: {e}");
     }
@@ -240,7 +388,7 @@ fn run_supervisor(once: bool) -> anyhow::Result<()> {
         }
     };
     let profile = limits::plan().profile();
-    let deps = supervisor::Deps { store: &store, runner: &runner, profile, now: &now, paused: &paused, ensure: &ensure, notify: &tell_founder, audit: &audit };
+    let deps = supervisor::Deps { store: &store, runner: &runner, repo: &supervisor::Git, profile, now: &now, paused: &paused, ensure: &ensure, notify: &tell_founder, audit: &audit };
     println!("jazari supervisor on ({}). Ctrl-C stops it; a task in progress goes back in the queue next start.", profile.plan.label());
     let mut errors = 0u32;
     loop {
@@ -265,7 +413,7 @@ fn run_supervisor(once: bool) -> anyhow::Result<()> {
             Err(e) => {
                 errors += 1;
                 if errors == 3 {
-                    tell_founder(&format!("⚠️ jazari supervisor keeps failing: {e}"));
+                    tell_founder(&format!("⚠️ jazari supervisor keeps failing: {e}"), &[]);
                 }
                 anyhow::ensure!(!once, "{e}");
                 eprintln!("[jazari] {e}");

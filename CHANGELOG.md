@@ -11,6 +11,13 @@ GitHub release. Keep each bullet to one short line.
 - `marsad jazari run` works through a task queue: each task is a headless Claude run in the product's own locked-down Docker container
 - jazari sleeps until the 5-hour or 7-day window resets, keeps a share for you by plan (`marsad jazari plan pro|max5|max20`), and spreads the week evenly
 - Finished, blocked and failing tasks are reported on Telegram; `marsad jazari audit` checks the hash-chained audit record
+- `marsad jazari new` and `/new` start a product from an idea: the Chief of Staff writes the vision, roadmap, ADR and threat model, then queues the first tasks
+- 36 roles (`marsad jazari personas`), from Chief of Staff to red team, each with its own mandate and model tier
+- Each task works in its own git worktree; built branches go through code review and security review, then merge into `main`
+- Workers' questions wait for `/answer`, and deploy, spend or contact requests wait for the Approve or Deny button
+- A worker run stops after 45 minutes
+- A plan's tasks run in order: each starts once the one before it is merged into `main`
+- The worker image (`jazari-worker:2`) has Python 3, a C toolchain, ripgrep and shellcheck; workers install other tools in user space
 
 ## 0.22.0 - 2026-11-26
 

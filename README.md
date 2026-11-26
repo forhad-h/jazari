@@ -297,6 +297,10 @@ In the paired chat:
 | `/tell <id> <message>` | A message for a session; give at least 4 letters of its id |
 | `/stop <id>` | Stops a session before its next tool call |
 | `/pause [30m\|2h\|1d]` and `/resume` | The same as `marsad pause` and `marsad resume` |
+| `/new <name> <idea>`, `/idea <product> <idea>` | Start a product, or give one a new idea (see the jazari engine) |
+| `/tasks` | What the team is doing, and what waits for you |
+| `/answer <task> <answer>` | Answer a task's question |
+| `/approve <task>`, `/deny <task>` | Decide on a deploy, spend or contact; the buttons do the same |
 
 When a session runs `marsad say --attention "…"`, the bridge sends the note to the chat.
 `marsad jazari notify "…"` sends your own message, from a script or from stdin. `marsad actions`
@@ -312,48 +316,82 @@ Before anything is sent, credentials are replaced with `[redacted]`:
 
 ### The jazari engine
 
-jazari can also do the work: give it a product (a git repo) and tasks. It runs each task as a
-fresh headless Claude session inside that product's Docker container, on your Claude
-subscription.
+jazari runs a small AI software company on your Claude subscription. You bring the ideas, and it plans, builds,
+reviews and merges them. It asks you only for decisions and approvals.
 
 ```sh
-marsad jazari product add shop ~/code/shop     # once per product
-marsad jazari task shop "Add rate limiting to login" --priority 2 --brief "5 tries a minute per IP"
-marsad jazari plan max5                         # pro, max5 or max20: how hard it works
-marsad jazari run                               # the supervisor; --once runs at most one task
-marsad jazari tasks                             # the queue and what each task did
+marsad jazari new notes "A private, end-to-end encrypted notes app"   # a new repo, planned by the Chief of Staff
+marsad jazari idea notes "Add sharing a note by link"                 # a new idea for an existing product
+marsad jazari product add shop ~/code/shop                            # or bring a repo you already have
+marsad jazari task shop "Add rate limiting to login" --role backend-engineer --priority 2
+marsad jazari plan max5                                               # pro, max5 or max20: how hard it works
+marsad jazari run                                                     # the supervisor; --once runs at most one task
+marsad jazari tasks                                                   # the queue, and what waits for you
+marsad jazari answer 12 "Use Twilio"                                  # answer a task's question
+marsad jazari approve 14 / deny 14                                    # decide on a deploy, spend or contact
+marsad jazari personas                                                # the roles workers take
 ```
 
 **Before the first run:** save a long-lived Claude login token for the workers. Run `claude setup-token`,
 then on macOS save the token with `security add-generic-password -a "$USER" -s marsad-jazari-claude-token -w`.
-Elsewhere, set `MARSAD_JAZARI_CLAUDE_TOKEN`. Docker must be running.
+Elsewhere, set `MARSAD_JAZARI_CLAUDE_TOKEN`. Docker must be running. New products' repos go in
+`~/jazari-products`, or in the folder set by `jazari.products_dir` in `settings.json`.
 
-**What the container gets:** the first task builds the worker image (`jazari-worker:1`) and creates
-the product's container (`jazari-<name>`). The container:
-- sees only the repo, at `/work`;
+**The company.** Each task names a role from `marsad jazari personas`. There are 36 roles:
+- **Leadership and planning:** Chief of Staff, Product Manager, Architect, Security Architect, CISO, Tech Lead.
+- **Engineering:** backend, frontend, mobile, data, ML, edge/offline, platform/SRE, database.
+- **Design:** UX, UI, accessibility, technical writing.
+- **Quality:** QA, bug hunter, performance, code review.
+- **Security:** AppSec, red team, blue team, supply chain, cryptography, privacy, compliance, incident response.
+- **Growth:** market, research, growth, communications, support.
+
+Planning roles use the plan's lead model (Opus on Max), building roles use Sonnet, and support uses Haiku. A new idea
+goes to the Chief of Staff. It writes `company/VISION.md`, the roadmap, an architecture ADR, the threat model and
+`SECURITY.md`, and then queues the first milestone's tasks. They run in order: each starts once the one before it
+is merged. These files in the product's repo are the team's memory.
+
+**The pipeline.** Every task runs as a fresh headless Claude session, in the product's container, inside its own
+git worktree (`.jazari/worktrees/task-<id>`). Your checkout is never switched. A branch with new commits goes:
+1. to a code review;
+2. then to a security review (documentation-only changes skip it);
+3. then it is merged into `main` with a merge commit.
+
+Along the way:
+- **A review asks for changes:** a fix task goes back to the role that built the branch. After three rounds, the
+  task waits for you.
+- **The merge conflicts:** the builder resolves the conflict.
+- **Your checkout of `main` has uncommitted changes:** the merge waits until it is clean. jazari doesn't push.
+
+**What needs you.** A worker that needs a decision asks a question, and you reply with `/answer`. To deploy,
+spend money or contact real users, it must ask for approval, and Telegram shows ✅ Approve and ❌ Deny buttons.
+No production, payment or outreach credentials ever enter the container. Approved work comes back as runbooks
+for you to run.
+
+**The container.** The first task builds the worker image (`jazari-worker:2`: Node.js, Python 3, a C toolchain, git, ripgrep and shellcheck; workers install anything else in user space) and creates the product's container
+(`jazari-<name>`). The container:
+- sees only the repo, mounted at the same path as on your Mac;
 - runs as a normal user, with no Linux capabilities;
 - is limited to 2 CPUs, 2 GB of memory and 512 processes.
 
-**How a worker runs:** it runs with permissions bypassed, which applies only inside that container.
-It commits to `jazari/task-<id>` and never pushes. Its final answer is a structured result. A
-finished task can queue up to three follow-up tasks.
+Workers run with permissions bypassed, which applies only inside that container. A run is stopped after 45
+minutes.
 
-**Usage limits:** each run reports the 5-hour and 7-day windows, and jazari waits when it must.
-- When the next task would eat into the share kept for you, jazari sleeps until that window resets.
-  The share is 30%/25% on Pro, 15%/15% on Max 5x and 10%/10% on Max 20x.
+**Usage limits.** Each run reports the 5-hour and 7-day windows, and jazari waits when it must.
+- When the next task would eat into the share kept for you, jazari sleeps until that window resets. The share is
+  30%/25% on Pro, 15%/15% on Max 5x and 10%/10% on Max 20x.
 - It also sleeps if a window refused the run.
 - It sleeps when it is ahead of an even pace through the week.
 - A task refused for usage goes back in the queue without counting as a failure.
 - `marsad jazari limits` shows the last reading.
 
-**Telling you:** when Telegram is paired, jazari tells you there when:
-- a task is done or blocked;
-- a task is set aside after 3 failed attempts;
+**Telling you.** When Telegram is paired, jazari tells you when:
+- work is built, merged, blocked or waiting for you;
+- a task fails three times;
 - it goes to sleep.
 
-**Pausing:** `marsad pause` (or `/pause` in Telegram) pauses it too.
+**Pausing.** `marsad pause` (or `/pause`) pauses it.
 
-**The record:** every start, finish and sleep is added to `~/.marsad/jazari/audit.jsonl`. Each entry
+**The record.** Every start, finish, merge and sleep is added to `~/.marsad/jazari/audit.jsonl`. Each entry
 carries the hash of the one before it, so `marsad jazari audit` finds an edited or deleted entry.
 
 ### Disk cleanup

@@ -21,6 +21,11 @@ pub enum Command {
     Resume,
     Tell { session: String, text: String },
     Stop(String),
+    Idea { product: String, text: String },
+    New { name: String, idea: String },
+    Tasks,
+    Answer { task: i64, text: String },
+    Decide { task: i64, approve: bool },
     Unknown(String),
 }
 
@@ -41,11 +46,33 @@ pub fn parse(text: &str) -> Command {
         },
         "stop" if !rest.is_empty() => Command::Stop(rest.split_whitespace().next().unwrap_or_default().into()),
         "stop" => Command::Unknown("usage: /stop <session>".into()),
+        "idea" => match rest.split_once(char::is_whitespace) {
+            Some((p, t)) if !t.trim().is_empty() => Command::Idea { product: p.into(), text: t.trim().into() },
+            _ => Command::Unknown("usage: /idea <product> <the idea>".into()),
+        },
+        "new" => match rest.split_once(char::is_whitespace) {
+            Some((n, t)) if !t.trim().is_empty() => Command::New { name: n.into(), idea: t.trim().into() },
+            _ => Command::Unknown("usage: /new <name> <the idea>".into()),
+        },
+        "tasks" => Command::Tasks,
+        "answer" => match rest.split_once(char::is_whitespace).and_then(|(id, t)| Some((id.trim_start_matches('#').parse().ok()?, t.trim()))) {
+            Some((task, t)) if !t.is_empty() => Command::Answer { task, text: t.into() },
+            _ => Command::Unknown("usage: /answer <task> <your answer>".into()),
+        },
+        "approve" | "deny" => match rest.trim_start_matches('#').parse() {
+            Ok(task) => Command::Decide { task, approve: name == "approve" },
+            Err(_) => Command::Unknown(format!("usage: /{name} <task>")),
+        },
         _ => Command::Unknown(format!("I don't know {head:?}.")),
     }
 }
 
 pub const HELP: &str = "jazari commands:
+/new <name> <idea> – start a product from an idea
+/idea <product> <idea> – give a product a new idea
+/tasks – what the team is doing and what waits for you
+/answer <task> <answer> – answer a task's question
+/approve <task>, /deny <task> – decide on a deploy, spend or contact
 /status – sessions and usage limits
 /tell <session> <message> – message a session (it reads it at its next step)
 /stop <session> – stop a session before its next tool call
@@ -60,6 +87,11 @@ pub trait Ops {
     fn resume(&self) -> anyhow::Result<String>;
     fn tell(&self, session: &str, text: &str) -> anyhow::Result<String>;
     fn stop(&self, session: &str) -> anyhow::Result<String>;
+    fn idea(&self, product: &str, text: &str) -> anyhow::Result<String>;
+    fn new_product(&self, name: &str, idea: &str) -> anyhow::Result<String>;
+    fn tasks(&self) -> anyhow::Result<String>;
+    fn answer(&self, task: i64, text: &str) -> anyhow::Result<String>;
+    fn decide(&self, task: i64, approve: bool) -> anyhow::Result<String>;
 }
 
 /// The reply to one command.
@@ -72,6 +104,11 @@ pub fn handle(cmd: Command, ops: &dyn Ops) -> String {
         Command::Resume => done(ops.resume()),
         Command::Tell { session, text } => done(ops.tell(&session, &text)),
         Command::Stop(session) => done(ops.stop(&session)),
+        Command::Idea { product, text } => done(ops.idea(&product, &text)),
+        Command::New { name, idea } => done(ops.new_product(&name, &idea)),
+        Command::Tasks => done(ops.tasks()),
+        Command::Answer { task, text } => done(ops.answer(task, &text)),
+        Command::Decide { task, approve } => done(ops.decide(task, approve)),
         Command::Unknown(why) => format!("{why}\n\n{HELP}"),
     }
 }
@@ -145,6 +182,29 @@ impl Ops for Machine {
         let s = pick(&sessions, session)?;
         crate::channel::request_stop(&s.id)?;
         Ok(format!("{} stops before its next tool call; `claude --resume {}` continues it.", s.project(), s.id))
+    }
+
+    fn idea(&self, product: &str, text: &str) -> anyhow::Result<String> {
+        let id = super::queue_idea(&super::open()?, product, text)?;
+        Ok(format!("Idea queued as task #{id}: the Chief of Staff turns it into a plan and the first tasks."))
+    }
+
+    fn new_product(&self, name: &str, idea: &str) -> anyhow::Result<String> {
+        let (repo, id) = super::create_product(&super::open()?, name, idea)?;
+        Ok(format!("Created {name} in {}. Task #{id}: the Chief of Staff turns the idea into a plan. Run `marsad jazari run` if the supervisor isn't running.", repo.display()))
+    }
+
+    fn tasks(&self) -> anyhow::Result<String> {
+        super::task_summary(&super::open()?)
+    }
+
+    fn answer(&self, task: i64, text: &str) -> anyhow::Result<String> {
+        super::open()?.reply(task, text, crate::now())?;
+        Ok(format!("Thanks. Task #{task} is back in the queue with your answer."))
+    }
+
+    fn decide(&self, task: i64, approve: bool) -> anyhow::Result<String> {
+        super::decide(&super::open()?, task, approve)
     }
 }
 
@@ -228,6 +288,9 @@ pub fn serve_once<T: Transport>(bot: &Bot<T>, chat: i64, offset: Option<i64>, op
             eprintln!("[jazari] ignored a message from an unpaired chat");
             continue;
         }
+        if let Some(cb) = &u.callback {
+            bot.answer_button(cb);
+        }
         bot.send(chat, &handle(parse(&u.text), ops))?;
     }
     Ok(next.or(offset))
@@ -297,6 +360,12 @@ mod tests {
         assert_eq!(parse("/stop 1fe6ab now"), Command::Stop("1fe6ab".into()));
         assert!(matches!(parse("/stop"), Command::Unknown(_)));
         assert!(matches!(parse("rm -rf /"), Command::Unknown(_)));
+        assert_eq!(parse("/new notes-app A private notes app"), Command::New { name: "notes-app".into(), idea: "A private notes app".into() });
+        assert_eq!(parse("/idea shop Add gift cards"), Command::Idea { product: "shop".into(), text: "Add gift cards".into() });
+        assert_eq!(parse("/answer #12 Use Twilio"), Command::Answer { task: 12, text: "Use Twilio".into() });
+        assert!(matches!(parse("/answer 12"), Command::Unknown(_)) && matches!(parse("/approve x"), Command::Unknown(_)));
+        assert_eq!(parse("/deny 7"), Command::Decide { task: 7, approve: false });
+        assert_eq!(parse("/tasks"), Command::Tasks);
     }
 
     #[derive(Default)]
@@ -323,6 +392,25 @@ mod tests {
             self.log.borrow_mut().push(format!("stop {s}"));
             Ok("stopping".into())
         }
+        fn idea(&self, p: &str, t: &str) -> anyhow::Result<String> {
+            self.log.borrow_mut().push(format!("idea {p} {t}"));
+            Ok("queued".into())
+        }
+        fn new_product(&self, n: &str, i: &str) -> anyhow::Result<String> {
+            self.log.borrow_mut().push(format!("new {n} {i}"));
+            Ok("created".into())
+        }
+        fn tasks(&self) -> anyhow::Result<String> {
+            Ok("no tasks".into())
+        }
+        fn answer(&self, t: i64, a: &str) -> anyhow::Result<String> {
+            self.log.borrow_mut().push(format!("answer {t} {a}"));
+            Ok("thanks".into())
+        }
+        fn decide(&self, t: i64, yes: bool) -> anyhow::Result<String> {
+            self.log.borrow_mut().push(format!("decide {t} {yes}"));
+            Ok("decided".into())
+        }
     }
 
     fn msg(id: i64, chat: i64, kind: &str, text: &str) -> serde_json::Value {
@@ -337,14 +425,16 @@ mod tests {
             msg(6, 42, "group", "/stop abcd1234"),
             msg(7, 42, "private", "/tell abcd1234 use staging"),
             msg(8, 42, "private", "/resume"),
+            json!({"update_id": 9, "callback_query": {"id": "cb", "from": {"id": 42}, "data": "/approve 3", "message": {"chat": {"id": 42, "type": "private"}}}}),
         ]));
         let bot = Bot { transport: fake };
         let ops = FakeOps::default();
-        assert_eq!(serve_once(&bot, 42, Some(5), &ops).unwrap(), Some(9));
-        assert_eq!(*ops.log.borrow(), vec!["tell abcd1234 use staging"]);
+        assert_eq!(serve_once(&bot, 42, Some(5), &ops).unwrap(), Some(10));
+        assert_eq!(*ops.log.borrow(), vec!["tell abcd1234 use staging", "decide 3 true"]);
         let calls = bot.transport.calls.borrow();
+        assert!(calls.iter().any(|c| c.0 == "answerCallbackQuery"));
         let sent: Vec<_> = calls.iter().filter(|c| c.0 == "sendMessage").collect();
-        assert_eq!(sent.len(), 2);
+        assert_eq!(sent.len(), 3);
         assert!(sent.iter().all(|c| c.1.contains(&("chat_id".into(), "42".into()))));
         assert!(sent[1].1.iter().any(|(k, v)| k == "text" && v.starts_with("Couldn't: nothing to resume")));
         assert!(calls[0].1.contains(&("offset".into(), "5".into())));

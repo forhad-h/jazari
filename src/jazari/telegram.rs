@@ -57,6 +57,8 @@ pub struct Update {
     /// A one-to-one chat with the bot, not a group or a channel.
     pub private: bool,
     pub text: String,
+    /// Set when this is a button press: the id Telegram wants answered.
+    pub callback: Option<String>,
 }
 
 /// The messages in a `getUpdates` result, and the offset that acknowledges all of it (other kinds
@@ -67,12 +69,25 @@ pub fn parse_updates(result: &Value) -> (Vec<Update>, Option<i64>) {
     let updates = list
         .iter()
         .filter_map(|u| {
+            let id = u["update_id"].as_i64()?;
+            if let Some(q) = u.get("callback_query") {
+                // A button press: its data is the command the button stands for.
+                let m = &q["message"];
+                return Some(Update {
+                    id,
+                    chat_id: m["chat"]["id"].as_i64()?,
+                    private: m["chat"]["type"] == "private" && q["from"]["id"] == m["chat"]["id"],
+                    text: q["data"].as_str()?.to_string(),
+                    callback: q["id"].as_str().map(String::from),
+                });
+            }
             let m = &u["message"];
             Some(Update {
-                id: u["update_id"].as_i64()?,
+                id,
                 chat_id: m["chat"]["id"].as_i64()?,
                 private: m["chat"]["type"] == "private",
                 text: m["text"].as_str()?.to_string(),
+                callback: None,
             })
         })
         .collect();
@@ -92,7 +107,7 @@ impl<T: Transport> Bot<T> {
 
     /// Waits up to `wait_secs` for messages after `offset`, acknowledging everything before it.
     pub fn updates(&self, offset: Option<i64>, wait_secs: u64) -> anyhow::Result<(Vec<Update>, Option<i64>)> {
-        let mut params = vec![("timeout", wait_secs.to_string()), ("allowed_updates", r#"["message"]"#.to_string())];
+        let mut params = vec![("timeout", wait_secs.to_string()), ("allowed_updates", r#"["message","callback_query"]"#.to_string())];
         if let Some(o) = offset {
             params.push(("offset", o.to_string()));
         }
@@ -101,10 +116,28 @@ impl<T: Transport> Bot<T> {
 
     /// Sends `text` to `chat`, redacted and split into parts Telegram accepts.
     pub fn send(&self, chat: i64, text: &str) -> anyhow::Result<()> {
-        for part in split(&redact(text), MAX_MESSAGE_CHARS) {
-            self.transport.call("sendMessage", &[("chat_id", chat.to_string()), ("text", part), ("disable_web_page_preview", "true".into())], 0)?;
+        self.send_with_buttons(chat, text, &[])
+    }
+
+    /// Sends `text` with one row of buttons under its last part; each button sends back its
+    /// command (label, command).
+    pub fn send_with_buttons(&self, chat: i64, text: &str, buttons: &[(String, String)]) -> anyhow::Result<()> {
+        let parts = split(&redact(text), MAX_MESSAGE_CHARS);
+        let last = parts.len().saturating_sub(1);
+        for (i, part) in parts.into_iter().enumerate() {
+            let mut params = vec![("chat_id", chat.to_string()), ("text", part), ("disable_web_page_preview", "true".into())];
+            if i == last && !buttons.is_empty() {
+                let row: Vec<_> = buttons.iter().map(|(label, data)| serde_json::json!({ "text": label, "callback_data": data })).collect();
+                params.push(("reply_markup", serde_json::json!({ "inline_keyboard": [row] }).to_string()));
+            }
+            self.transport.call("sendMessage", &params, 0)?;
         }
         Ok(())
+    }
+
+    /// Stops the spinner on a pressed button.
+    pub fn answer_button(&self, callback: &str) {
+        let _ = self.transport.call("answerCallbackQuery", &[("callback_query_id", callback.to_string())], 0);
     }
 }
 
@@ -203,9 +236,12 @@ pub mod tests {
         let (u, next) = parse_updates(&result);
         assert_eq!(next, Some(14));
         assert_eq!(u, vec![
-            Update { id: 10, chat_id: 42, private: true, text: "/status".into() },
-            Update { id: 11, chat_id: -7, private: false, text: "hi".into() },
+            Update { id: 10, chat_id: 42, private: true, text: "/status".into(), callback: None },
+            Update { id: 11, chat_id: -7, private: false, text: "hi".into(), callback: None },
         ]);
+        let press = json!([{"update_id": 20, "callback_query": {"id": "cb1", "from": {"id": 42}, "data": "/approve 7",
+            "message": {"chat": {"id": 42, "type": "private"}}}}]);
+        assert_eq!(parse_updates(&press).0, vec![Update { id: 20, chat_id: 42, private: true, text: "/approve 7".into(), callback: Some("cb1".into()) }]);
         assert_eq!(parse_updates(&json!([])), (vec![], None));
     }
 
@@ -236,5 +272,10 @@ pub mod tests {
         assert_eq!(calls[0].0, "sendMessage");
         assert!(calls[0].1.contains(&("chat_id".into(), "42".into())));
         assert!(calls[0].1.contains(&("text".into(), "key [redacted]".into())));
+        drop(calls);
+        bot.send_with_buttons(42, "Deploy?", &[("Approve".into(), "/approve 3".into())]).unwrap();
+        let calls = bot.transport.calls.borrow();
+        let markup = &calls[1].1.iter().find(|(k, _)| k == "reply_markup").unwrap().1;
+        assert_eq!(markup, r#"{"inline_keyboard":[[{"text":"Approve","callback_data":"/approve 3"}]]}"#);
     }
 }
