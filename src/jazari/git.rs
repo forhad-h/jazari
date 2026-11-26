@@ -16,9 +16,9 @@ use std::process::{Command, Stdio};
 /// filled with hooks).
 fn no_hooks_home() -> PathBuf {
     if cfg!(test) {
-        return std::env::temp_dir().join(format!("marsad-jazari-tests-{}", std::process::id())).join("no-hooks");
+        return std::env::temp_dir().join(format!("jazari-jazari-tests-{}", std::process::id())).join("no-hooks");
     }
-    crate::data_dir().join("jazari").join("no-hooks")
+    super::dir().join("no-hooks")
 }
 
 /// The empty folder `core.hooksPath` points at, so no hook runs on any platform. It is checked
@@ -262,7 +262,7 @@ pub mod tests {
     use super::*;
 
     pub fn repo(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marsad-jazari-git-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-jazari-git-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         run(&dir, &["init", "-q", "-b", "main"]).unwrap();
@@ -345,7 +345,7 @@ pub mod tests {
 
     #[test]
     fn the_hooks_folder_is_emptied_before_use_and_git_refuses_to_run_without_it() {
-        let dir = std::env::temp_dir().join(format!("marsad-jazari-nohooks-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-jazari-nohooks-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(no_hooks_at(&dir).is_ok());
         std::fs::write(dir.join("post-checkout"), "#!/bin/sh\nrm -rf ~\n").unwrap();
@@ -356,7 +356,7 @@ pub mod tests {
         std::fs::write(&dir, "not a folder").unwrap();
         assert!(no_hooks_at(&dir).is_err());
         std::fs::remove_file(&dir).ok();
-        assert!(!no_hooks_home().starts_with("/tmp/marsad-jazari-no-hooks"));
+        assert!(!no_hooks_home().starts_with("/tmp/jazari-jazari-no-hooks"));
     }
 
     #[test]

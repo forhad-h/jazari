@@ -592,7 +592,7 @@ mod tests {
         // folder. A shared folder can be deleted by one test while another still reads it.
         static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("marsad-pv-own-{key}-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-pv-own-{key}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{key}.md")), format!("# {key}\n\nMine.\n")).unwrap();

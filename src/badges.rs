@@ -297,12 +297,12 @@ pub struct BadgesArgs {
     /// Don't index new transcript data first.
     #[arg(long)]
     no_sync: bool,
-    /// Save the badge view as a PNG instead (default: Downloads/marsad-badge-YYYY-MM-DD.png).
+    /// Save the badge view as a PNG instead (default: Downloads/jazari-badge-YYYY-MM-DD.png).
     #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
     png: Option<std::path::PathBuf>,
 }
 
-/// `marsad badges`: the rank, each achievement's level and progress, and the stats behind them.
+/// `jazari watch badges`: the rank, each achievement's level and progress, and the stats behind them.
 pub fn run(a: BadgesArgs) -> anyhow::Result<()> {
     if a.png.is_some() && a.format.is_some() {
         anyhow::bail!("--png saves an image; leave out --format");
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn announcement_seeds_silently_then_combines_rises_and_records_them() {
-        let dir = std::env::temp_dir().join(format!("marsad-badges-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-badges-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("settings.json");
         let at = |rank: i64, streak: i64| badges(&Stats(BTreeMap::from([(RANK_KEY, rank), ("streak", streak)])));

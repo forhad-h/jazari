@@ -186,7 +186,7 @@ pub fn png(b: &Badges) -> Result<Vec<u8>> {
 
 /// Where the picture goes: beside the share card (Downloads, else `<data_dir>/cards/`). Same day, same file.
 pub fn path(downloads: Option<PathBuf>, data_dir: &Path, date: &str) -> PathBuf {
-    crate::share::card_path(downloads, data_dir, date).with_file_name(format!("marsad-badge-{date}.png"))
+    crate::share::card_path(downloads, data_dir, date).with_file_name(format!("jazari-badge-{date}.png"))
 }
 
 pub fn default_path() -> PathBuf {
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn the_file_goes_to_downloads_else_the_data_dir() {
-        assert_eq!(path(Some("/d".into()), Path::new("/m"), "2026-10-27"), Path::new("/d/marsad-badge-2026-10-27.png"));
-        assert_eq!(path(None, Path::new("/m"), "2026-10-27"), Path::new("/m/cards/marsad-badge-2026-10-27.png"));
+        assert_eq!(path(Some("/d".into()), Path::new("/m"), "2026-10-27"), Path::new("/d/jazari-badge-2026-10-27.png"));
+        assert_eq!(path(None, Path::new("/m"), "2026-10-27"), Path::new("/m/cards/jazari-badge-2026-10-27.png"));
     }
 }

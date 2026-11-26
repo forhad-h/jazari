@@ -1,7 +1,7 @@
 //! Self-update: checks GitHub releases for a newer version and installs it with the release's
 //! own installer script (the same one the README tells people to pipe into `sh`).
 //!
-//! Network access goes through `curl`, which the installer needs anyway, so marsad carries no
+//! Network access goes through `curl`, which the installer needs anyway, so jazari carries no
 //! HTTP or TLS dependency. Hooks and the status line never touch this module.
 
 use anyhow::{Context, bail};
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 
-const REPO: &str = "forhad-h/marsad";
+const REPO: &str = "forhad-h/jazari";
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// The dashboard asks GitHub at most this often (unauthenticated API: 60 requests/hour/IP).
 const CHECK_EVERY_SECS: f64 = 24.0 * 3600.0;
@@ -93,13 +93,19 @@ fn release_notes(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// Published releases, newest first (drafts and pre-releases skipped).
+/// The asset every jazari release carries. The repository also holds the releases of the project
+/// it grew out of, whose version numbers are higher than jazari's first ones; they have no such
+/// asset, so they are never offered as an update or listed as news.
+const INSTALLER_ASSET: &str = "jazari-installer.sh";
+
+/// Published jazari releases, newest first (drafts, pre-releases and other releases skipped).
 fn parse_releases(json: &Value) -> Vec<Release> {
     let mut releases: Vec<Release> = json
         .as_array()
         .into_iter()
         .flatten()
         .filter(|r| !r["draft"].as_bool().unwrap_or(false) && !r["prerelease"].as_bool().unwrap_or(false))
+        .filter(|r| r["assets"].as_array().is_some_and(|a| a.iter().any(|x| x["name"] == INSTALLER_ASSET)))
         .filter_map(|r| {
             let tag = r["tag_name"].as_str()?;
             parse_version(tag)?;
@@ -142,7 +148,7 @@ fn check_now(state: &mut State) -> anyhow::Result<Vec<Release>> {
 }
 
 /// Where the installer should put the new binary so it replaces the one running now.
-/// The installer writes to `$MARSAD_INSTALL_DIR/bin`, so the binary must live in a `bin` dir;
+/// The installer writes to `$JAZARI_INSTALL_DIR/bin`, so the binary must live in a `bin` dir;
 /// anything else (a `cargo build` in `target/`) wasn't installed by the installer.
 fn install_root(exe: &Path) -> Option<PathBuf> {
     let bin = exe.parent()?;
@@ -150,7 +156,7 @@ fn install_root(exe: &Path) -> Option<PathBuf> {
 }
 
 fn current_exe() -> anyhow::Result<PathBuf> {
-    let exe = std::env::current_exe().context("can't locate the marsad binary")?;
+    let exe = std::env::current_exe().context("can't locate the jazari binary")?;
     Ok(exe.canonicalize().unwrap_or(exe))
 }
 
@@ -160,14 +166,14 @@ fn install(version: &str, quiet: bool) -> anyhow::Result<PathBuf> {
     let exe = current_exe()?;
     let Some(root) = install_root(&exe) else {
         bail!(
-            "{} wasn't installed by the marsad installer, so it can't update itself.\n\
+            "{} wasn't installed by the jazari installer, so it can't update itself.\n\
              Rebuild it, or install with: cargo install --git https://github.com/{REPO}",
             exe.display()
         );
     };
-    let (script, ext) = if cfg!(windows) { ("marsad-installer.ps1", "ps1") } else { ("marsad-installer.sh", "sh") };
+    let (script, ext) = if cfg!(windows) { ("jazari-installer.ps1", "ps1") } else { ("jazari-installer.sh", "sh") };
     let url = format!("https://github.com/{REPO}/releases/download/v{version}/{script}");
-    let tmp = std::env::temp_dir().join(format!("marsad-installer-{}.{ext}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("jazari-installer-{}.{ext}", std::process::id()));
     let script_body = curl(&url)?;
     // create_new refuses an existing path, so a file or symlink planted in a shared temp dir
     // can't redirect the write.
@@ -181,7 +187,7 @@ fn install(version: &str, quiet: bool) -> anyhow::Result<PathBuf> {
     let parked = exe.with_extension("old.exe");
     if cfg!(windows) {
         let _ = std::fs::remove_file(&parked);
-        std::fs::rename(&exe, &parked).context("couldn't move the running marsad.exe aside")?;
+        std::fs::rename(&exe, &parked).context("couldn't move the running jazari.exe aside")?;
     }
 
     let mut cmd = if cfg!(windows) {
@@ -193,7 +199,7 @@ fn install(version: &str, quiet: bool) -> anyhow::Result<PathBuf> {
         c.arg(&tmp);
         c
     };
-    cmd.env("MARSAD_INSTALL_DIR", &root).env("MARSAD_NO_MODIFY_PATH", "1").stdin(Stdio::null());
+    cmd.env("JAZARI_INSTALL_DIR", &root).env("JAZARI_NO_MODIFY_PATH", "1").stdin(Stdio::null());
     if quiet {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
@@ -210,7 +216,7 @@ fn install(version: &str, quiet: bool) -> anyhow::Result<PathBuf> {
     Ok(exe)
 }
 
-/// The version the binary at `exe` reports ("marsad 1.2.3" → "1.2.3").
+/// The version the binary at `exe` reports ("jazari 1.2.3" → "1.2.3").
 fn installed_version(exe: &Path) -> Option<String> {
     let out = Command::new(exe).arg("--version").stdin(Stdio::null()).output().ok()?;
     String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1).map(str::to_string)
@@ -243,7 +249,7 @@ fn whats_new(releases: &[Release]) -> Vec<String> {
     lines
 }
 
-/// Terminal styles for `marsad update`, empty when stdout isn't a terminal.
+/// Terminal styles for `jazari update`, empty when stdout isn't a terminal.
 struct Paint {
     yellow: &'static str,
     green: &'static str,
@@ -266,13 +272,13 @@ impl Paint {
 fn auto_hint(auto: bool) -> String {
     let Paint { dim, reset, .. } = Paint::new();
     if auto {
-        format!("{dim}Automatic updates are on (turn off: marsad update --auto off){reset}")
+        format!("{dim}Automatic updates are on (turn off: jazari update --auto off){reset}")
     } else {
-        format!("{dim}Automatic updates are off (turn on: marsad update --auto on){reset}")
+        format!("{dim}Automatic updates are off (turn on: jazari update --auto on){reset}")
     }
 }
 
-/// `marsad update`.
+/// `jazari update`.
 pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     let Paint { yellow, green, bold, dim, reset } = Paint::new();
     let mut state = load_state();
@@ -314,7 +320,7 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     println!();
 
     if args.check {
-        println!("{yellow}Run `marsad update` to install v{latest}.{reset}");
+        println!("{yellow}Run `jazari update` to install v{latest}.{reset}");
         return Ok(());
     }
 
@@ -322,7 +328,7 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     let exe = crate::act::run(&crate::act::Action::new(crate::act::Kind::Update, format!("v{latest}")), || install(&latest, false))?;
     println!();
     println!("{green}✓ Updated v{CURRENT} → v{latest}{reset}  {dim}{}{reset}", exe.display());
-    println!("{dim}Restart any open marsad dashboards to use the new version.{reset}");
+    println!("{dim}Restart any open jazari dashboards to use the new version.{reset}");
     println!("{}", auto_hint(state.auto));
     Ok(())
 }
@@ -336,10 +342,10 @@ pub enum Notice {
 
 /// Starts a background check for the dashboard (at most once a day; otherwise the last result is
 /// reused). With automatic updates on, a newer version is installed silently. Set
-/// `MARSAD_NO_UPDATE_CHECK` to skip all of it.
+/// `JAZARI_NO_UPDATE_CHECK` to skip all of it.
 pub fn background() -> Receiver<Notice> {
     let (tx, rx) = mpsc::channel();
-    if std::env::var_os("MARSAD_NO_UPDATE_CHECK").is_some() {
+    if std::env::var_os("JAZARI_NO_UPDATE_CHECK").is_some() {
         return rx;
     }
     std::thread::spawn(move || {
@@ -385,23 +391,38 @@ mod tests {
 
     #[test]
     fn notes_stop_at_install_section() {
-        let body = "## What's new\n\n- Add auto update\n* Fix sort\n\n## Install marsad 0.3.0\n\n```sh\ncurl …\n```";
+        let body = "## What's new\n\n- Add auto update\n* Fix sort\n\n## Install jazari 0.3.0\n\n```sh\ncurl …\n```";
         assert_eq!(release_notes(body), vec!["- Add auto update", "- Fix sort"]);
         // dist's body with no CHANGELOG section has no notes.
-        assert!(release_notes(" ## Install marsad 0.2.0\n\n### Install prebuilt binaries").is_empty());
+        assert!(release_notes(" ## Install jazari 0.2.0\n\n### Install prebuilt binaries").is_empty());
     }
 
     #[test]
     fn releases_skip_drafts_and_prereleases_and_sort_newest_first() {
+        let ours = json!([{"name": "jazari-installer.sh"}, {"name": "jazari-installer.ps1"}]);
         let json = json!([
-            {"tag_name": "v0.2.0", "body": "- b\n## Install x", "draft": false, "prerelease": false},
-            {"tag_name": "v0.10.0", "body": "- c", "draft": false, "prerelease": false},
-            {"tag_name": "v0.11.0-rc.1", "body": "", "draft": false, "prerelease": true},
-            {"tag_name": "v0.12.0", "body": "", "draft": true, "prerelease": false},
-            {"tag_name": "nightly", "body": "", "draft": false, "prerelease": false},
+            {"tag_name": "v0.2.0", "body": "- b\n## Install x", "draft": false, "prerelease": false, "assets": ours},
+            {"tag_name": "v0.10.0", "body": "- c", "draft": false, "prerelease": false, "assets": ours},
+            {"tag_name": "v0.11.0-rc.1", "body": "", "draft": false, "prerelease": true, "assets": ours},
+            {"tag_name": "v0.12.0", "body": "", "draft": true, "prerelease": false, "assets": ours},
+            {"tag_name": "nightly", "body": "", "draft": false, "prerelease": false, "assets": ours},
         ]);
         let versions: Vec<String> = parse_releases(&json).into_iter().map(|r| r.version).collect();
         assert_eq!(versions, vec!["0.10.0", "0.2.0"]);
+    }
+
+    #[test]
+    fn releases_of_the_earlier_project_are_never_offered_even_with_higher_versions() {
+        let json = json!([
+            {"tag_name": "v0.24.0", "body": "- old news", "draft": false, "prerelease": false,
+             "assets": [{"name": "marsad-installer.sh"}, {"name": "marsad-installer.ps1"}]},
+            {"tag_name": "v0.23.0", "body": "- older news", "draft": false, "prerelease": false, "assets": []},
+            {"tag_name": "v0.1.0", "body": "- first jazari", "draft": false, "prerelease": false,
+             "assets": [{"name": "jazari-installer.sh"}]},
+        ]);
+        let releases = parse_releases(&json);
+        assert_eq!(releases.iter().map(|r| r.version.as_str()).collect::<Vec<_>>(), vec!["0.1.0"]);
+        assert!(!whats_new(&releases).iter().any(|l| l.contains("old news")));
     }
 
     #[test]
@@ -418,7 +439,7 @@ mod tests {
 
     #[test]
     fn install_root_requires_bin_dir() {
-        assert_eq!(install_root(Path::new("/home/u/.cargo/bin/marsad")), Some(PathBuf::from("/home/u/.cargo")));
-        assert_eq!(install_root(Path::new("/src/marsad/target/release/marsad")), None);
+        assert_eq!(install_root(Path::new("/home/u/.cargo/bin/jazari")), Some(PathBuf::from("/home/u/.cargo")));
+        assert_eq!(install_root(Path::new("/src/jazari/target/release/jazari")), None);
     }
 }

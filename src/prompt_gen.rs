@@ -2,8 +2,8 @@
 //! as structured JSON, with what it assumed and what it left for the author to decide.
 //!
 //! The run carries none of the user's context: `--safe-mode` skips CLAUDE.md, hooks, plugins and
-//! MCP servers, the working directory is marsad's own `generator/` folder, and
-//! `--no-session-persistence` leaves no transcript. `MARKER_ENV` is set as well, so `marsad hook`
+//! MCP servers, the working directory is jazari's own `generator/` folder, and
+//! `--no-session-persistence` leaves no transcript. `MARKER_ENV` is set as well, so `jazari hook`
 //! drops the run's events should a hook still fire (a managed plugin's, say), and it never shows
 //! on the dashboard. `claude` reads only the last `--append-system-prompt-file`, so the
 //! generator's instructions and the output hygiene rules go in one merged file.
@@ -25,11 +25,11 @@ const FALLBACK_MODEL: &str = "opus";
 /// and Claude Code asks again when the model first answers in plain text.
 const MAX_TURNS: &str = "3";
 
-/// Set on the `claude` run, so `marsad hook` ignores its events.
-pub const MARKER_ENV: &str = "MARSAD_GENERATOR";
+/// Set on the `claude` run, so `jazari hook` ignores its events.
+pub const MARKER_ENV: &str = "JAZARI_GENERATOR";
 
 /// Overrides the `claude` program, for a stub in tests or a non-standard install.
-const PROGRAM_ENV: &str = "MARSAD_CLAUDE";
+const PROGRAM_ENV: &str = "JAZARI_CLAUDE";
 
 /// The longest a run may take before it is killed. A strong model at high effort can take minutes.
 const WAIT: Duration = Duration::from_secs(10 * 60);
@@ -288,7 +288,7 @@ fn first_line(s: &str) -> Option<&str> {
     s.lines().map(str::trim).find(|l| !l.is_empty())
 }
 
-/// The `claude` to run: `MARSAD_CLAUDE`, or `claude` on the PATH.
+/// The `claude` to run: `JAZARI_CLAUDE`, or `claude` on the PATH.
 fn program() -> std::ffi::OsString {
     std::env::var_os(PROGRAM_ENV).filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into())
 }
@@ -326,7 +326,7 @@ fn generate_with(program: &std::ffi::OsStr, model: &str, data: &Path, req: &Requ
     Err("claude rejected every model it was offered".into())
 }
 
-// ---------- `marsad prompt` ----------
+// ---------- `jazari build prompt` ----------
 
 #[derive(clap::Subcommand)]
 pub enum PromptCmd {
@@ -411,7 +411,7 @@ pub fn run(cmd: PromptCmd) -> anyhow::Result<()> {
         PromptCmd::Rm(args) => {
             let path = crate::rules::remove_own(&args.key)?;
             println!("Deleted {}", path.display());
-            println!("`marsad prompt restore {}` brings it back.", args.key);
+            println!("`jazari build prompt restore {}` brings it back.", args.key);
             Ok(())
         }
         PromptCmd::Versions(args) => run_versions(args),
@@ -423,7 +423,7 @@ pub fn run(cmd: PromptCmd) -> anyhow::Result<()> {
     }
 }
 
-// ---------- `marsad skill` ----------
+// ---------- `jazari build skill` ----------
 
 #[derive(clap::Subcommand)]
 pub enum SkillCmd {
@@ -468,13 +468,13 @@ pub fn run_skill(cmd: SkillCmd) -> anyhow::Result<()> {
             let key = args.new_key.unwrap_or_else(|| crate::rules::suggest_key(&lib, &format!("{}-copy", skill.key), &skill.name));
             let path = skills::save_own(&key, &skills::renamed(&skill.files, Some(&skill.key), &key), None)?;
             println!("Saved a copy of {} as {key}: {}", skill.key, path.display());
-            println!("Edit it with `marsad skill edit {key}`.");
+            println!("Edit it with `jazari build skill edit {key}`.");
             Ok(())
         }
         SkillCmd::Rm(args) => {
             let path = skills::remove_own(&args.key)?;
             println!("Deleted {}", path.display());
-            println!("`marsad skill restore {}` brings it back. A copy installed in {} is left as it is.", args.key, skills::home_relative(&skills::claude_skills_dir()));
+            println!("`jazari build skill restore {}` brings it back. A copy installed in {} is left as it is.", args.key, skills::home_relative(&skills::claude_skills_dir()));
             Ok(())
         }
         SkillCmd::Versions(args) => run_skill_versions(args),
@@ -526,8 +526,8 @@ fn skill_list(format: crate::report::Format, lib: &[crate::rules::Rule]) -> Stri
                 .map(|r| format!("{:<width$}  {:<10}  {:<9}  {}", r.key, if r.own { "[yours]" } else { "[built-in]" }, if installed(&r.key) { "installed" } else { "" }, r.summary))
                 .collect();
             out.push(String::new());
-            out.push("`marsad rules <name>…` starts Claude Code with skills and prompts; a session must use each skill it is given.".into());
-            out.push(format!("Write your own with `marsad skill new \"<rough idea>\"`. Your skills are folders in {}", crate::skills::skills_dir().display()));
+            out.push("`jazari build rules <name>…` starts Claude Code with skills and prompts; a session must use each skill it is given.".into());
+            out.push(format!("Write your own with `jazari build skill new \"<rough idea>\"`. Your skills are folders in {}", crate::skills::skills_dir().display()));
             out.join("\n")
         }
         Format::Json => {
@@ -549,7 +549,7 @@ fn skill_list(format: crate::report::Format, lib: &[crate::rules::Rule]) -> Stri
 fn run_edit_skill(args: EditArgs) -> anyhow::Result<()> {
     use crate::skills;
     let skill = skills::find(&args.key).ok_or_else(|| anyhow::anyhow!("no skill named {:?}", args.key))?;
-    anyhow::ensure!(skill.own, "{} is built in and can't be edited; `marsad skill copy {}` saves a copy you can edit", skill.key, skill.key);
+    anyhow::ensure!(skill.own, "{} is built in and can't be edited; `jazari build skill copy {}` saves a copy you can edit", skill.key, skill.key);
     let Some(feedback) = args.with else {
         let edited = crate::share_view::edit_in_editor(skill.skill_md(), "skill", ".md").map_err(|e| anyhow::anyhow!(e))?;
         if edited.trim() == skill.skill_md().trim() {
@@ -606,7 +606,7 @@ fn run_skill_versions(args: VersionsArgs) -> anyhow::Result<()> {
         println!("{:>4}  {}  {}  {}", format!("v{}", v.number), v.when(), v.title, v.summary);
     }
     println!();
-    println!("`marsad skill versions {key} <n>` prints one's SKILL.md; `marsad skill restore {key} <n>` brings the whole folder back.");
+    println!("`jazari build skill versions {key} <n>` prints one's SKILL.md; `jazari build skill restore {key} <n>` brings the whole folder back.");
     Ok(())
 }
 
@@ -640,7 +640,7 @@ fn run_versions(args: VersionsArgs) -> anyhow::Result<()> {
         println!("{:>4}  {}  {}  {}", format!("v{}", v.number), v.when(), v.title, v.summary);
     }
     println!();
-    println!("`marsad prompt versions {key} <n>` prints one; `marsad prompt restore {key} <n>` brings it back.");
+    println!("`jazari build prompt versions {key} <n>` prints one; `jazari build prompt restore {key} <n>` brings it back.");
     Ok(())
 }
 
@@ -701,7 +701,7 @@ fn run_edit(args: EditArgs) -> anyhow::Result<()> {
         rule.own,
         "{} is built in and can't be edited{}",
         rule.key,
-        if crate::rules::copy_problem(rule).is_none() { format!("; `marsad prompt copy {}` saves a copy you can edit", rule.key) } else { String::new() }
+        if crate::rules::copy_problem(rule).is_none() { format!("; `jazari build prompt copy {}` saves a copy you can edit", rule.key) } else { String::new() }
     );
     let Some(feedback) = args.with else {
         let edited = crate::share_view::edit_in_editor(rule.body(), "prompt", ".md").map_err(|e| anyhow::anyhow!(e))?;
@@ -728,7 +728,7 @@ fn run_copy(args: CopyArgs) -> anyhow::Result<()> {
     let key = args.new_key.unwrap_or_else(|| crate::rules::suggest_key(&lib, &format!("{}-copy", rule.key), &rule.title));
     let path = crate::rules::save_own(&key, rule.body(), None)?;
     println!("Saved a copy of {} as {key}: {}", rule.key, path.display());
-    println!("Edit it with `marsad prompt edit {key}`.");
+    println!("Edit it with `jazari build prompt edit {key}`.");
     Ok(())
 }
 
@@ -740,7 +740,7 @@ fn cli_generate(req: &Request) -> anyhow::Result<Draft> {
 /// Shows the draft, then saves it: at once with `--yes`, after a review loop in a terminal, and
 /// otherwise not at all.
 /// Saves a reviewed draft: a prompt's file, or a skill's folder (the one it revises with the
-/// draft's changes), then the skill's installed copy when marsad may update it.
+/// draft's changes), then the skill's installed copy when jazari may update it.
 fn save_draft(draft: &Draft, key: &str, replacing: Option<&str>) -> anyhow::Result<PathBuf> {
     match draft.kind {
         Kind::Prompt => crate::rules::save_own(key, &draft.body, replacing),
@@ -929,7 +929,7 @@ mod tests {
         let (g, h) = (text.find("# Writing a standing prompt").unwrap(), text.find("# Output hygiene").unwrap());
         assert!(g < h);
         assert!(text.trim_end().ends_with(OUTPUT_HYGIENE.trim_end()));
-        let data = std::env::temp_dir().join(format!("marsad-gen-file-{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("jazari-gen-file-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
         let path = prompt_file(&data).unwrap();
         assert!(path.is_absolute() && path.starts_with(generator_dir(&data)));
@@ -1050,7 +1050,7 @@ mod tests {
 
     #[cfg(unix)]
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marsad-gen-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-gen-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1066,7 +1066,7 @@ mod tests {
         assert_eq!(d.key, "short-pull-requests");
         let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
         assert_eq!(read("stdin"), stdin_text(&req));
-        assert_eq!(read("marker"), "1", "marsad hook skips the run");
+        assert_eq!(read("marker"), "1", "jazari hook skips the run");
         assert_eq!(Path::new(read("cwd").trim()).canonicalize().unwrap(), generator_dir(&dir).canonicalize().unwrap());
         assert!(read("args").contains("--safe-mode\n"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1110,9 +1110,9 @@ mod tests {
 
     #[test]
     fn a_missing_claude_says_so() {
-        let data = std::env::temp_dir().join(format!("marsad-gen-missing-{}", std::process::id()));
+        let data = std::env::temp_dir().join(format!("jazari-gen-missing-{}", std::process::id()));
         let req = Request { idea: "x".into(), ..Request::default() };
-        let err = generate_with("marsad-no-such-claude".as_ref(), "fable", &data, &req, Duration::from_secs(5), &AtomicBool::new(false)).unwrap_err();
+        let err = generate_with("jazari-no-such-claude".as_ref(), "fable", &data, &req, Duration::from_secs(5), &AtomicBool::new(false)).unwrap_err();
         assert!(err.contains("was not found"), "{err}");
         let _ = std::fs::remove_dir_all(&data);
     }

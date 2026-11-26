@@ -2,7 +2,7 @@
 //! out of memory swaps until it stops responding, and one buried in load does the same more
 //! slowly. Under strain each session is told once to hold off heavy work; at the critical level a
 //! heavy command (a build, an install, a container, a test run) is refused with a pointer to
-//! `marsad system --wait`, which returns once there is room again. Light work carries on.
+//! `jazari watch system --wait`, which returns once there is room again. Light work carries on.
 
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -171,16 +171,16 @@ pub fn decide(limits: &Limits, load: &Load, event: &str, tool: &str, input: &Val
     let warned = if level == Level::Ok { Level::Ok } else { warned };
     let note = (level > warned).then(|| {
         format!(
-            "[marsad] The machine is {} ({}). Hold off on heavy work (builds, test runs, installs, containers) until it eases: \
-             `marsad system` shows the state, and `marsad system --wait` returns once there is room. Light work can go on.",
+            "[jazari] The machine is {} ({}). Hold off on heavy work (builds, test runs, installs, containers) until it eases: \
+             `jazari watch system` shows the state, and `jazari watch system --wait` returns once there is room. Light work can go on.",
             if level == Level::Critical { "under heavy pressure" } else { "busy" },
             load.describe(),
         )
     });
     let refuse = (limits.guard && level == Level::Critical && event == "PreToolUse" && heavy_call(tool, input)).then(|| {
         format!(
-            "[marsad] Not now: the machine is under heavy pressure ({}), and this command would add to it until the machine stops \
-             responding. Run `marsad system --wait` (it returns once memory and CPU have room), then try again. Don't work around this.",
+            "[jazari] Not now: the machine is under heavy pressure ({}), and this command would add to it until the machine stops \
+             responding. Run `jazari watch system --wait` (it returns once memory and CPU have room), then try again. Don't work around this.",
             load.describe(),
         )
     });
@@ -246,7 +246,7 @@ mod tests {
         let bash = |c: &str| json!({ "command": c });
         let hot = load(97.0, 6.0, 3.0);
         let (note, refuse, warned) = decide(&l, &hot, "PreToolUse", "Bash", &bash("cargo build"), Level::Ok);
-        assert!(note.unwrap().contains("heavy pressure") && refuse.unwrap().contains("marsad system --wait"));
+        assert!(note.unwrap().contains("heavy pressure") && refuse.unwrap().contains("jazari watch system --wait"));
         assert_eq!(warned, Level::Critical);
         let (note, refuse, _) = decide(&l, &hot, "PreToolUse", "Bash", &bash("git diff"), warned);
         assert_eq!((note, refuse), (None, None), "light work goes on, and the note came once");

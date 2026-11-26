@@ -580,7 +580,7 @@ mod tests {
     fn reader_for(lines: &[&str]) -> TranscriptReader {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("marsad-tr-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-tr-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -811,7 +811,7 @@ mod tests {
         let lines = [r#"{"type":"assistant","isSidechain":true,"message":{"id":"m1","usage":{"input_tokens":7,"cache_read_input_tokens":3}}}"#];
         assert_eq!(reader_for(&lines).stats().context_used, None);
 
-        let dir = std::env::temp_dir().join(format!("marsad-sub-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-sub-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("agent-a1.jsonl");
         std::fs::write(&path, format!("{}\n", lines[0])).unwrap();

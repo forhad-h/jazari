@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn reads_only_complete_lines_incrementally() {
-        let dir = std::env::temp_dir().join(format!("marsad-jsonl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-jsonl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.jsonl");
         let mut f = File::create(&path).unwrap();

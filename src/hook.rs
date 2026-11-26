@@ -1,4 +1,4 @@
-//! `marsad hook`: called by Claude Code for every registered event.
+//! `jazari hook`: called by Claude Code for every registered event.
 //! Keeps only the fields the dashboard needs and appends one JSON line.
 
 use serde_json::{Map, Value, json};
@@ -26,7 +26,7 @@ const KEEP: &[&str] = &[
 ];
 
 pub fn run() -> anyhow::Result<()> {
-    // marsad's own `claude -p` run that writes a prompt: not a session to show or count.
+    // jazari's own `claude -p` run that writes a prompt: not a session to show or count.
     if std::env::var_os(crate::prompt_gen::MARKER_ENV).is_some() {
         return Ok(());
     }
@@ -44,7 +44,7 @@ pub fn run() -> anyhow::Result<()> {
     // the hook returns at once and the sync survives Claude Code exiting.
     match raw.get("hook_event_name").and_then(Value::as_str) {
         Some("SessionEnd") => {
-            let _ = detached(std::process::Command::new(std::env::current_exe()?).arg("sync")).spawn();
+            let _ = detached(std::process::Command::new(std::env::current_exe()?).args(["watch", "sync"])).spawn();
             after_task(&raw);
         }
         Some("Stop") => after_task(&raw),

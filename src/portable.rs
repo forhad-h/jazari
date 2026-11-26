@@ -1,4 +1,4 @@
-//! `marsad export` and `marsad import`: move or back up all marsad data as one JSON file.
+//! `jazari watch export` and `jazari watch import`: move or back up all jazari data as one JSON file.
 //!
 //! Import merges instead of replacing, so importing the same file twice, or this machine's own
 //! export, never counts tokens twice: token rows keep the larger figure per key, legacy totals
@@ -94,7 +94,7 @@ fn numeric(column: &str) -> bool {
 /// The whole export as JSON.
 pub(crate) fn export_value(conn: &Connection, settings: Map<String, Value>) -> anyhow::Result<Value> {
     let mut out = Map::new();
-    out.insert("marsad_export".into(), json!(FORMAT));
+    out.insert("jazari_export".into(), json!(FORMAT));
     out.insert("exported_at".into(), json!(chrono::Utc::now().to_rfc3339()));
     out.insert("source".into(), json!(store::install_id(conn)?));
     out.insert("settings".into(), Value::Object(settings));
@@ -121,10 +121,10 @@ pub(crate) struct Merged {
 
 /// Merges an export into `conn`. A table that can't be read is reported and the others continue.
 pub(crate) fn import_value(conn: &mut Connection, export: &Value, restore: bool) -> anyhow::Result<Vec<(&'static str, Result<Merged, String>)>> {
-    match export["marsad_export"].as_u64() {
+    match export["jazari_export"].as_u64() {
         Some(FORMAT) => {}
-        Some(v) => bail!("this file is export format {v}; this marsad reads format {FORMAT}. Update marsad first"),
-        None => bail!("not a marsad export file"),
+        Some(v) => bail!("this file is export format {v}; this jazari reads format {FORMAT}. Update jazari first"),
+        None => bail!("not a jazari watch export file"),
     }
     let mut results = Vec::new();
     for t in TABLES {
@@ -214,17 +214,17 @@ pub fn export(file: Option<PathBuf>) -> anyhow::Result<()> {
     let mut conn = store::open()?;
     store::sync(&mut conn)?;
     let value = export_value(&conn, crate::settings::portable())?;
-    let path = file.unwrap_or_else(|| PathBuf::from(format!("marsad-export-{}.json", store::day_n_ago(1))));
+    let path = file.unwrap_or_else(|| PathBuf::from(format!("jazari-export-{}.json", store::day_n_ago(1))));
     std::fs::write(&path, serde_json::to_vec_pretty(&value)?).with_context(|| format!("writing {}", path.display()))?;
     let days = value["token_days"].as_array().map_or(0, Vec::len);
-    println!("Exported marsad data to {} ({days} session-days).", path.display());
-    println!("On the other machine: `marsad import {}`", path.display());
+    println!("Exported jazari data to {} ({days} session-days).", path.display());
+    println!("On the other machine: `jazari watch import {}`", path.display());
     Ok(())
 }
 
 pub fn import(file: &Path, restore: bool) -> anyhow::Result<()> {
     let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    let value: Value = serde_json::from_str(&text).context("not a marsad export file (invalid JSON)")?;
+    let value: Value = serde_json::from_str(&text).context("not a jazari watch export file (invalid JSON)")?;
     let mut conn = store::open()?;
     let before = store::lifetime(&conn)?.total;
     for (table, res) in import_value(&mut conn, &value, restore)? {
@@ -261,7 +261,7 @@ mod tests {
     use super::*;
 
     fn db(rows: &str) -> Connection {
-        let root = std::env::temp_dir().join(format!("marsad-portable-{}-{}", std::process::id(), rand_suffix()));
+        let root = std::env::temp_dir().join(format!("jazari-portable-{}-{}", std::process::id(), rand_suffix()));
         let _ = std::fs::remove_dir_all(&root);
         let path = root.join("usage.db");
         drop(store::open_at(&path).unwrap());
@@ -399,12 +399,12 @@ mod tests {
     #[test]
     fn bad_files_and_rows_are_reported() {
         let mut b = db("");
-        let newer = json!({ "marsad_export": 2 });
+        let newer = json!({ "jazari_export": 2 });
         assert!(import_value(&mut b, &newer, false).unwrap_err().to_string().contains("format 2"));
         assert!(import_value(&mut b, &json!({ "hello": 1 }), false).is_err());
 
         let partial = json!({
-            "marsad_export": 1,
+            "jazari_export": 1,
             "token_days": [
                 { "session_id": "s", "agent_id": "main", "day": "2026-09-01", "input": 0, "output": 1,
                   "cache_read": 0, "cache_write": 0, "total": 1, "turns": 1 },

@@ -1,4 +1,4 @@
-// The always-on-top window marsad opens with P on macOS, run with `osascript -l JavaScript pin.js <status file>`.
+// The always-on-top window jazari opens with P on macOS, run with `osascript -l JavaScript pin.js <status file>`.
 // It shows the status file (first line as the title) and closes when the file stops being updated.
 ObjC.import('Cocoa');
 function run(argv) {
@@ -12,7 +12,7 @@ function run(argv) {
   // Titled, closable, resizable, utility and non-activating, so clicking it leaves focus where it was.
   const style = 1 | 2 | 8 | 16 | 128;
   const win = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(rect, style, 2, false);
-  win.title = 'marsad';
+  win.title = 'jazari';
   win.level = 3;
   win.collectionBehavior = 1 | 256;
   win.hidesOnDeactivate = false;
@@ -85,7 +85,7 @@ function run(argv) {
     if (text !== last) {
       last = text;
       const lines = text.replace(/\n+$/, '').split('\n');
-      win.title = lines[0] || 'marsad';
+      win.title = lines[0] || 'jazari';
       label.attributedStringValue = styled(lines.slice(1).join('\n'));
       const f = win.frame;
       const h = Math.max(60, (lines.length - 1) * 15 + 40);

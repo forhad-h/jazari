@@ -1,14 +1,14 @@
-//! The gate every action marsad takes outside its own reports passes through: messages, stops and
+//! The gate every action jazari takes outside its own reports passes through: messages, stops and
 //! interrupts sent to sessions, ending a session after a handoff, cleanups, setting changes and
 //! updates.
 //!
-//! Each action is checked against the pause switch (`marsad pause`), dry runs (`MARSAD_DRY_RUN=1`)
+//! Each action is checked against the pause switch (`jazari watch pause`), dry runs (`JAZARI_DRY_RUN=1`)
 //! and its repeat limit, then recorded in `actions.jsonl` with who asked for it, whether it ran,
-//! failed or was refused. `marsad actions` shows the record.
+//! failed or was refused. `jazari watch actions` shows the record.
 //!
-//! The marsad commands a Claude Code session runs are checked before they run too, by the
+//! The jazari commands a Claude Code session runs are checked before they run too, by the
 //! PreToolUse hook ([`hook_check`]): those that stop or end sessions, delete data, change a guard
-//! or edit marsad's own files wait for the user's yes in Claude Code's permission prompt.
+//! or edit jazari's own files wait for the user's yes in Claude Code's permission prompt.
 
 use clap::{Args, ValueEnum};
 use serde_json::{Value, json};
@@ -21,9 +21,9 @@ use std::sync::OnceLock;
 pub enum Origin {
     /// The user, in the dashboard.
     Dashboard,
-    /// The user, running marsad in a terminal.
+    /// The user, running jazari in a terminal.
     Terminal,
-    /// A Claude Code session ran marsad (its id, when known).
+    /// A Claude Code session ran jazari (its id, when known).
     Session(Option<String>),
     /// The background watcher, on its own.
     Watcher,
@@ -45,7 +45,7 @@ impl Origin {
         }
     }
 
-    /// The session that ran marsad, when a session did.
+    /// The session that ran jazari, when a session did.
     pub fn session(&self) -> Option<&str> {
         match self {
             Origin::Session(id) => id.as_deref(),
@@ -144,7 +144,7 @@ pub struct Action {
     /// A session id, cleanup item id, setting key or file.
     pub target: String,
     pub detail: String,
-    /// Started by marsad itself rather than asked for just now; `marsad pause` holds these.
+    /// Started by jazari itself rather than asked for just now; `jazari watch pause` holds these.
     pub on_its_own: bool,
 }
 
@@ -169,7 +169,7 @@ fn dir() -> PathBuf {
 }
 
 fn dry_run() -> bool {
-    std::env::var_os("MARSAD_DRY_RUN").is_some_and(|v| !v.is_empty() && v != "0")
+    std::env::var_os("JAZARI_DRY_RUN").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 /// Checks the action, runs it, and records what happened.
@@ -220,7 +220,7 @@ impl Gate {
             Err(why)
         };
         if a.on_its_own && let Some(p) = paused_at(&self.dir, self.now) {
-            return refuse("refused", format!("marsad is paused{} (`marsad resume` turns it back on)", p.until_label()));
+            return refuse("refused", format!("jazari is paused{} (`jazari watch resume` turns it back on)", p.until_label()));
         }
         if let Some(ago) = last_done(&self.dir, a, self.now).filter(|ago| *ago < a.kind.repeat_after()) {
             return refuse("refused", format!("already did this {ago:.0}s ago; wait {:.0}s", a.kind.repeat_after() - ago));
@@ -270,7 +270,7 @@ fn append(dir: &Path, entry: &Value) -> anyhow::Result<()> {
     }
     let mut line = serde_json::to_vec(entry)?;
     line.push(b'\n');
-    // One write on an O_APPEND handle, so two marsad processes never interleave.
+    // One write on an O_APPEND handle, so two jazari processes never interleave.
     std::fs::OpenOptions::new().create(true).append(true).open(log)?.write_all(&line)?;
     Ok(())
 }
@@ -330,7 +330,7 @@ fn paused_at(dir: &Path, now: f64) -> Option<Pause> {
     p.until.is_none_or(|t| t > now).then_some(p)
 }
 
-/// Whether marsad holds everything it does on its own right now.
+/// Whether jazari holds everything it does on its own right now.
 pub fn paused() -> bool {
     paused_at(&dir(), crate::now()).is_some()
 }
@@ -359,12 +359,12 @@ fn fmt_time(ts: f64) -> String {
 
 #[derive(Args)]
 pub struct PauseArgs {
-    /// How long to pause: 30m, 2h, 1d (default: until `marsad resume`).
+    /// How long to pause: 30m, 2h, 1d (default: until `jazari watch resume`).
     #[arg(long = "for", value_name = "DURATION")]
     duration: Option<String>,
 }
 
-/// Holds what marsad does on its own, for `duration` (30m, 2h, 1d) or until resumed; returns
+/// Holds what jazari does on its own, for `duration` (30m, 2h, 1d) or until resumed; returns
 /// " until <time>" or "".
 pub fn pause(duration: Option<&str>) -> anyhow::Result<String> {
     let now = crate::now();
@@ -378,7 +378,7 @@ pub fn pause(duration: Option<&str>) -> anyhow::Result<String> {
     Ok(Pause { since: now, until }.until_label())
 }
 
-/// Lifts a pause; false when marsad wasn't paused.
+/// Lifts a pause; false when jazari wasn't paused.
 pub fn resume() -> anyhow::Result<bool> {
     if !paused() {
         return Ok(false);
@@ -390,25 +390,25 @@ pub fn resume() -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// `marsad pause`: hold what marsad does on its own.
+/// `jazari watch pause`: hold what jazari does on its own.
 pub fn run_pause(a: PauseArgs) -> anyhow::Result<()> {
     let label = pause(a.duration.as_deref())?;
-    println!("Paused{label}: marsad won't interrupt or end sessions, clean up or update on its own.");
-    println!("Warnings, the command check and anything you ask for still work. `marsad resume` turns it back on.");
+    println!("Paused{label}: jazari won't interrupt or end sessions, clean up or update on its own.");
+    println!("Warnings, the command check and anything you ask for still work. `jazari watch resume` turns it back on.");
     Ok(())
 }
 
-/// `marsad resume`: lift a pause.
+/// `jazari watch resume`: lift a pause.
 pub fn run_resume() -> anyhow::Result<()> {
     if resume()? {
-        println!("Resumed: marsad acts on its own again.");
+        println!("Resumed: jazari acts on its own again.");
     } else {
-        println!("marsad isn't paused.");
+        println!("jazari isn't paused.");
     }
     Ok(())
 }
 
-// ---------- marsad actions ----------
+// ---------- jazari watch actions ----------
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Format {
@@ -425,7 +425,7 @@ pub struct ActionsArgs {
     format: Format,
 }
 
-/// `marsad actions`: what marsad did, refused or was paused for, newest last.
+/// `jazari watch actions`: what jazari did, refused or was paused for, newest last.
 pub fn run_actions(a: ActionsArgs) -> anyhow::Result<()> {
     let entries = tail(&dir());
     let shown = &entries[entries.len().saturating_sub(a.limit)..];
@@ -440,7 +440,7 @@ pub fn run_actions(a: ActionsArgs) -> anyhow::Result<()> {
         }
         Format::Table => {
             if let Some(p) = &pause {
-                println!("Paused since {}{}. `marsad resume` turns it back on.\n", fmt_time(p.since), p.until_label());
+                println!("Paused since {}{}. `jazari watch resume` turns it back on.\n", fmt_time(p.since), p.until_label());
             }
             if shown.is_empty() {
                 println!("No actions recorded yet.");
@@ -466,21 +466,21 @@ pub fn run_actions(a: ActionsArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------- the hook: marsad commands a session runs ----------
+// ---------- the hook: jazari commands a session runs ----------
 
-/// Why the user should approve this tool call first, when it is a marsad command that acts, or an
-/// edit to marsad's own files. Read-only commands, `say`, `tell` with a message, and tier A
+/// Why the user should approve this tool call first, when it is a jazari command that acts, or an
+/// edit to jazari's own files. Read-only commands, `say`, `tell` with a message, and tier A
 /// cleanups (which a session stopped for disk space needs) run without asking.
 pub fn hook_check(raw: &Value) -> Option<String> {
     let input = &raw["tool_input"];
-    let data = [crate::data_dir(), crate::legacy_dir()];
+    let data = [crate::data_dir()];
     match raw["tool_name"].as_str()? {
         "Bash" => command_check(input["command"].as_str()?, &data),
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
             let path = input["file_path"].as_str().or(input["notebook_path"].as_str())?;
             data.iter()
                 .any(|d| !d.as_os_str().is_empty() && Path::new(path).starts_with(d))
-                .then(|| format!("[marsad] This edits marsad's own data ({path}), which only marsad writes. marsad asks you first."))
+                .then(|| format!("[jazari] This edits jazari's own data ({path}), which only jazari writes. jazari asks you first."))
         }
         _ => None,
     }
@@ -490,19 +490,23 @@ pub fn hook_check(raw: &Value) -> Option<String> {
 fn command_check(cmd: &str, data: &[PathBuf]) -> Option<String> {
     for segment in cmd.split([';', '&', '|', '\n', '(', ')', '`']) {
         let words: Vec<&str> = segment.split_whitespace().map(|w| w.trim_matches(['"', '\''])).collect();
-        let Some(at) = words.iter().position(|w| Path::new(w).file_stem().is_some_and(|n| n == "marsad") && !w.ends_with('/')) else { continue };
+        let Some(mut at) = words.iter().position(|w| Path::new(w).file_stem().is_some_and(|n| n == "jazari") && !w.ends_with('/')) else { continue };
+        // `jazari watch <cmd>` and `jazari build <cmd>`: the command is after the group.
+        if matches!(words.get(at + 1), Some(&"watch") | Some(&"build")) {
+            at += 1;
+        }
         let Some(sub) = words.get(at + 1) else { continue };
         if let Some(what) = acting(sub, &words[at + 2..]) {
-            return Some(format!("[marsad] `marsad {sub}` here {what}. marsad asks you before a session does that."));
+            return Some(format!("[jazari] `jazari {sub}` here {what}. jazari asks you before a session does that."));
         }
     }
     let writes = [">", "rm ", "mv ", "cp ", "tee ", "sed -i", "truncate ", "ln ", "chmod ", "dd "];
-    let names_data = cmd.contains(".marsad") || cmd.contains(".claude/marsad") || data.iter().any(|d| !d.as_os_str().is_empty() && cmd.contains(&*d.to_string_lossy()));
+    let names_data = cmd.contains(".jazari") || data.iter().any(|d| !d.as_os_str().is_empty() && cmd.contains(&*d.to_string_lossy()));
     (names_data && writes.iter().any(|w| cmd.contains(w)))
-        .then(|| "[marsad] This command writes to marsad's own data folder, which only marsad writes. marsad asks you first.".to_string())
+        .then(|| "[jazari] This command writes to jazari's own data folder, which only jazari writes. jazari asks you first.".to_string())
 }
 
-/// What a marsad subcommand with these arguments does that needs the user's yes.
+/// What a jazari subcommand with these arguments does that needs the user's yes.
 fn acting(sub: &str, args: &[&str]) -> Option<&'static str> {
     let has = |flag: &str| args.iter().any(|a| *a == flag || a.starts_with(&format!("{flag}=")));
     match sub {
@@ -517,11 +521,11 @@ fn acting(sub: &str, args: &[&str]) -> Option<&'static str> {
         "handoff" if has("--close") || has("--auto-close") => Some("ends a session after the handoff"),
         "handoff" if has("--session") => Some("hands off a session other than this one"),
         "handoff" if args.first() == Some(&"close") => Some("ends a session"),
-        "update" if !has("--check") => Some("installs or changes marsad updates"),
+        "update" if !has("--check") => Some("installs or changes jazari updates"),
         "prompt" if matches!(args.first(), Some(&("rm" | "restore"))) => Some("deletes or restores a saved prompt"),
-        "pause" | "resume" => Some("pauses or resumes what marsad does on its own"),
+        "pause" | "resume" => Some("pauses or resumes what jazari does on its own"),
         "install" | "uninstall" => Some("edits ~/.claude/settings.json"),
-        "import" => Some("merges data into marsad's history"),
+        "import" => Some("merges data into jazari's history"),
         _ => None,
     }
 }
@@ -540,7 +544,7 @@ mod tests {
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marsad-act-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-act-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -583,12 +587,12 @@ mod tests {
     }
 
     #[test]
-    fn a_pause_holds_only_what_marsad_does_on_its_own_and_ends_on_time() {
+    fn a_pause_holds_only_what_jazari_does_on_its_own_and_ends_on_time() {
         let dir = temp("pause");
         std::fs::write(pause_path(&dir), r#"{"since":0,"until":500}"#).unwrap();
         let auto = Action::new(Kind::Clean, "npm-cache").on_its_own(true);
         let err = gate(&dir, 100.0).run(&auto, || Ok(())).unwrap_err();
-        assert!(err.to_string().starts_with("marsad is paused until"));
+        assert!(err.to_string().starts_with("jazari is paused until"));
         assert!(gate(&dir, 100.0).run(&Action::new(Kind::Clean, "npm-cache"), || Ok(())).is_ok());
         assert!(gate(&dir, 600.0).run(&auto, || Ok(())).is_ok());
         assert_eq!(tail(&dir)[0]["outcome"], "refused");
@@ -625,33 +629,33 @@ mod tests {
     }
 
     fn asks(cmd: &str) -> bool {
-        command_check(cmd, &[PathBuf::from("/home/me/.marsad")]).is_some()
+        command_check(cmd, &[PathBuf::from("/home/me/.jazari")]).is_some()
     }
 
     #[test]
-    fn a_session_is_asked_before_marsad_commands_that_act() {
+    fn a_session_is_asked_before_jazari_commands_that_act() {
         for cmd in [
-            "marsad tell 3f2a --stop",
-            "marsad tell 3f2a --interrupt",
-            "/usr/local/bin/marsad disk --guard off",
-            "marsad risk --guard=off",
-            "marsad clean --run docker-volume-x",
-            "marsad clean --auto-clean on",
-            "marsad handoff --close < note.md",
-            "marsad handoff --session other",
-            "marsad handoff close --pid 1",
-            "marsad retention forever",
-            "marsad context --warn off",
-            "marsad pause --for 1d",
-            "marsad update",
-            "marsad uninstall",
-            "marsad prompt rm mine",
-            "cd /tmp && marsad disk --guard off",
-            "bash -c 'marsad tell x --stop'",
-            "echo ok; \"marsad\" risk --scanner off",
-            "echo '{}' > ~/.marsad/settings.json",
-            "rm -rf /home/me/.marsad/claude/inbox",
-            "sed -i s/true/false/ ~/.claude/marsad/settings.json",
+            "jazari watch tell 3f2a --stop",
+            "jazari watch tell 3f2a --interrupt",
+            "/usr/local/bin/jazari watch disk --guard off",
+            "jazari watch risk --guard=off",
+            "jazari watch clean --run docker-volume-x",
+            "jazari watch clean --auto-clean on",
+            "jazari build handoff --close < note.md",
+            "jazari build handoff --session other",
+            "jazari build handoff close --pid 1",
+            "jazari watch retention forever",
+            "jazari watch context --warn off",
+            "jazari watch pause --for 1d",
+            "jazari update",
+            "jazari uninstall",
+            "jazari build prompt rm mine",
+            "cd /tmp && jazari watch disk --guard off",
+            "bash -c 'jazari watch tell x --stop'",
+            "echo ok; \"jazari\" risk --scanner off",
+            "echo '{}' > ~/.jazari/settings.json",
+            "rm -rf /home/me/.jazari/claude/inbox",
+            "sed -i s/true/false/ ~/.jazari/build/jazari.db",
         ] {
             assert!(asks(cmd), "{cmd}");
         }
@@ -660,26 +664,26 @@ mod tests {
     #[test]
     fn reading_reporting_and_tier_a_cleanups_run_without_asking() {
         for cmd in [
-            "marsad status --format json",
-            "marsad disk --format json",
-            "marsad clean --tier-a",
-            "marsad clean --format json",
-            "marsad say \"building\"",
-            "marsad tell 3f2a please rebase first",
-            "marsad handoff < note.md",
-            "marsad update --check",
-            "marsad actions",
-            "marsad risk --check 'rm -rf /'",
-            "cat ~/.marsad/actions.jsonl",
-            "cd ~/Projects/marsad && cargo test",
-            "ls ~/Projects/marsad/ > files.txt",
+            "jazari watch status --format json",
+            "jazari watch disk --format json",
+            "jazari watch clean --tier-a",
+            "jazari watch clean --format json",
+            "jazari watch say \"building\"",
+            "jazari watch tell 3f2a please rebase first",
+            "jazari build handoff < note.md",
+            "jazari update --check",
+            "jazari watch actions",
+            "jazari watch risk --check 'rm -rf /'",
+            "cat ~/.jazari/actions.jsonl",
+            "cd ~/Projects/jazari && cargo test",
+            "ls ~/Projects/jazari/ > files.txt",
         ] {
             assert!(!asks(cmd), "{cmd}");
         }
     }
 
     #[test]
-    fn edits_to_marsad_files_ask_and_others_dont() {
+    fn edits_to_jazari_files_ask_and_others_dont() {
         let edit = |p: &str| json!({ "tool_name": "Write", "tool_input": { "file_path": p } });
         let home = crate::data_dir();
         assert!(hook_check(&edit(&home.join("settings.json").to_string_lossy())).is_some());

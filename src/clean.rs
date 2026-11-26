@@ -1,9 +1,9 @@
-//! `marsad clean`: finds data that can be rebuilt (package caches, build output in idle projects,
+//! `jazari watch clean`: finds data that can be rebuilt (package caches, build output in idle projects,
 //! Docker build cache), measures it, and removes it safely. Every removal is one of a fixed set of
-//! actions; nothing here runs a command a model wrote. marsad knows which projects have live
+//! actions; nothing here runs a command a model wrote. jazari knows which projects have live
 //! sessions and when each was last active, so "idle" comes from that, not from file times.
 //!
-//! Tiers: A is rebuilt automatically and holds no data, so marsad runs it on its own once the disk
+//! Tiers: A is rebuilt automatically and holds no data, so jazari runs it on its own once the disk
 //! reaches the warning level. B is rebuilt but slow to get back and runs only when asked. C holds
 //! data and is only reported.
 
@@ -31,7 +31,7 @@ pub enum Tier {
     A,
     B,
     C,
-    /// Space marsad leaves to its owner (an app, the system, a version manager): reported with
+    /// Space jazari leaves to its owner (an app, the system, a version manager): reported with
     /// the command that frees it.
     Info,
 }
@@ -561,7 +561,7 @@ fn valid_container_id(id: &str) -> bool {
     (12..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Docker volume names marsad passes to `docker volume rm`: letters, digits, `_`, `.` and `-`.
+/// Docker volume names jazari passes to `docker volume rm`: letters, digits, `_`, `.` and `-`.
 fn valid_volume_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('-') && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
@@ -660,7 +660,7 @@ pub fn check_remove(path: &Path, kind: &DirKind, env: &Env) -> Result<(), String
         _ => REMOVABLE_NAMES.contains(&name),
     };
     if !named_right {
-        return Err(format!("marsad never removes a folder named {name:?}"));
+        return Err(format!("jazari never removes a folder named {name:?}"));
     }
     if path.components().any(|c| matches!(c.as_os_str().to_str(), Some(".git" | ".ssh" | ".gnupg")) || c.as_os_str().to_string_lossy().starts_with(".env")) {
         return Err("it is inside a protected folder".into());
@@ -769,7 +769,7 @@ pub fn run_item(item: &Item, env: &Env, measure: &dyn Fn() -> Option<u64>) -> Ou
     }
 }
 
-/// Runs one item through marsad's action gate and records it in the usage history when it ran.
+/// Runs one item through jazari's action gate and records it in the usage history when it ran.
 pub fn run_and_record(item: &Item, env: &Env, auto: bool) -> Outcome {
     let action = crate::act::Action::new(crate::act::Kind::Clean, item.id.as_str()).detail(item.what.as_str()).on_its_own(auto);
     if let Err(why) = crate::act::check(&action) {
@@ -816,7 +816,7 @@ pub fn set_auto(on: bool) -> anyhow::Result<()> {
 
 // ---------- automatic cleanup ----------
 
-/// Whether marsad cleans tier A on its own at the warning level (on unless turned off). At the
+/// Whether jazari cleans tier A on its own at the warning level (on unless turned off). At the
 /// critical level it does so either way.
 pub fn auto_enabled() -> bool {
     crate::settings::get("disk").and_then(|d| d.get("auto_clean").and_then(serde_json::Value::as_bool)).unwrap_or(true)
@@ -839,7 +839,7 @@ pub fn maybe_start(level: crate::disk::Level) {
         return;
     }
     if let Ok(exe) = std::env::current_exe() {
-        let _ = crate::hook::detached(std::process::Command::new(exe).args(["clean", "--auto"])).spawn();
+        let _ = crate::hook::detached(std::process::Command::new(exe).args(["watch", "clean", "--auto"])).spawn();
     }
 }
 
@@ -865,7 +865,7 @@ impl Drop for CleanLock {
     }
 }
 
-/// `marsad clean --auto`: tier A only, then one notification saying what was freed.
+/// `jazari watch clean --auto`: tier A only, then one notification saying what was freed.
 fn auto() -> anyhow::Result<()> {
     let cfg = crate::disk::Config::load();
     let home = dirs::home_dir().unwrap_or_default();
@@ -890,12 +890,12 @@ fn auto() -> anyhow::Result<()> {
     if !done.is_empty() {
         let total: u64 = results.iter().filter(|(_, _, o)| matches!(o, Outcome::Done { .. })).map(|(_, b, _)| *b).sum();
         let now = crate::disk::measure(&home).map(|r| format!(" · disk now {:.0}% full", r.used_pct())).unwrap_or_default();
-        crate::alerts::notify(&format!("marsad freed about {}", fmt_bytes(total)), &format!("{}{now}", done.join(", ")));
+        crate::alerts::notify(&format!("jazari freed about {}", fmt_bytes(total)), &format!("{}{now}", done.join(", ")));
     }
     Ok(())
 }
 
-// ---------- Claude Code versions, scratch folders, and what marsad only reports ----------
+// ---------- Claude Code versions, scratch folders, and what jazari only reports ----------
 
 /// Where Claude Code's native installer keeps one file per CLI version.
 fn claude_versions_dir(home: &Path) -> PathBuf {
@@ -1010,7 +1010,7 @@ fn scratch_items(env: &Env) -> Vec<Item> {
     out
 }
 
-/// Space marsad leaves to its owner, with the way to free it.
+/// Space jazari leaves to its owner, with the way to free it.
 fn report_items(env: &Env) -> Vec<Item> {
     let home = &env.home;
     let mut out = Vec::new();
@@ -1059,7 +1059,7 @@ fn report_items(env: &Env) -> Vec<Item> {
             report("time-machine-snapshots", format!("{n} Time Machine local snapshots"), 0, "size unknown; `tmutil thinlocalsnapshots / 999999999999 4` asks macOS to thin them");
         }
     }
-    // The largest app caches marsad doesn't already list.
+    // The largest app caches jazari doesn't already list.
     let known = ["Homebrew", "pip", "Yarn", "go-build", "uv", "pnpm"];
     let mut caches: Vec<(String, u64)> = std::fs::read_dir(home.join("Library/Caches"))
         .into_iter()
@@ -1110,11 +1110,11 @@ fn removable(items: &[Item]) -> u64 {
     items.iter().filter(|i| matches!(i.tier, Tier::A | Tier::B)).map(|i| i.bytes).sum()
 }
 
-// ---------- marsad clean ----------
+// ---------- jazari watch clean ----------
 
 #[derive(Args)]
 pub struct CleanArgs {
-    /// Show the plan without running anything (what `marsad clean` does on its own).
+    /// Show the plan without running anything (what `jazari watch clean` does on its own).
     #[arg(long, conflicts_with_all = ["run", "tier_a", "judge", "auto_clean"])]
     plan: bool,
     /// Run these items (ids from the plan); tier C is never run.
@@ -1151,9 +1151,9 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
         let mut chosen: Vec<&Item> = items.iter().filter(|i| (a.tier_a && i.tier == Tier::A) || a.run.contains(&i.id)).collect();
         for id in &a.run {
             match items.iter().find(|i| &i.id == id) {
-                None => eprintln!("{id}: not in the plan (run `marsad clean` to list items)"),
+                None => eprintln!("{id}: not in the plan (run `jazari watch clean` to list items)"),
                 Some(i) if i.tier == Tier::C => eprintln!("{id}: holds data; remove it from the dashboard (`D`), one item at a time"),
-                Some(i) if i.tier == Tier::Info => eprintln!("{id}: marsad only reports this; {}", i.note),
+                Some(i) if i.tier == Tier::Info => eprintln!("{id}: jazari only reports this; {}", i.note),
                 Some(_) => {}
             }
         }
@@ -1204,8 +1204,8 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
                 println!("Disk {:.0}% full, {:.1} GB free", r.used_pct(), r.free_gb());
             }
             let heads = [
-                (Tier::A, "A  rebuilt automatically, holds no data (`marsad clean --tier-a`)"),
-                (Tier::B, "B  rebuilt, but slow to get back (`marsad clean --run <id>`)"),
+                (Tier::A, "A  rebuilt automatically, holds no data (`jazari watch clean --tier-a`)"),
+                (Tier::B, "B  rebuilt, but slow to get back (`jazari watch clean --run <id>`)"),
                 (Tier::C, "C  holds data: removed only one at a time from the dashboard (`D`); `--judge` asks Claude"),
                 (Tier::Info, "Report only: freed by the app or tool that owns it"),
             ];
@@ -1238,9 +1238,9 @@ pub fn run(a: CleanArgs) -> anyhow::Result<()> {
 
 pub fn auto_label(on: bool) -> String {
     if on {
-        "Auto-clean: on. Tier A is cleaned on its own when the disk reaches the warning level (`marsad clean --auto-clean off`).".into()
+        "Auto-clean: on. Tier A is cleaned on its own when the disk reaches the warning level (`jazari watch clean --auto-clean off`).".into()
     } else {
-        "Auto-clean: off. Tier A is still cleaned at the critical level (`marsad clean --auto-clean on`).".into()
+        "Auto-clean: off. Tier A is still cleaned at the critical level (`jazari watch clean --auto-clean on`).".into()
     }
 }
 
@@ -1256,7 +1256,7 @@ mod tests {
     }
 
     fn tree(name: &str) -> Tree {
-        let dir = std::env::temp_dir().join(format!("marsad-clean-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-clean-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Tree(dir.canonicalize().unwrap())
@@ -1459,7 +1459,7 @@ mod tests {
         file(&docs.join("cv.pdf"), 1);
         assert!(check_remove(&docs, &npm, &e).unwrap_err().contains("never removes"));
         assert!(check_remove(&home.join("gone/_cacache"), &npm, &e).is_err());
-        let outside = std::env::temp_dir().join(format!("marsad-outside-{}/_cacache", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("jazari-outside-{}/_cacache", std::process::id()));
         file(&outside.join("x"), 1);
         assert!(check_remove(&outside, &npm, &e).unwrap_err().contains("outside"));
         std::fs::remove_dir_all(outside.parent().unwrap()).ok();

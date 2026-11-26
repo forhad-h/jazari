@@ -1,11 +1,11 @@
-//! Copies text to the clipboard: a system tool when marsad runs locally, else OSC 52 through
+//! Copies text to the clipboard: a system tool when jazari runs locally, else OSC 52 through
 //! the terminal. OSC 52 has no acknowledgement, so only a system tool counts as copied.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// How the text left marsad.
+/// How the text left jazari.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Copied {
     /// This system tool took the text.
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn a_failing_tool_falls_through_to_the_next() {
         let mut out = Vec::new();
-        let tools: [Tool; 3] = [("marsad-no-such-tool", &[]), ("false", &[]), ("cat", &[])];
+        let tools: [Tool; 3] = [("jazari-no-such-tool", &[]), ("false", &[]), ("cat", &[])];
         assert_eq!(run("foo", &tools, TOOL_WAIT, false, &mut out), Copied::Native("cat"));
         assert!(out.is_empty(), "no OSC 52 after a tool took the text");
     }
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn osc52_when_every_tool_fails() {
         let mut out = Vec::new();
-        let tools: [Tool; 2] = [("marsad-no-such-tool", &[]), ("false", &[])];
+        let tools: [Tool; 2] = [("jazari-no-such-tool", &[]), ("false", &[])];
         assert_eq!(run("foo", &tools, TOOL_WAIT, false, &mut out), Copied::Terminal);
         assert_eq!(out, b"\x1b]52;c;Zm9v\x07");
         out.clear();

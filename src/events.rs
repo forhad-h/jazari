@@ -45,7 +45,7 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
         session.model = Some(model);
     }
 
-    // A new prompt, a resume or the end of the session closes a stop by marsad's guard.
+    // A new prompt, a resume or the end of the session closes a stop by jazari's guard.
     if matches!(event, "UserPromptSubmit" | "SessionStart" | "SessionEnd") && ev.get("agent_id").is_none() {
         session.halted = None;
         session.flag = None;
@@ -263,8 +263,8 @@ mod tests {
         assert_eq!((s.status, s.said.as_deref(), s.detail.as_str()), (Status::Question, Some("need the API key"), "need the API key"));
         let s = run(&[stop.clone(), json!({"hook_event_name": "UserPromptSubmit", "prompt": "go on"})]);
         assert!(!s.stop_requested, "a new prompt drops a waiting stop");
-        let halted = run(&[json!({"hook_event_name": crate::disk::HALTED_EVENT, "reason": "stopped from marsad"})]);
-        assert_eq!(halted.detail, format!("halted: stopped from marsad · claude --resume {}", halted.id));
+        let halted = run(&[json!({"hook_event_name": crate::disk::HALTED_EVENT, "reason": "stopped from jazari"})]);
+        assert_eq!(halted.detail, format!("halted: stopped from jazari · claude --resume {}", halted.id));
     }
 
     #[test]

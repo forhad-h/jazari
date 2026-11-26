@@ -1,4 +1,4 @@
-//! `marsad status`: the dashboard's live view (status, context left, usage limits) as
+//! `jazari watch status`: the dashboard's live view (status, context left, usage limits) as
 //! a table or JSON, so Claude can read it too.
 
 use crate::events;

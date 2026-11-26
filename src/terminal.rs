@@ -26,7 +26,7 @@ impl Platform {
     }
 }
 
-/// The terminals marsad knows how to open a tab or window in.
+/// The terminals jazari knows how to open a tab or window in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Kind {
     Tmux,
@@ -82,7 +82,7 @@ impl Env {
         }
     }
 
-    /// The terminal the caller runs in, when marsad can open a tab in it. tmux comes first: a
+    /// The terminal the caller runs in, when jazari can open a tab in it. tmux comes first: a
     /// session inside tmux inside Warp gets its new window in the same tmux.
     pub fn current_kind(&self) -> Option<Kind> {
         if self.tmux {
@@ -224,7 +224,7 @@ fn osascript(script: &str) -> Step {
     step("osascript", strs(&["-e", script]), true)
 }
 
-const WARP_FILE: &str = "marsad-handoff.yaml";
+const WARP_FILE: &str = "jazari-handoff.yaml";
 
 /// A new tab in iTerm2's front window (or a new window when none is open) that types `line`.
 fn iterm_script(line: &str) -> String {
@@ -425,7 +425,7 @@ mod tests {
     use super::*;
 
     fn job() -> Job {
-        Job { argv: strs(&["/opt/my tools/marsad", "handoff", "resume", "h1"]), cwd: PathBuf::from("/w/it's"), title: "marsad-h1".into() }
+        Job { argv: strs(&["/opt/my tools/jazari", "handoff", "resume", "h1"]), cwd: PathBuf::from("/w/it's"), title: "jazari-h1".into() }
     }
 
     fn env(term_program: &str) -> Env {
@@ -462,9 +462,9 @@ mod tests {
     fn warp_gets_a_launch_configuration() {
         let p = &plans(&env("WarpTerminal"), Platform::Macos, &job(), None, Path::new("/home/.warp/launch_configurations"))[0];
         let (path, text) = p.file.as_ref().unwrap();
-        assert_eq!(path, Path::new("/home/.warp/launch_configurations/marsad-handoff.yaml"));
+        assert_eq!(path, Path::new("/home/.warp/launch_configurations/jazari-handoff.yaml"));
         assert!(text.contains("cwd: \"/w/it's\""), "{text}");
-        assert!(text.contains("- exec: \"'/opt/my tools/marsad' handoff resume h1\""), "{text}");
+        assert!(text.contains("- exec: \"'/opt/my tools/jazari' handoff resume h1\""), "{text}");
         // The URI carries the path as the platform joins it.
         let uri = format!("warp://launch/{}", Path::new("/home/.warp/launch_configurations").join(WARP_FILE).to_string_lossy());
         assert_eq!(p.steps, [step("open", vec![uri], true)]);
@@ -473,10 +473,10 @@ mod tests {
     #[test]
     fn applescript_runs_a_quoted_shell_line() {
         let line = job().shell_line();
-        assert_eq!(line, "cd '/w/it'\\''s' && '/opt/my tools/marsad' handoff resume h1");
+        assert_eq!(line, "cd '/w/it'\\''s' && '/opt/my tools/jazari' handoff resume h1");
         let p = &plans(&env("iTerm.app"), Platform::Macos, &job(), None, Path::new("/"))[0];
         let script = &p.steps[0].args[1];
-        assert!(script.contains("write text \"cd '/w/it'\\\\''s' && '/opt/my tools/marsad' handoff resume h1\""), "{script}");
+        assert!(script.contains("write text \"cd '/w/it'\\\\''s' && '/opt/my tools/jazari' handoff resume h1\""), "{script}");
         let t = &plans(&env("vscode"), Platform::Macos, &job(), None, Path::new("/"))[0];
         assert_eq!(t.kind, Kind::Default);
         assert!(t.steps[0].args[1].contains("do script"), "the macOS default is Terminal.app");
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn tmux_opens_a_window_inside_tmux_and_a_detached_session_outside() {
         let inside = plans(&Env { tmux: true, ..Default::default() }, Platform::Unix, &job(), None, Path::new("/"));
-        assert_eq!(inside[0].steps[0].args[..5], strs(&["new-window", "-n", "marsad-h1", "-c", "/w/it's"]));
+        assert_eq!(inside[0].steps[0].args[..5], strs(&["new-window", "-n", "jazari-h1", "-c", "/w/it's"]));
         let outside = plans(&env("vscode"), Platform::Unix, &job(), Some(Kind::Tmux), Path::new("/"));
         assert_eq!(outside[0].steps[0].args[..3], strs(&["new-session", "-d", "-s"]));
         assert_eq!(outside[0].steps[0].args[6..], job().argv[..], "the command runs without a shell");
@@ -496,7 +496,7 @@ mod tests {
         let p = &plans(&env("vscode"), Platform::Windows, &job(), None, Path::new("/"))[0];
         assert_eq!(
             p.steps[0].args[3],
-            "Start-Process -FilePath '\"/opt/my tools/marsad\"' -WorkingDirectory '/w/it''s' -ArgumentList 'handoff','resume','h1'"
+            "Start-Process -FilePath '\"/opt/my tools/jazari\"' -WorkingDirectory '/w/it''s' -ArgumentList 'handoff','resume','h1'"
         );
     }
 
@@ -518,9 +518,9 @@ mod tests {
                 if s.program == "tmux" { Ok(()) } else { Err("no".into()) }
             },
         );
-        assert_eq!(got, Ok(Opened::TmuxDetached("marsad-h1".into())));
+        assert_eq!(got, Ok(Opened::TmuxDetached("jazari-h1".into())));
         assert_eq!(tried, ["open", "osascript", "tmux"]);
-        assert_eq!(written, [PathBuf::from("/warp/marsad-handoff.yaml")]);
+        assert_eq!(written, [PathBuf::from("/warp/jazari-handoff.yaml")]);
 
         let all_fail = open(&ps, &e, &mut |_, _| Ok(()), &mut |_| Err("nope".into())).unwrap_err();
         assert_eq!(all_fail.len(), 3, "{all_fail:?}");

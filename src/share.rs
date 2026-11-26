@@ -1,7 +1,7 @@
 //! Sharing to LinkedIn: one frozen stats snapshot, variants of a line drafted by an isolated `claude -p`
 //! over a redacted summary of today's work and features (or templates), steered away from the posts of
 //! the last days, the post text, the card, and the confirm steps
-//! that save, open and reveal. The TUI share view and `marsad share --print` both use it.
+//! that save, open and reveal. The TUI share view and `jazari watch share --print` both use it.
 
 use crate::badges::{self, Badges};
 use crate::card;
@@ -679,7 +679,7 @@ fn claude_command(program: &str, cwd: &Path) -> Command {
 /// Runs `program` over the summary in a fresh temp dir and returns the reply's text.
 fn ask(program: &str, summary: &str, wait: Duration, cancel: &AtomicBool) -> Result<String, Note> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!("marsad-draft-{}-{nanos:x}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("jazari-draft-{}-{nanos:x}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| Note::Failed(format!("couldn't create a temp dir: {e}")))?;
     let out = run_captured(&mut claude_command(program, &dir), summary.as_bytes(), wait, cancel);
     let _ = std::fs::remove_dir_all(&dir);
@@ -825,7 +825,7 @@ pub fn linkedin_url(text: &str) -> String {
 
 /// Where the card goes: the Downloads folder, else `<data_dir>/cards/`. A same-day re-share overwrites it.
 pub fn card_path(downloads: Option<PathBuf>, data_dir: &Path, date: &str) -> PathBuf {
-    downloads.unwrap_or_else(|| data_dir.join("cards")).join(format!("marsad-{date}.png"))
+    downloads.unwrap_or_else(|| data_dir.join("cards")).join(format!("jazari-{date}.png"))
 }
 
 /// The card's path on this machine.
@@ -864,7 +864,7 @@ enum Platform {
     Unix,
 }
 
-/// Whether marsad can open things on the user's screen.
+/// Whether jazari can open things on the user's screen.
 #[derive(Clone, Copy, Debug)]
 pub struct Desktop {
     ssh: bool,
@@ -1011,14 +1011,14 @@ pub fn reveal(desktop: &Desktop, path: &Path, run: &dyn Fn(&Step) -> Result<(), 
     run_steps(desktop, &reveal_steps(desktop.platform, path), run)
 }
 
-// ---------- `marsad share` ----------
+// ---------- `jazari watch share` ----------
 
 #[derive(Args)]
 pub struct ShareArgs {
     /// Print the post and write the card without opening anything (for terminals without a desktop).
     #[arg(long)]
     print: bool,
-    /// Where to write the card (default: Downloads/marsad-YYYY-MM-DD.png).
+    /// Where to write the card (default: Downloads/jazari-YYYY-MM-DD.png).
     #[arg(long, requires = "print")]
     out: Option<PathBuf>,
     /// Use the template line instead of drafting one with Claude Code.
@@ -1026,10 +1026,10 @@ pub struct ShareArgs {
     no_ai: bool,
 }
 
-/// `marsad share --print`: sync, snapshot, draft the line, print the post and write the card.
+/// `jazari watch share --print`: sync, snapshot, draft the line, print the post and write the card.
 pub fn run(a: ShareArgs) -> anyhow::Result<()> {
     if !a.print {
-        anyhow::bail!("use `marsad share --print`, or press p in the dashboard to review and share");
+        anyhow::bail!("use `jazari watch share --print`, or press p in the dashboard to review and share");
     }
     store::open_and_sync()?;
     let conn = store::open_readonly()?;
@@ -1062,7 +1062,7 @@ mod tests {
     use std::sync::Arc;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marsad-share-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-share-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1130,7 +1130,7 @@ mod tests {
     #[test]
     fn covers_ae3_a_missing_claude_gives_the_template_and_says_so() {
         let s = acme();
-        let d = draft_with(&s, "marsad-no-such-claude", Duration::from_secs(5), &never());
+        let d = draft_with(&s, "jazari-no-such-claude", Duration::from_secs(5), &never());
         assert_eq!(d.first(), template_line(&s));
         assert_eq!(d.note, Some(Note::NotInstalled));
         assert!(d.note.unwrap().message().contains("not generated"));
@@ -1255,7 +1255,7 @@ mod tests {
         let stdin = std::fs::read_to_string(dir.join("stdin")).unwrap();
         assert!(!stdin.to_lowercase().contains("acme"), "{stdin}");
         let cwd = std::fs::read_to_string(dir.join("cwd")).unwrap();
-        assert!(cwd.contains("marsad-draft-"), "a fresh temp cwd: {cwd}");
+        assert!(cwd.contains("jazari-draft-"), "a fresh temp cwd: {cwd}");
         assert!(!Path::new(cwd.trim()).exists(), "the temp cwd is removed afterwards");
         std::fs::remove_dir_all(dir).ok();
     }
@@ -1392,7 +1392,7 @@ mod tests {
             sessions: vec![
                 session("acme", Some("Acme disk guard and cleanup"), 30_000_000),
                 session("acme", Some("Auth migration PR slicing"), 80_000_000),
-                session("globex", Some("Marsad and Globex reporting"), 20_000_000),
+                session("globex", Some("Jazari and Globex reporting"), 20_000_000),
                 session("globex", Some("Globex"), 20_000_000),
                 session("web", Some("Session history, UI, and sharing fixes"), 10_000_000),
                 session("web", Some("Disk guard and cleanup"), 9_000_000),
@@ -1405,7 +1405,7 @@ mod tests {
         let names = names(&work, Some(Path::new("/Users/x")));
         assert_eq!(
             features(&work, &names),
-            ["disk guard and cleanup", "marsad and reporting", "session history, UI, and sharing fixes", "prompt versions"],
+            ["disk guard and cleanup", "jazari and reporting", "session history, UI, and sharing fixes", "prompt versions"],
             "auth is a security detail, a bare client name is nothing, duplicates and small sessions are dropped"
         );
         assert_eq!(feature_name("and the Data folder migration with"), "data folder migration");
@@ -1469,8 +1469,8 @@ mod tests {
 
     #[test]
     fn the_card_goes_to_downloads_else_the_data_dir() {
-        assert_eq!(card_path(Some("/d".into()), Path::new("/m"), DAY), Path::new("/d/marsad-2026-10-24.png"));
-        assert_eq!(card_path(None, Path::new("/m"), DAY), Path::new("/m/cards/marsad-2026-10-24.png"));
+        assert_eq!(card_path(Some("/d".into()), Path::new("/m"), DAY), Path::new("/d/jazari-2026-10-24.png"));
+        assert_eq!(card_path(None, Path::new("/m"), DAY), Path::new("/m/cards/jazari-2026-10-24.png"));
     }
 
     #[test]
@@ -1497,12 +1497,12 @@ mod tests {
         let win = &open_steps(Platform::Windows, url)[0];
         assert_ne!(win.program, "cmd", "cmd /C start splits on &");
         assert_eq!(win.args.last().unwrap(), url);
-        let card = Path::new("/home/x/Down loads/marsad,1.png");
-        assert_eq!(reveal_steps(Platform::Macos, card), [step("open", &["-R", "/home/x/Down loads/marsad,1.png"], false)]);
+        let card = Path::new("/home/x/Down loads/jazari,1.png");
+        assert_eq!(reveal_steps(Platform::Macos, card), [step("open", &["-R", "/home/x/Down loads/jazari,1.png"], false)]);
         assert_eq!(reveal_steps(Platform::Windows, Path::new(r"C:\d\c.png"))[0].args, [r"/select,C:\d\c.png"]);
         let unix = reveal_steps(Platform::Unix, card);
         assert_eq!((unix[0].program, unix[0].wait), ("dbus-send", true));
-        assert!(unix[0].args.contains(&"array:string:file:///home/x/Down%20loads/marsad%2C1.png".to_string()));
+        assert!(unix[0].args.contains(&"array:string:file:///home/x/Down%20loads/jazari%2C1.png".to_string()));
         assert_eq!(unix[1], step("xdg-open", &["/home/x/Down loads"], false));
         // When D-Bus has no file manager, the folder opens instead.
         let desktop = Desktop { ssh: false, display: true, platform: Platform::Unix };

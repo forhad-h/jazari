@@ -1,17 +1,17 @@
-//! The skills a Claude Code session can be told to use: the ones marsad ships (Easy English) and
+//! The skills a Claude Code session can be told to use: the ones jazari ships (Easy English) and
 //! the user's own, one folder each in `<data dir>/skills/`.
 //!
 //! A skill is a folder with a `SKILL.md`, whose frontmatter `name` and `description` say what it is
 //! and when Claude loads it, plus any scripts and data it needs. Claude Code loads skills only from
 //! `~/.claude/skills/` (and a project's `.claude/skills/`), so a ticked skill is installed there
-//! when its command is copied, and again at the start of every session when it is missing. marsad
+//! when its command is copied, and again at the start of every session when it is missing. jazari
 //! writes `MARKER` into each folder it installs, with a hash of the files and the skill's version,
 //! and updates such a folder while its files still match that hash.
 //!
 //! A skill's `SKILL.md` can carry a `version:` in its frontmatter. When the library's version is
 //! newer than an installed copy's, the copy is updated even if it was changed by hand or installed
 //! by someone else: the old folder is kept in `<data dir>/skill-backups/` first. Without a newer
-//! version, marsad never overwrites a copy it didn't write or a copy changed by hand.
+//! version, jazari never overwrites a copy it didn't write or a copy changed by hand.
 //!
 //! Every edit, rename, restore and delete keeps the folder it replaces under
 //! `.versions/<key>/<number>-<UTC time>/`, as the prompt library keeps prompt files.
@@ -59,21 +59,21 @@ impl Skill {
 
 pub const SKILL_MD: &str = "SKILL.md";
 
-/// The file marsad writes into each skill folder it installs in Claude Code's skills folder.
-pub const MARKER: &str = ".marsad-skill.json";
+/// The file jazari writes into each skill folder it installs in Claude Code's skills folder.
+pub const MARKER: &str = ".jazari-skill.json";
 
 /// Files a system adds to a folder by itself, which are no change to a skill.
 const IGNORED: &[&str] = &[".DS_Store", "Thumbs.db", "desktop.ini"];
 
 /// Overrides Claude Code's skills folder, for a scratch folder during development.
-const SKILLS_ENV: &str = "MARSAD_CLAUDE_SKILLS";
+const SKILLS_ENV: &str = "JAZARI_CLAUDE_SKILLS";
 
 struct Builtin {
     key: &'static str,
     files: &'static [(&'static str, &'static [u8])],
 }
 
-/// The skills marsad ships. Add new ones at the end.
+/// The skills jazari ships. Add new ones at the end.
 const BUILTIN: &[Builtin] = &[Builtin {
     key: "easy-english",
     files: &[
@@ -91,7 +91,7 @@ pub fn skills_dir() -> PathBuf {
     crate::data_dir().join("skills")
 }
 
-/// Claude Code's personal skills folder, `~/.claude/skills`, or `MARSAD_CLAUDE_SKILLS`.
+/// Claude Code's personal skills folder, `~/.claude/skills`, or `JAZARI_CLAUDE_SKILLS`.
 pub fn claude_skills_dir() -> PathBuf {
     std::env::var_os(SKILLS_ENV).filter(|p| !p.is_empty()).map(PathBuf::from).unwrap_or_else(|| crate::claude_dir().join("skills"))
 }
@@ -260,7 +260,7 @@ pub fn find(key: &str) -> Option<Skill> {
     library().into_iter().find(|s| s.key == key)
 }
 
-/// The skills as library entries for the picker and `marsad rules`: the body is the `SKILL.md`.
+/// The skills as library entries for the picker and `jazari build rules`: the body is the `SKILL.md`.
 pub fn rules(skills: &[Skill]) -> Vec<Rule> {
     skills
         .iter()
@@ -294,7 +294,7 @@ pub fn launch_section(chosen: &[&Rule]) -> String {
         out.push_str(&format!("- **{}**: {}\n", rule.key, if description.is_empty() { rule.summary.as_str() } else { &description }));
     }
     out.push_str(
-        "\nIf one of these skills is not in your list of available skills when you need it, run `marsad skill sync` \
+        "\nIf one of these skills is not in your list of available skills when you need it, run `jazari build skill sync` \
          once. It installs the missing skill, and Claude Code makes it available a moment later.\n",
     );
     out
@@ -597,17 +597,17 @@ fn remove_in(dir: &Path, lib: &[Rule], key: &str) -> anyhow::Result<PathBuf> {
 /// What happened to a skill in Claude Code's skills folder.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Installed {
-    /// It wasn't there, so marsad's library copy was written.
+    /// It wasn't there, so jazari's library copy was written.
     New,
-    /// marsad wrote it earlier and nobody changed it since; it now holds the library's version.
+    /// jazari wrote it earlier and nobody changed it since; it now holds the library's version.
     Updated,
-    /// marsad wrote it earlier, nobody changed it, and it is the library's version.
+    /// jazari wrote it earlier, nobody changed it, and it is the library's version.
     Current,
-    /// A copy marsad didn't write, used as it is.
+    /// A copy jazari didn't write, used as it is.
     Theirs,
-    /// marsad wrote it, but its files were changed since, so it is used as it is.
+    /// jazari wrote it, but its files were changed since, so it is used as it is.
     Changed,
-    /// A copy changed by hand or not written by marsad, with an older version: it was kept in the
+    /// A copy changed by hand or not written by jazari, with an older version: it was kept in the
     /// backup folder named here and replaced by the library's version.
     Replaced(PathBuf),
 }
@@ -645,10 +645,10 @@ pub fn home_relative(path: &Path) -> String {
 struct Marker {
     installed_by: String,
     key: String,
-    /// The hash of the files marsad wrote.
+    /// The hash of the files jazari wrote.
     hash: String,
     #[serde(default)]
-    marsad: String,
+    jazari: String,
     /// The skill's own version (its frontmatter `version`), when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<String>,
@@ -656,27 +656,27 @@ struct Marker {
 
 fn marker_text(skill: &Skill) -> String {
     let m = Marker {
-        installed_by: "marsad".into(),
+        installed_by: "jazari".into(),
         key: skill.key.clone(),
         hash: hash(&skill.files),
-        marsad: env!("CARGO_PKG_VERSION").into(),
+        jazari: env!("CARGO_PKG_VERSION").into(),
         version: skill.version.clone(),
     };
     serde_json::to_string_pretty(&m).unwrap_or_default() + "\n"
 }
 
-/// Where a copy is kept before marsad replaces it with a newer version.
+/// Where a copy is kept before jazari replaces it with a newer version.
 fn backups_dir() -> PathBuf {
     crate::data_dir().join("skill-backups")
 }
 
-/// The version of the copy installed at `path`: its `SKILL.md`'s, else the one marsad recorded.
+/// The version of the copy installed at `path`: its `SKILL.md`'s, else the one jazari recorded.
 fn installed_version(path: &Path, marker: Option<&Marker>) -> Option<String> {
     std::fs::read_to_string(path.join(SKILL_MD)).ok().and_then(|t| version_of(&t)).or_else(|| marker.and_then(|m| m.version.clone()))
 }
 
 /// Makes sure Claude Code can load `skill`: installs it into `root` when it is missing, updates a
-/// copy marsad installed that nobody changed since, and replaces any other copy only when the
+/// copy jazari installed that nobody changed since, and replaces any other copy only when the
 /// library's version is newer than the copy's (keeping the copy in the backup folder first).
 pub fn provide_in(root: &Path, skill: &Skill) -> anyhow::Result<Report> {
     provide_at(root, skill, &backups_dir())
@@ -759,7 +759,7 @@ fn sync_roots(personal: &Path, projects: &[PathBuf], skills: &[Skill], ticked: &
     out
 }
 
-/// After an edit in the library: updates the installed copy of `key` only when marsad installed it
+/// After an edit in the library: updates the installed copy of `key` only when jazari installed it
 /// and nobody changed it. None when no copy is installed.
 pub fn sync_installed(key: &str) -> Option<anyhow::Result<Report>> {
     sync_in(&claude_skills_dir(), find(key).as_ref()?)
@@ -791,7 +791,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("marsad-skills-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-skills-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn installing_never_overwrites_a_copy_marsad_did_not_write() {
+    fn installing_never_overwrites_a_copy_jazari_did_not_write() {
         let root = temp_dir("install");
         let skill = skill_of("mine".into(), files("mine"), true);
         let ours = provide_in(&root, &skill).unwrap();
@@ -941,7 +941,7 @@ mod tests {
         assert!(std::fs::read_to_string(backup.join(SKILL_MD)).unwrap().contains("edited by hand"));
         assert!(std::fs::read_to_string(root.join("s/SKILL.md")).unwrap().contains("body 1.1.0"));
         assert!(root.join("s").join(MARKER).is_file());
-        // A copy marsad never wrote, with no version, is older than any version.
+        // A copy jazari never wrote, with no version, is older than any version.
         std::fs::create_dir_all(root.join("t")).unwrap();
         std::fs::write(root.join("t/SKILL.md"), "legacy").unwrap();
         assert!(matches!(provide_at(&root, &versioned("t", "1.0.0"), &backups).unwrap().outcome, Installed::Replaced(_)));
@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(done.len(), 1, "only the ticked skill is installed");
         assert!(personal.join("a/SKILL.md").is_file() && !personal.join("b").exists());
         assert!(sync_roots(&personal, std::slice::from_ref(&project), &lib, &["a".into()], &backups).is_empty(), "nothing to do twice");
-        // A project copy marsad wrote follows the library, and then the personal copy is not added.
+        // A project copy jazari wrote follows the library, and then the personal copy is not added.
         provide_at(&project, &b, &backups).unwrap();
         let lib = vec![versioned("a", "1.1.0"), versioned("b", "1.1.0")];
         let done: Vec<Report> = sync_roots(&personal, std::slice::from_ref(&project), &lib, &["a".into(), "b".into()], &backups).into_iter().map(Result::unwrap).collect();

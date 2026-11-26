@@ -1,4 +1,4 @@
-//! jazari: the part of marsad that runs an AI software company.
+//! jazari: the part of jazari that runs an AI software company.
 //! - Telegram: pairing, the bridge that takes commands and forwards sessions' `--attention`
 //!   notes, and `notify` for scripts.
 //! - The engine: products, a task queue, and a supervisor that runs each task as a headless
@@ -83,7 +83,7 @@ pub enum JazariCmd {
     Run {
         #[arg(long)]
         once: bool,
-        /// Start even if the persona checks (`marsad jazari evals`) block.
+        /// Start even if the persona checks (`jazari build evals`) block.
         #[arg(long)]
         skip_evals: bool,
     },
@@ -139,7 +139,7 @@ pub enum JazariCmd {
     Deny { task: i64 },
     /// List the roles workers can take, with their model tier and rubric.
     Personas {
-        /// Copy the built-in personas.md and rubrics.md to ~/.marsad/jazari/ to edit; jazari uses those copies.
+        /// Copy the built-in personas.md and rubrics.md to ~/.jazari/build/ to edit; jazari uses those copies.
         #[arg(long)]
         export: bool,
     },
@@ -167,9 +167,9 @@ pub enum TelegramCmd {
     Unpair,
 }
 
-/// jazari's own files: `~/.marsad/jazari`.
+/// jazari's own files: `~/.jazari/build`.
 pub fn dir() -> PathBuf {
-    crate::data_dir().join("jazari")
+    crate::data_dir().join("build")
 }
 
 fn bot() -> anyhow::Result<Bot<Curl>> {
@@ -181,7 +181,7 @@ fn bot() -> anyhow::Result<Bot<Curl>> {
 fn chat() -> anyhow::Result<i64> {
     secrets::get(secrets::TELEGRAM_CHAT)
         .and_then(|c| c.parse().ok())
-        .ok_or_else(|| anyhow::anyhow!("no Telegram chat is paired; run `marsad jazari telegram pair`"))
+        .ok_or_else(|| anyhow::anyhow!("no Telegram chat is paired; run `jazari build telegram pair`"))
 }
 
 pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
@@ -203,14 +203,14 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             if token {
                 println!("Bot: @{}", bot()?.username()?);
             }
-            println!("Paired chat: {}", if chat().is_ok() { "yes" } else { "no (`marsad jazari telegram pair`)" });
+            println!("Paired chat: {}", if chat().is_ok() { "yes" } else { "no (`jazari build telegram pair`)" });
             Ok(())
         }
         JazariCmd::Telegram(TelegramCmd::Unpair) => {
             let removed = secrets::delete(secrets::TELEGRAM_CHAT)?;
             let env = secrets::env_name(secrets::TELEGRAM_CHAT);
             if std::env::var(&env).is_ok_and(|v| !v.trim().is_empty()) {
-                println!("{env} is set, so that chat is still paired: unset it in the environment that runs marsad.");
+                println!("{env} is set, so that chat is still paired: unset it in the environment that runs jazari.");
             } else if removed {
                 println!("Unpaired: no chat can control jazari until you pair again.");
             } else {
@@ -399,7 +399,7 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
                     std::fs::write(&path, text)?;
                     println!("Wrote {}", path.display());
                 }
-                println!("jazari now uses these copies. `marsad jazari evals` checks your changes, with effort matched to their size.");
+                println!("jazari now uses these copies. `jazari build evals` checks your changes, with effort matched to their size.");
                 return Ok(());
             }
             for p in personas::all() {
@@ -508,7 +508,7 @@ pub(crate) fn proposal(store: &store::Store, id: i64, accept: bool) -> anyhow::R
     Ok(format!("Queued task #{task}: add an automatic check for \"{criterion}\"."))
 }
 
-/// Writes the profile to `~/.marsad/jazari/FOUNDER.md`.
+/// Writes the profile to `~/.jazari/build/FOUNDER.md`.
 fn write_profile(store: &store::Store) {
     if let Ok(text) = profile::render(store) {
         let _ = std::fs::create_dir_all(dir());
@@ -517,7 +517,7 @@ fn write_profile(store: &store::Store) {
 }
 
 /// Where new products' repos go: `jazari.products_dir`, or `products` in jazari's data folder
-/// (so `MARSAD_HOME` moves it too).
+/// (so `JAZARI_HOME` moves it too).
 fn products_dir() -> PathBuf {
     crate::settings::get("jazari").and_then(|j| j["products_dir"].as_str().map(PathBuf::from)).unwrap_or_else(|| dir().join("products"))
 }
@@ -532,7 +532,7 @@ fn worker_skills() -> Vec<String> {
         .unwrap_or_else(|| vec!["easy-english".into()])
 }
 
-/// Writes the chosen skills from marsad's library into `<work>/.skills`, replacing what was there,
+/// Writes the chosen skills from jazari's library into `<work>/.skills`, replacing what was there,
 /// so a worker that changed them doesn't pass the change on. The container mounts the work folder,
 /// so `.skills` may be anything a worker left: a link out of the folder, a file. Nothing there is
 /// followed. The skills are built in a fresh folder and moved into place.
@@ -677,7 +677,7 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
         for i in &lint {
             eprintln!("✗ {}", i.what);
         }
-        tell_founder("⛔ jazari won't start: the personas or rubrics are broken. Run `marsad jazari evals` for details.", &[]);
+        tell_founder("⛔ jazari won't start: the personas or rubrics are broken. Run `jazari build evals` for details.", &[]);
         anyhow::bail!("fix personas.md or rubrics.md first");
     }
     if !skip_evals {
@@ -688,7 +688,7 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
             println!("{}", report.text());
         }
         if report.blocking() {
-            tell_founder("⛔ jazari won't start: a judge check failed. Run `marsad jazari evals` for details.", &[]);
+            tell_founder("⛔ jazari won't start: a judge check failed. Run `jazari build evals` for details.", &[]);
             anyhow::bail!("the judges' checks block the supervisor; fix them, or start with --skip-evals");
         }
     }
@@ -753,7 +753,7 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
                 return Ok(());
             }
             Ok(supervisor::Tick::Paused) if once => {
-                println!("marsad is paused (`marsad resume` turns it back on).");
+                println!("jazari is paused (`jazari watch resume` turns it back on).");
                 return Ok(());
             }
             Ok(supervisor::Tick::Idle | supervisor::Tick::Paused) => 60.0,
@@ -812,7 +812,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_planted_link_in_the_work_folder_is_never_followed() {
-        let base = std::env::temp_dir().join(format!("marsad-jazari-link-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("jazari-jazari-link-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let (work, outside) = (base.join("work"), base.join("outside"));
         std::fs::create_dir_all(&work).unwrap();
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn the_chosen_skills_are_written_fresh_into_the_work_folder() {
-        let work = std::env::temp_dir().join(format!("marsad-jazari-skills-{}", std::process::id()));
+        let work = std::env::temp_dir().join(format!("jazari-jazari-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(work.join(".skills/old")).unwrap();
         std::fs::write(work.join(".skills/old/SKILL.md"), "changed by a worker").unwrap();

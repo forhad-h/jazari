@@ -309,7 +309,7 @@ pub mod tests {
             "password: <your password>",
             "SECRET_KEY=${SECRET_KEY}",
             "sk-ant-",
-            "https://github.com/forhad-h/marsad",
+            "https://github.com/forhad-h/jazari",
         ] {
             assert!(!has_secret(fine), "flagged harmless text: {fine}");
         }

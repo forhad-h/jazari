@@ -53,28 +53,28 @@ The highest value a rank or achievement ever reached, stored and never lowered. 
 ## Coordination
 
 ### Data folder
-Where marsad keeps its data: `~/.marsad`, or the folder `MARSAD_HOME` names. What every coding tool shares (settings, usage history, prompts, launch files, share cards) is at the top; each tool's own files are in a subfolder named after it, such as `claude/` for Claude Code's event log and status line reports. Only Claude Code's integration (hooks, the usage skill, the status line) stays in `~/.claude`. The legacy folder, `~/.claude/marsad`, is where versions before 0.11 kept the data: it is copied once and left in place.
+Where jazari keeps its data: `~/.jazari`, or the folder `JAZARI_HOME` names. What every coding tool shares (settings, usage history, prompts, launch files, share cards) is at the top; each tool's own files are in a subfolder named after it, such as `claude/` for Claude Code's event log and status line reports. Only Claude Code's integration (hooks, the usage skill, the status line) stays in `~/.claude`. The build part's files are in `build/`.
 
 ### Launch file
 The one file a session's command loads, merged from the chosen rules files, in `<data dir>/launch/` and named `<role>-<keys>-<hash>.md` (role `session`, `lead` or `teammate`). The name follows the text, so one set reuses its file and an edited rules file gets a new one.
 
 ### Coordination protocol
-The rules marsad ships for Claude Code sessions that work in the same repo at once: register on the agent board, claim files before editing them, and record decisions, messages, conflicts and handoff notes there. A session follows them only when it was started with them in its system prompt.
+The rules jazari ships for Claude Code sessions that work in the same repo at once: register on the agent board, claim files before editing them, and record decisions, messages, conflicts and handoff notes there. A session follows them only when it was started with them in its system prompt.
 
 Claude Code records a conversation's system prompt on its first request and replays it on resume, so the protocol reaches new conversations only; refreshing the rules after an upgrade does not change conversations already started.
 
 ### Rules file
-A markdown file of instructions for a session's system prompt: one marsad ships, such as the coordination protocol or the output-hygiene rules, or the user's own in `<data dir>/prompts/`. A session can start with any set of them; the set is merged into one launch file, because `claude` reads only one `--append-system-prompt-file`.
+A markdown file of instructions for a session's system prompt: one jazari ships, such as the coordination protocol or the output-hygiene rules, or the user's own in `<data dir>/prompts/`. A session can start with any set of them; the set is merged into one launch file, because `claude` reads only one `--append-system-prompt-file`.
 
 ### Prompt generator
 The `claude -p` run that turns a user's rough idea into a rules file for their library, returning the draft with what it assumed and the questions the idea left open. It runs isolated from the user's projects and settings, and keeps the user's situation out of the rules it writes.
 *Avoid:* template, wizard
 
 ### Skill
-A folder with a `SKILL.md` (frontmatter `name` and `description`, then instructions) and any scripts or data it needs: one marsad ships, such as Easy English, or the user's own in `<data dir>/skills/`. A launch file names the ticked skills, and the session must load each one before the first step its description names. Claude Code loads skills only from `~/.claude/skills/`, so marsad installs a ticked skill there when it is missing.
+A folder with a `SKILL.md` (frontmatter `name` and `description`, then instructions) and any scripts or data it needs: one jazari ships, such as Easy English, or the user's own in `<data dir>/skills/`. A launch file names the ticked skills, and the session must load each one before the first step its description names. Claude Code loads skills only from `~/.claude/skills/`, so jazari installs a ticked skill there when it is missing.
 
 ### Installed copy
-A skill folder in `~/.claude/skills/`. marsad writes `.marsad-skill.json` into a copy it installs, with a hash of its files, and updates that copy only while the files still match the hash. A copy without that file belongs to the user and is never overwritten.
+A skill folder in `~/.claude/skills/`. jazari writes `.jazari-skill.json` into a copy it installs, with a hash of its files, and updates that copy only while the files still match the hash. A copy without that file belongs to the user and is never overwritten.
 *Avoid:* deploy, sync
 
 ### Prompt version
@@ -85,7 +85,7 @@ Starting the lead of an agent team with a set of rules files. A teammate never s
 *Avoid:* protocol (for anything but the coordination rules)
 
 ### Agent board
-The one shared markdown file per repo through which coordinating sessions see each other, kept beside the repo's main checkout so every worktree of the repo shares it (inside the git directory when there is no checkout of its own). Sessions own and edit it under the coordination protocol; marsad only reads and shows it.
+The one shared markdown file per repo through which coordinating sessions see each other, kept beside the repo's main checkout so every worktree of the repo shares it (inside the git directory when there is no checkout of its own). Sessions own and edit it under the coordination protocol; jazari only reads and shows it.
 *Avoid:* coordination file
 
 ### Claim

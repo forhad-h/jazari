@@ -1,4 +1,4 @@
-//! `marsad handoff`: save a handoff prompt from a session that is running out of context, and open
+//! `jazari build handoff`: save a handoff prompt from a session that is running out of context, and open
 //! a new terminal where a fresh Claude Code session starts from it. Optionally ends the old
 //! session once the new one is open.
 
@@ -44,7 +44,7 @@ enum HandoffCmd {
     Resume { id: String },
     /// List saved handoffs, newest first.
     List,
-    /// Ends the old session after a handoff (started detached by `marsad handoff --close`).
+    /// Ends the old session after a handoff (started detached by `jazari build handoff --close`).
     #[command(hide = true)]
     Close {
         #[arg(long)]
@@ -64,7 +64,7 @@ struct Record {
     prompt: String,
 }
 
-/// Seconds the old session gets to finish the tool call that ran `marsad handoff`.
+/// Seconds the old session gets to finish the tool call that ran `jazari build handoff`.
 const CLOSE_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 const CLOSE_SETTING: &str = "handoff_close";
@@ -111,12 +111,12 @@ pub fn run(a: HandoffArgs) -> anyhow::Result<()> {
     println!("Saved the handoff to {}", path.display());
 
     let exe = std::env::current_exe()?;
-    let resume_cmd = format!("{} handoff resume {}", terminal::sh_quote(&exe.to_string_lossy()), record.id);
+    let resume_cmd = format!("{} build handoff resume {}", terminal::sh_quote(&exe.to_string_lossy()), record.id);
     if a.no_launch {
         println!("Start it in a new terminal with: {resume_cmd}");
         return Ok(());
     }
-    let job = Job { argv: vec![exe.to_string_lossy().into_owned(), "handoff".into(), "resume".into(), record.id.clone()], cwd, title: format!("marsad-{}", record.id) };
+    let job = Job { argv: vec![exe.to_string_lossy().into_owned(), "build".into(), "handoff".into(), "resume".into(), record.id.clone()], cwd, title: format!("jazari-{}", record.id) };
     let env = Env::current();
     let platform = Platform::current();
     let plans = terminal::plans(&env, platform, &job, a.terminal, &terminal::warp_dir(platform));
@@ -144,7 +144,7 @@ pub fn run(a: HandoffArgs) -> anyhow::Result<()> {
         return Ok(());
     }
     let Some(s) = session else {
-        println!("Kept this session running: marsad couldn't tell which session this is.");
+        println!("Kept this session running: jazari couldn't tell which session this is.");
         return Ok(());
     };
     if s.pid.is_none() {
@@ -157,7 +157,7 @@ pub fn run(a: HandoffArgs) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut cmd = std::process::Command::new(&exe);
-    cmd.args(["handoff", "close", "--session", &s.id]);
+    cmd.args(["build", "handoff", "close", "--session", &s.id]);
     if env.tmux
         && let Some(pane) = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty())
     {
@@ -181,7 +181,7 @@ fn read_prompt(file: Option<&Path>) -> anyhow::Result<String> {
         Some(f) => std::fs::read_to_string(f).with_context(|| format!("couldn't read {}", f.display()))?,
         None => {
             if std::io::stdin().is_terminal() {
-                bail!("pass the handoff prompt on stdin (`marsad handoff <<'EOF' ... EOF`) or with --file");
+                bail!("pass the handoff prompt on stdin (`jazari build handoff <<'EOF' ... EOF`) or with --file");
             }
             let mut s = String::new();
             std::io::stdin().read_to_string(&mut s)?;
@@ -216,7 +216,7 @@ fn load(dir: &Path, id: &str) -> anyhow::Result<Record> {
         bail!("not a handoff id: {id:?}");
     }
     let path = dir.join(format!("{id}.json"));
-    let bytes = std::fs::read(&path).with_context(|| format!("no handoff {id} (`marsad handoff list` shows them)"))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("no handoff {id} (`jazari build handoff list` shows them)"))?;
     serde_json::from_slice(&bytes).with_context(|| format!("{} is not a handoff", path.display()))
 }
 
@@ -246,9 +246,9 @@ fn list() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The `claude` program; `MARSAD_CLAUDE` overrides it.
+/// The `claude` program; `JAZARI_CLAUDE` overrides it.
 fn claude() -> std::ffi::OsString {
-    std::env::var_os("MARSAD_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into())
+    std::env::var_os("JAZARI_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into())
 }
 
 fn resume(id: &str) -> anyhow::Result<()> {
@@ -280,7 +280,7 @@ fn resume(id: &str) -> anyhow::Result<()> {
 
 /// Ends the old session once it has finished its tool call: the tmux pane when it runs in tmux and
 /// the pane holds its Claude Code process, otherwise that process. The process and its start are
-/// read from marsad's own records now, not from arguments.
+/// read from jazari's own records now, not from arguments.
 fn close(session: &str, tmux_pane: Option<&str>) -> anyhow::Result<()> {
     let sessions = crate::live::load_sessions(false);
     let s = sessions.get(session).ok_or_else(|| anyhow::anyhow!("the session has already ended"))?;
@@ -328,18 +328,18 @@ fn pane_holds(pane: &str, pid: u32) -> bool {
 
 /// The note the context hook adds once a session passes the warning threshold.
 pub fn context_note(pct: f64, exe: &str, close: bool) -> String {
-    let marsad = terminal::sh_quote(exe);
+    let jazari = terminal::sh_quote(exe);
     let after = if close {
-        "marsad opens a new terminal running a fresh session from it and ends this session a few seconds later, so stop once the command reports success."
+        "jazari opens a new terminal running a fresh session from it and ends this session a few seconds later, so stop once the command reports success."
     } else {
-        "marsad opens a new terminal running a fresh session from it. Then tell the user the new session is running and stop working in this one."
+        "jazari opens a new terminal running a fresh session from it. Then tell the user the new session is running and stop working in this one."
     };
     format!(
-        "[marsad] This session's context is {pct:.0}% full; Claude Code auto-compacts at 100%. \
+        "[jazari] This session's context is {pct:.0}% full; Claude Code auto-compacts at 100%. \
          Finish or pause the step you are on, then hand off: write a handoff prompt a fresh session \
          can start from with no other context (the goal; what is done; what is left, with the next \
          step first; decisions and why; files changed; dead ends; how to check the work) and run \
-         `{marsad} handoff <<'EOF'` with the prompt, ending with `EOF`. {after} If the user asked \
+         `{jazari} build handoff <<'EOF'` with the prompt, ending with `EOF`. {after} If the user asked \
          you to keep going here, mention the handoff option once and continue."
     )
 }
@@ -358,7 +358,7 @@ mod tests {
     use chrono::TimeZone;
 
     fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("marsad-handoff-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("jazari-handoff-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }
@@ -387,11 +387,11 @@ mod tests {
 
     #[test]
     fn note_tells_the_session_how_to_hand_off() {
-        let keep = context_note(82.4, "/opt/my tools/marsad", false);
-        assert!(keep.starts_with("[marsad] This session's context is 82% full"), "{keep}");
-        assert!(keep.contains("`'/opt/my tools/marsad' handoff <<'EOF'`"), "{keep}");
+        let keep = context_note(82.4, "/opt/my tools/jazari", false);
+        assert!(keep.starts_with("[jazari] This session's context is 82% full"), "{keep}");
+        assert!(keep.contains("`'/opt/my tools/jazari' build handoff <<'EOF'`"), "{keep}");
         assert!(keep.contains("stop working in this one"), "{keep}");
-        assert!(context_note(90.0, "marsad", true).contains("ends this session"));
+        assert!(context_note(90.0, "jazari", true).contains("ends this session"));
     }
 
     #[test]

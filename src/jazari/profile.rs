@@ -18,7 +18,7 @@
 //!   lasting fix, for the founder to accept with one tap.
 //!
 //! Every change is announced on a card, and the founder can see the whole profile in
-//! `~/.marsad/jazari/FOUNDER.md`.
+//! `~/.jazari/build/FOUNDER.md`.
 
 use super::card::Card;
 use super::store::{Pref, Store};

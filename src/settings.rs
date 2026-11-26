@@ -1,5 +1,5 @@
-//! User preferences in `settings.json` under marsad's data dir. Unknown keys are kept, so
-//! newer versions' settings survive an older marsad writing the file.
+//! User preferences in `settings.json` under jazari's data dir. Unknown keys are kept, so
+//! newer versions' settings survive an older jazari writing the file.
 
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ fn set_at(path: &Path, key: &str, value: Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes one setting to the real file through marsad's action gate, so it is recorded.
+/// Writes one setting to the real file through jazari's action gate, so it is recorded.
 fn save(key: &str, value: Value) -> anyhow::Result<()> {
     let a = crate::act::Action::new(crate::act::Kind::Setting, key).detail(value.to_string());
     crate::act::run(&a, || set_at(&path(), key, value))
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn alerts_default_on_round_trip_and_keep_other_keys() {
-        let dir = std::env::temp_dir().join(format!("marsad-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("settings.json");
         assert!(alerts_at(&file), "missing file means on");
@@ -222,7 +222,7 @@ mod tests {
     }
 
     fn temp(name: &str) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("marsad-settings-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("jazari-settings-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         (dir.join("settings.json"), dir.join("history.json"))
