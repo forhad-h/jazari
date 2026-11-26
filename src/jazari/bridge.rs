@@ -1,8 +1,9 @@
-//! The Telegram bridge: commands from the founder's paired chat, and sessions' `--attention`
-//! notes sent back to it. Messages from any other chat are dropped without a reply.
+//! The Telegram bridge: commands from the founder's paired chat about jazari's own work.
+//! Messages from any other chat are dropped without a reply. The sessions the founder started by
+//! hand are neither controlled from Telegram nor reported to it: they need the founder at the
+//! computer.
 
 use super::telegram::{Bot, Transport};
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -19,8 +20,8 @@ pub enum Command {
     Status,
     Pause(Option<String>),
     Resume,
-    Tell { session: String, text: String },
-    Stop(String),
+    /// `/tell` or `/stop`: they would reach a session the founder started, which Telegram may not.
+    HostOnly,
     Idea { product: String, text: String },
     New { name: String, idea: String },
     Tasks,
@@ -35,7 +36,7 @@ pub enum Command {
     Unknown(String),
 }
 
-/// `/tell@MyBot abc12 run the tests` → `Tell { session: "abc12", text: "run the tests" }`.
+/// `/idea@MyBot shop add search` → `Idea { product: "shop", text: "add search" }`.
 pub fn parse(text: &str) -> Command {
     let text = text.trim();
     // A plain message, not a command, is feedback on the product the founder last talked about.
@@ -50,12 +51,7 @@ pub fn parse(text: &str) -> Command {
         "status" => Command::Status,
         "pause" => Command::Pause(arg(rest)),
         "resume" => Command::Resume,
-        "tell" => match rest.split_once(char::is_whitespace) {
-            Some((s, t)) if !t.trim().is_empty() => Command::Tell { session: s.into(), text: t.trim().into() },
-            _ => Command::Unknown("usage: /tell <session> <message>".into()),
-        },
-        "stop" if !rest.is_empty() => Command::Stop(rest.split_whitespace().next().unwrap_or_default().into()),
-        "stop" => Command::Unknown("usage: /stop <session>".into()),
+        "tell" | "stop" => Command::HostOnly,
         "idea" => match rest.split_once(char::is_whitespace) {
             Some((p, t)) if !t.trim().is_empty() => Command::Idea { product: p.into(), text: t.trim().into() },
             _ => Command::Unknown("usage: /idea <product> <the idea>".into()),
@@ -111,20 +107,19 @@ pub const HELP: &str = "jazari commands:
 /feedback <product|all> <text> – how you like the work (a plain message works too)
 /prefer <product|all> <area> <rule> – set a preference now
 /prefs, /forget <id> – see or drop what jazari learned about you
-/status – sessions and usage limits
-/tell <session> <message> – message a session (it reads it at its next step)
-/stop <session> – stop a session before its next tool call
-/pause [30m|2h|1d] – hold what jazari does on its own
-/resume – turn it back on
-Sessions are named by the first letters of their id, as /status shows them.";
+/status – products, tasks, usage and the machine's disk and memory
+/pause [30m|2h|1d] – pause product work
+/resume – turn product work back on
+Sessions you started yourself can only be controlled at your computer, from the jazari dashboard.";
+
+/// The reply to `/tell` and `/stop`.
+pub const HOST_ONLY: &str = "Sessions you started yourself can only be controlled at your computer, from the jazari dashboard.";
 
 /// What the bridge does to the machine, so tests run without one.
 pub trait Ops {
     fn status(&self) -> String;
     fn pause(&self, duration: Option<&str>) -> anyhow::Result<String>;
     fn resume(&self) -> anyhow::Result<String>;
-    fn tell(&self, session: &str, text: &str) -> anyhow::Result<String>;
-    fn stop(&self, session: &str) -> anyhow::Result<String>;
     fn idea(&self, product: &str, text: &str) -> anyhow::Result<String>;
     fn new_product(&self, name: &str, idea: &str) -> anyhow::Result<String>;
     fn tasks(&self) -> anyhow::Result<String>;
@@ -148,8 +143,7 @@ pub fn handle_from(cmd: Command, ops: &dyn Ops, tapped: bool) -> String {
         Command::Status => ops.status(),
         Command::Pause(d) => done(ops.pause(d.as_deref())),
         Command::Resume => done(ops.resume()),
-        Command::Tell { session, text } => done(ops.tell(&session, &text)),
-        Command::Stop(session) => done(ops.stop(&session)),
+        Command::HostOnly => HOST_ONLY.into(),
         Command::Idea { product, text } => done(ops.idea(&product, &text)),
         Command::New { name, idea } => done(ops.new_product(&name, &idea)),
         Command::Tasks => done(ops.tasks()),
@@ -165,75 +159,21 @@ pub fn handle_from(cmd: Command, ops: &dyn Ops, tapped: bool) -> String {
     }
 }
 
-/// The one live session whose id starts with `prefix`.
-pub fn pick<'a>(sessions: &'a HashMap<String, crate::model::Session>, prefix: &str) -> anyhow::Result<&'a crate::model::Session> {
-    anyhow::ensure!(prefix.len() >= 4, "give at least 4 letters of the session id");
-    let hits: Vec<_> = sessions.values().filter(|s| s.id.starts_with(prefix)).collect();
-    match hits.as_slice() {
-        [s] => Ok(s),
-        [] => anyhow::bail!("no live session starts with {prefix}"),
-        _ => anyhow::bail!("{} sessions start with {prefix}; give more letters", hits.len()),
-    }
-}
-
-/// The real machine: jazari's sessions, pause and inbox.
+/// The real machine: jazari's products and tasks, its pause, and the machine's health.
 pub struct Machine;
-
-fn pct(w: Option<crate::model::RateWindow>) -> String {
-    match w {
-        Some(w) => {
-            let reset = w
-                .resets_at
-                .and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
-                .map(|t| format!(", resets {}", t.with_timezone(&chrono::Local).format("%a %H:%M")))
-                .unwrap_or_default();
-            format!("{:.0}%{reset}", w.used_pct)
-        }
-        None => "unknown".into(),
-    }
-}
 
 impl Ops for Machine {
     fn status(&self) -> String {
-        let sessions = crate::live::load_sessions(false);
-        let mut list: Vec<_> = sessions.values().collect();
-        list.sort_by(|a, b| a.status.group().cmp(&b.status.group()).then(b.last_event.total_cmp(&a.last_event)));
-        let mut out = if list.is_empty() { "No live sessions.".to_string() } else { format!("{} live session(s):", list.len()) };
-        for s in list.iter().take(15) {
-            let what = s.said.as_deref().filter(|t| !t.is_empty()).unwrap_or(&s.detail);
-            let flag = if s.status.needs_user() { "⚠️ " } else { "" };
-            out.push_str(&format!("\n{flag}{} · {} · {} — {}", &s.id[..s.id.len().min(8)], s.project(), s.status.as_str(), crate::hook::truncate(what, 80)));
-        }
-        if let Some((five, seven)) = crate::app::latest_rate_limits(&sessions) {
-            out.push_str(&format!("\n\nUsage: 5h {} · 7d {}", pct(five), pct(seven)));
-        }
-        if crate::act::paused() {
-            out.push_str("\njazari is paused.");
-        }
-        out
+        super::open().and_then(|s| super::sandbox_status(&s)).unwrap_or_else(|e| format!("Couldn't: {e}"))
     }
 
     fn pause(&self, duration: Option<&str>) -> anyhow::Result<String> {
-        let label = crate::act::pause(duration)?;
-        Ok(format!("Paused{label}: jazari won't interrupt or end sessions, clean up or update on its own."))
+        let label = crate::act::pause_in(&super::dir(), "jazari.paused", duration)?;
+        Ok(format!("Paused product work{label}: the supervisor starts no new task. A task that is running finishes."))
     }
 
     fn resume(&self) -> anyhow::Result<String> {
-        Ok(if crate::act::resume()? { "Resumed: jazari acts on its own again." } else { "jazari wasn't paused." }.into())
-    }
-
-    fn tell(&self, session: &str, text: &str) -> anyhow::Result<String> {
-        let sessions = crate::live::load_sessions(false);
-        let s = pick(&sessions, session)?;
-        crate::channel::tell(&s.id, text)?;
-        Ok(format!("Queued for {} ({}): it reads it at its next tool call or prompt.", s.project(), &s.id[..8.min(s.id.len())]))
-    }
-
-    fn stop(&self, session: &str) -> anyhow::Result<String> {
-        let sessions = crate::live::load_sessions(false);
-        let s = pick(&sessions, session)?;
-        crate::channel::request_stop(&s.id)?;
-        Ok(format!("{} stops before its next tool call; `claude --resume {}` continues it.", s.project(), s.id))
+        Ok(if crate::act::resume_in(&super::dir(), "jazari.paused")? { "Product work is back on." } else { "Product work wasn't paused." }.into())
     }
 
     fn idea(&self, product: &str, text: &str) -> anyhow::Result<String> {
@@ -412,16 +352,6 @@ pub fn pair<T: Transport>(bot: &Bot<T>, dir: &Path) -> anyhow::Result<()> {
 
 // ---------- the bridge loop ----------
 
-/// The text sent for a session's `jazari watch say --attention`.
-pub fn attention_text(ev: &serde_json::Value, project: Option<&str>) -> Option<String> {
-    if ev["hook_event_name"] != crate::channel::SAID_EVENT || ev["attention"] != true {
-        return None;
-    }
-    let id = ev["session_id"].as_str().unwrap_or_default();
-    let msg = ev["message"].as_str().unwrap_or_default();
-    Some(format!("🔔 {} ({}) needs you:\n{msg}", project.unwrap_or("a session"), &id[..id.len().min(8)]))
-}
-
 /// One round: answer the paired chat's commands, drop everything else. Returns the next offset.
 /// Each update is acknowledged (`seen`) before it is acted on, so a reply that fails to send never
 /// makes a command run twice.
@@ -452,9 +382,6 @@ pub fn run<T: Transport>(bot: &Bot<T>, chat: i64, dir: &Path) -> anyhow::Result<
     let _lock = try_lock(dir)?;
     crate::act::set_origin(crate::act::Origin::Telegram);
     let mut offset = load_offset(dir);
-    // Only notes posted from now on are forwarded.
-    let mut events = crate::jsonl::JsonlTail::new(crate::claude_data_dir().join("events.jsonl"));
-    events.read_new();
     println!("Listening for commands from the paired chat. Ctrl-C stops the bridge.");
     let mut failures = 0u32;
     loop {
@@ -478,16 +405,6 @@ pub fn run<T: Transport>(bot: &Bot<T>, chat: i64, dir: &Path) -> anyhow::Result<
                 std::thread::sleep(std::time::Duration::from_secs((5 * u64::from(failures)).min(120)));
             }
         }
-        let notes: Vec<_> = events.read_new();
-        if notes.iter().any(|ev| ev["attention"] == true) {
-            let sessions = crate::live::load_sessions(true);
-            for ev in &notes {
-                let project = ev["session_id"].as_str().and_then(|id| sessions.get(id)).map(|s| s.project());
-                if let Some(text) = attention_text(ev, project.as_deref()) {
-                    let _ = bot.send(chat, &text); // push: a session asked for the founder with --attention
-                }
-            }
-        }
         let _ = std::io::stdout().flush();
     }
 }
@@ -499,16 +416,48 @@ mod tests {
     use serde_json::json;
     use std::cell::RefCell;
 
+    /// What a Telegram command may reach. Only jazari's own work: the founder's rule is that sessions
+    /// they started by hand are controlled only at the computer.
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    enum Scope {
+        /// jazari's products, tasks, preferences and supervisor.
+        Sandbox,
+        /// Only reads: help, or a reply that says what Telegram can't do.
+        Reply,
+    }
+
+    /// The scope of each command. The match has no catch-all, so a new command must say what it
+    /// reaches, and there is no scope for the founder's own sessions.
+    fn scope(cmd: &Command) -> Scope {
+        match cmd {
+            Command::Help | Command::HostOnly | Command::Unknown(_) => Scope::Reply,
+            Command::Status
+            | Command::Pause(_)
+            | Command::Resume
+            | Command::Idea { .. }
+            | Command::New { .. }
+            | Command::Tasks
+            | Command::Answer { .. }
+            | Command::Decide { .. }
+            | Command::Feedback { .. }
+            | Command::Prefer { .. }
+            | Command::Forget(_)
+            | Command::Prefs
+            | Command::Mode { .. }
+            | Command::Proposal { .. } => Scope::Sandbox,
+        }
+    }
+
+
     #[test]
     fn commands_parse_with_bot_names_and_arguments() {
         assert_eq!(parse("/start"), Command::Help);
         assert_eq!(parse("/Status@ForhadJazariBot"), Command::Status);
         assert_eq!(parse("/pause 2h"), Command::Pause(Some("2h".into())));
         assert_eq!(parse("/pause"), Command::Pause(None));
-        assert_eq!(parse("/tell 1fe6ab run the tests\nthen push"), Command::Tell { session: "1fe6ab".into(), text: "run the tests\nthen push".into() });
-        assert!(matches!(parse("/tell 1fe6ab"), Command::Unknown(_)));
-        assert_eq!(parse("/stop 1fe6ab now"), Command::Stop("1fe6ab".into()));
-        assert!(matches!(parse("/stop"), Command::Unknown(_)));
+        assert_eq!(parse("/tell 1fe6ab run the tests\nthen push"), Command::HostOnly);
+        assert_eq!(parse("/stop 1fe6ab now"), Command::HostOnly);
+        assert_eq!(parse("/stop"), Command::HostOnly);
         assert_eq!(parse("rm -rf /"), Command::Feedback { product: None, text: "rm -rf /".into() }, "plain text is feedback, never a command");
         assert_eq!(parse("make the buttons green"), Command::Feedback { product: None, text: "make the buttons green".into() });
         assert_eq!(parse("/feedback shop shorter sentences"), Command::Feedback { product: Some("shop".into()), text: "shorter sentences".into() });
@@ -540,14 +489,6 @@ mod tests {
         }
         fn resume(&self) -> anyhow::Result<String> {
             anyhow::bail!("nothing to resume")
-        }
-        fn tell(&self, s: &str, t: &str) -> anyhow::Result<String> {
-            self.log.borrow_mut().push(format!("tell {s} {t}"));
-            Ok("queued".into())
-        }
-        fn stop(&self, s: &str) -> anyhow::Result<String> {
-            self.log.borrow_mut().push(format!("stop {s}"));
-            Ok("stopping".into())
         }
         fn idea(&self, p: &str, t: &str) -> anyhow::Result<String> {
             self.log.borrow_mut().push(format!("idea {p} {t}"));
@@ -612,7 +553,7 @@ mod tests {
         assert_eq!(seen, vec![6, 7, 8, 9, 10, 11, 12], "each update is acknowledged before it is acted on");
         assert_eq!(
             *ops.log.borrow(),
-            vec!["tell abcd1234 use staging", "decide 3 true", "answer 4 Policy: skip reviews tapped=true", "answer 4 keep reviews, but faster tapped=false"],
+            vec!["decide 3 true", "answer 4 Policy: skip reviews tapped=true", "answer 4 keep reviews, but faster tapped=false"],
             "a button's answer is marked as tapped, whatever its text"
         );
         let calls = bot.transport.calls.borrow();
@@ -637,7 +578,7 @@ mod tests {
 
     #[test]
     fn a_reply_that_fails_to_send_does_not_run_the_command_again() {
-        let bot = Bot { transport: NoSend(RefCell::new(vec![json!([msg(7, 42, "private", "/stop abcd1234")])])) };
+        let bot = Bot { transport: NoSend(RefCell::new(vec![json!([msg(7, 42, "private", "/approve 3")])])) };
         let ops = FakeOps::default();
         let mut offset = Some(7);
         let mut seen = offset;
@@ -645,7 +586,7 @@ mod tests {
         offset = seen;
         assert_eq!(offset, Some(8), "the update was acknowledged before the reply failed");
         serve_once(&bot, 42, offset, &ops, &mut |_| {}).unwrap();
-        assert_eq!(*ops.log.borrow(), vec!["stop abcd1234"], "it ran once");
+        assert_eq!(*ops.log.borrow(), vec!["decide 3 true"], "it ran once");
     }
 
     #[test]
@@ -707,22 +648,48 @@ mod tests {
         assert!(!looks_like_code("START") && !looks_like_code("ABCDEFGHJ0") && !looks_like_code("ABCDEFGHJKM"));
     }
 
-    #[test]
-    fn only_attention_notes_are_forwarded() {
-        let ev = json!({"hook_event_name": crate::channel::SAID_EVENT, "session_id": "1fe6ab99-x", "message": "need the staging key", "attention": true});
-        assert_eq!(attention_text(&ev, Some("shop")).unwrap(), "🔔 shop (1fe6ab99) needs you:\nneed the staging key");
-        let quiet = json!({"hook_event_name": crate::channel::SAID_EVENT, "session_id": "1", "message": "tests next", "attention": false});
-        assert_eq!(attention_text(&quiet, None), None);
-    }
 
     #[test]
-    fn a_session_is_picked_only_by_a_unique_prefix_of_four_or_more() {
-        let mut sessions = HashMap::new();
-        for id in ["abcd1111", "abcd2222", "ffff0000"] {
-            sessions.insert(id.to_string(), crate::model::Session::new(id, 0.0));
+    fn no_telegram_command_reaches_a_session_the_founder_started() {
+        // Every command word the bridge knows, and what it may reach.
+        let table = [
+            ("/help", Scope::Reply),
+            ("/start", Scope::Reply),
+            ("/tell abcd1234 run the tests", Scope::Reply),
+            ("/stop abcd1234", Scope::Reply),
+            ("/status", Scope::Sandbox),
+            ("/pause 2h", Scope::Sandbox),
+            ("/resume", Scope::Sandbox),
+            ("/new notes A notes app", Scope::Sandbox),
+            ("/idea shop Add search", Scope::Sandbox),
+            ("/tasks", Scope::Sandbox),
+            ("/answer 4 Use Twilio", Scope::Sandbox),
+            ("/approve 3", Scope::Sandbox),
+            ("/deny 3", Scope::Sandbox),
+            ("/feedback shop shorter", Scope::Sandbox),
+            ("/prefer all copy Keep it short", Scope::Sandbox),
+            ("/forget 2", Scope::Sandbox),
+            ("/prefs", Scope::Sandbox),
+            ("/mode shop normal", Scope::Sandbox),
+            ("/accept 1", Scope::Sandbox),
+            ("/ignore 1", Scope::Sandbox),
+            ("plain text", Scope::Sandbox),
+            ("/frobnicate", Scope::Reply),
+        ];
+        for (text, want) in table {
+            assert_eq!(scope(&parse(text)), want, "{text}");
         }
-        assert_eq!(pick(&sessions, "ffff").unwrap().id, "ffff0000");
-        assert!(pick(&sessions, "abcd").unwrap_err().to_string().contains("2 sessions"));
-        assert!(pick(&sessions, "ff").is_err() && pick(&sessions, "9999").is_err());
+        // /tell and /stop do nothing and say where to go instead.
+        let ops = FakeOps::default();
+        for text in ["/tell abcd1234 use staging", "/stop abcd1234"] {
+            assert_eq!(handle_from(parse(text), &ops, false), HOST_ONLY);
+        }
+        assert!(ops.log.borrow().is_empty());
+        assert!(!HELP.contains("/tell") && !HELP.contains("/stop"));
+        // Outbound: the bridge reads nothing about those sessions, so their notes never reach the chat.
+        let code = include_str!("bridge.rs").split("#[cfg(test)]").next().unwrap();
+        for host in ["events.jsonl", "load_sessions", "attention", "crate::channel"] {
+            assert!(!code.contains(host), "the bridge must not read or reach the founder's own sessions: {host}");
+        }
     }
 }

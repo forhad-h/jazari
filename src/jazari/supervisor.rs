@@ -984,7 +984,6 @@ mod tests {
             "bridge.rs: a reply to the founder's own message",
             "bridge.rs: a reply: the pairing the founder started is done",
             "bridge.rs: a reply to the founder's command",
-            "bridge.rs: a session asked for the founder with --attention",
         ];
         let sends = ["say(d,", "once(d,", "tell_founder(", "bot.send(", "send_with_buttons(", "(d.notify)("];
         let mut found = Vec::new();
