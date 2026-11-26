@@ -114,17 +114,21 @@ pub struct State {
     pub last_exit: Option<String>,
 }
 
+/// Only the service's own lines count: they are indented once. Deeper lines describe its parts
+/// (sockets, endpoints), which have their own `state = active`.
 pub fn parse_print(out: &str) -> State {
     let mut s = State::default();
-    for line in out.lines().map(str::trim) {
+    let mut state = None;
+    for line in out.lines().filter(|l| l.starts_with('\t') && !l.starts_with("\t\t")).map(str::trim) {
         if let Some(v) = line.strip_prefix("state = ") {
-            s.running = v == "running";
+            state.get_or_insert(v == "running");
         } else if let Some(v) = line.strip_prefix("pid = ") {
-            s.pid = v.parse().ok();
+            s.pid = s.pid.or(v.parse().ok());
         } else if let Some(v) = line.strip_prefix("last exit code = ") {
-            s.last_exit = Some(v.to_string());
+            s.last_exit.get_or_insert(v.to_string());
         }
     }
+    s.running = state.unwrap_or(false);
     s
 }
 
@@ -266,6 +270,9 @@ mod tests {
         assert_eq!(parse_print(out), State { running: true, pid: Some(4321), last_exit: Some("0".into()) });
         let stopped = "\tstate = not running\n\tlast exit code = 1: Operation not permitted";
         assert_eq!(parse_print(stopped), State { running: false, pid: None, last_exit: Some("1: Operation not permitted".into()) });
+        // As macOS prints it: the service's parts have their own nested state lines.
+        let real = "gui/501/jazari.bridge = {\n\tactive count = 1\n\tstate = running\n\tpid = 30173\n\tlast exit code = (never exited)\n\tendpoints = {\n\t\tstate = active\n\t}\n\tsockets = {\n\t\tstate = active\n\t}\n}";
+        assert_eq!(parse_print(real), State { running: true, pid: Some(30173), last_exit: Some("(never exited)".into()) });
     }
 
     #[cfg(target_os = "macos")]
