@@ -517,6 +517,8 @@ fn acting(sub: &str, args: &[&str]) -> Option<&'static str> {
         "disk" if has("--guard") => Some("turns the disk guard on or off"),
         "risk" if has("--guard") || has("--osv") || has("--scanner") => Some("changes the command check"),
         "context" if has("--warn") => Some("changes the handoff warning"),
+        "context" if has("--block") => Some("changes when a session must hand off"),
+        "context" if has("--allow") => Some("lets a session keep working past the context block"),
         "retention" if args.iter().any(|a| !a.starts_with('-')) => Some("changes how long usage history is kept"),
         "handoff" if has("--close") || has("--auto-close") => Some("ends a session after the handoff"),
         "handoff" if has("--session") => Some("hands off a session other than this one"),

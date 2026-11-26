@@ -110,7 +110,7 @@ pub fn generator_model() -> String {
 }
 
 /// Preferences an export carries; anything else in the file stays on this machine.
-const PORTABLE: &[&str] = &["retention_days", "alerts", "context_warning_pct", "rules", "launch_mode", "generator_model"];
+const PORTABLE: &[&str] = &["retention_days", "alerts", "context_warning_pct", "context_block_pct", "rules", "launch_mode", "generator_model"];
 
 /// Where versions before 0.4 kept the retention.
 fn legacy_retention_path() -> PathBuf {
@@ -160,6 +160,27 @@ pub fn context_warning() -> Option<u32> {
 
 pub fn set_context_warning(pct: Option<u32>) -> anyhow::Result<()> {
     save("context_warning_pct", pct.map_or(json!(false), |p| json!(p)))
+}
+
+/// Default share of the auto-compact point at which a session's tool calls are refused until it
+/// hands off.
+pub const DEFAULT_CONTEXT_BLOCK_PCT: u32 = 90;
+
+fn context_block_at(path: &Path) -> Option<u32> {
+    match load_at(path).get("context_block_pct") {
+        Some(Value::Bool(false)) => None,
+        Some(v) => v.as_u64().map(|p| p as u32).or(Some(DEFAULT_CONTEXT_BLOCK_PCT)),
+        None => Some(DEFAULT_CONTEXT_BLOCK_PCT),
+    }
+}
+
+/// Percent of the auto-compact point at which a session must hand off; None when it is off.
+pub fn context_block() -> Option<u32> {
+    context_block_at(&path())
+}
+
+pub fn set_context_block(pct: Option<u32>) -> anyhow::Result<()> {
+    save("context_block_pct", pct.map_or(json!(false), |p| json!(p)))
 }
 
 /// Badge levels last announced on this machine (`badges_announced`), or None when never
@@ -268,6 +289,17 @@ mod tests {
         assert!(!legacy.exists(), "old file removed");
         set_at(&file, "retention_days", json!(0)).unwrap();
         assert_eq!(retention_days_at(&file, &legacy), Some(0), "0 keeps forever");
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn context_block_defaults_to_90_and_can_be_off() {
+        let (file, _) = temp("block");
+        assert_eq!(context_block_at(&file), Some(90));
+        set_at(&file, "context_block_pct", json!(false)).unwrap();
+        assert_eq!(context_block_at(&file), None);
+        set_at(&file, "context_block_pct", json!(95)).unwrap();
+        assert_eq!(context_block_at(&file), Some(95));
         std::fs::remove_dir_all(file.parent().unwrap()).ok();
     }
 

@@ -73,9 +73,10 @@ fn dir() -> PathBuf {
     crate::claude_data_dir().join("handoffs")
 }
 
-/// Whether a handoff ends the old session by default (off unless turned on).
+/// Whether a handoff ends the old session by default (on unless turned off), so the session
+/// that ran out of context doesn't keep working next to the new one.
 pub fn auto_close() -> bool {
-    crate::settings::get(CLOSE_SETTING).and_then(|v| v.as_bool()).unwrap_or(false)
+    crate::settings::get(CLOSE_SETTING).and_then(|v| v.as_bool()).unwrap_or(true)
 }
 
 pub fn run(a: HandoffArgs) -> anyhow::Result<()> {
@@ -327,20 +328,26 @@ fn pane_holds(pane: &str, pid: u32) -> bool {
 }
 
 /// The note the context hook adds once a session passes the warning threshold.
-pub fn context_note(pct: f64, exe: &str, close: bool) -> String {
+pub fn context_note(pct: f64, exe: &str, close: bool, block: Option<u32>) -> String {
     let jazari = terminal::sh_quote(exe);
     let after = if close {
         "jazari opens a new terminal running a fresh session from it and ends this session a few seconds later, so stop once the command reports success."
     } else {
         "jazari opens a new terminal running a fresh session from it. Then tell the user the new session is running and stop working in this one."
     };
+    let blocks = match block {
+        Some(b) => format!(
+            " At {b}% jazari refuses every tool call except reading, searching and the handoff, so hand off \
+             before that. If the user asked you to keep going here, mention the handoff option once and continue."
+        ),
+        None => " If the user asked you to keep going here, mention the handoff option once and continue.".into(),
+    };
     format!(
         "[jazari] This session's context is {pct:.0}% full; Claude Code auto-compacts at 100%. \
          Finish or pause the step you are on, then hand off: write a handoff prompt a fresh session \
          can start from with no other context (the goal; what is done; what is left, with the next \
          step first; decisions and why; files changed; dead ends; how to check the work) and run \
-         `{jazari} build handoff <<'EOF'` with the prompt, ending with `EOF`. {after} If the user asked \
-         you to keep going here, mention the handoff option once and continue."
+         `{jazari} build handoff <<'EOF'` with the prompt, ending with `EOF`. {after}{blocks}"
     )
 }
 
@@ -387,11 +394,12 @@ mod tests {
 
     #[test]
     fn note_tells_the_session_how_to_hand_off() {
-        let keep = context_note(82.4, "/opt/my tools/jazari", false);
+        let keep = context_note(82.4, "/opt/my tools/jazari", false, None);
         assert!(keep.starts_with("[jazari] This session's context is 82% full"), "{keep}");
         assert!(keep.contains("`'/opt/my tools/jazari' build handoff <<'EOF'`"), "{keep}");
         assert!(keep.contains("stop working in this one"), "{keep}");
-        assert!(context_note(90.0, "jazari", true).contains("ends this session"));
+        assert!(context_note(90.0, "jazari", true, None).contains("ends this session"));
+        assert!(context_note(80.0, "jazari", true, Some(90)).contains("At 90% jazari refuses every tool call"));
     }
 
     #[test]

@@ -18,6 +18,14 @@ pub struct ContextArgs {
     /// Set the automatic handoff warning: a percent of the auto-compact point, or `off`.
     #[arg(long)]
     warn: Option<String>,
+    /// Set when a session must hand off: tool calls other than reading, searching and the handoff
+    /// are refused from this percent of the auto-compact point. A percent, or `off`.
+    #[arg(long)]
+    block: Option<String>,
+    /// Let this session (id or id prefix) keep working past the block until its next compact.
+    /// Only for when the user asked the session to keep going.
+    #[arg(long, value_name = "SESSION")]
+    allow: Option<String>,
     #[arg(long, value_enum, default_value = "table")]
     format: Format,
     /// Hook entrypoint called by Claude Code on UserPromptSubmit and PostToolUse (reads hook JSON on stdin).
@@ -34,14 +42,23 @@ pub fn run(a: ContextArgs) -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(warn) = a.warn {
-        let pct = match warn.as_str() {
-            "off" | "0" => None,
-            n => Some(n.trim_end_matches('%').parse::<u32>().ok().filter(|p| (1..=100).contains(p)).ok_or_else(|| {
-                anyhow::anyhow!("expected a percent from 1 to 100, or `off`, got {n:?}")
-            })?),
-        };
+        let pct = parse_pct(&warn)?;
         crate::settings::set_context_warning(pct)?;
         println!("{}", warning_label(pct));
+        return Ok(());
+    }
+    if let Some(block) = a.block {
+        let pct = parse_pct(&block)?;
+        crate::settings::set_context_block(pct)?;
+        println!("{}", block_label(pct));
+        return Ok(());
+    }
+    if let Some(prefix) = a.allow {
+        let sessions = crate::live::load_sessions(true);
+        let s = find_session(&sessions, Some(&prefix), None, &[])?;
+        let action = crate::act::Action::new(crate::act::Kind::Setting, "context block").detail(format!("allow {}", s.id));
+        crate::act::run(&action, || allow(&allowed_dir(), &s.id))?;
+        println!("Session {} can keep working past the context block until its next compact.", &s.id[..s.id.len().min(8)]);
         return Ok(());
     }
 
@@ -62,6 +79,7 @@ pub fn run(a: ContextArgs) -> anyhow::Result<()> {
                 "context_pct": ctx.map(|c| (c.used_ratio() * 1000.0).round() / 10.0),
                 "context_estimated": ctx.map(|c| c.estimated),
                 "warn_pct": warn,
+                "block_pct": crate::settings::context_block(),
             });
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
@@ -81,9 +99,26 @@ pub fn run(a: ContextArgs) -> anyhow::Result<()> {
             }
             println!("Tokens used: {} (main agent and subagents)", fmt_tokens(session.total_tokens().total()));
             println!("{}", warning_label(warn));
+            println!("{}", block_label(crate::settings::context_block()));
         }
     }
     Ok(())
+}
+
+fn parse_pct(text: &str) -> anyhow::Result<Option<u32>> {
+    Ok(match text {
+        "off" | "0" => None,
+        n => Some(n.trim_end_matches('%').parse::<u32>().ok().filter(|p| (1..=100).contains(p)).ok_or_else(|| {
+            anyhow::anyhow!("expected a percent from 1 to 100, or `off`, got {n:?}")
+        })?),
+    })
+}
+
+fn block_label(pct: Option<u32>) -> String {
+    match pct {
+        Some(p) => format!("Handoff required at {p}%: other tool calls are refused (`jazari watch context --block <pct|off>`)."),
+        None => "Handoff block is off (`jazari watch context --block 90` turns it on).".into(),
+    }
 }
 
 fn warning_label(pct: Option<u32>) -> String {
@@ -158,10 +193,7 @@ fn hook() -> Option<String> {
     // Only these events let a hook add text to the session's context.
     let event = raw["hook_event_name"].as_str().filter(|e| matches!(*e, "UserPromptSubmit" | "PostToolUse")).unwrap_or("UserPromptSubmit");
     let id = raw["session_id"].as_str().filter(|id| !id.is_empty() && !id.contains(['/', '\\', '.']))?;
-    let snapshot = crate::statusline::load(&crate::statusline::status_dir().join(format!("{id}.json")));
-    let tail = raw["transcript_path"].as_str().and_then(|p| last_context(Path::new(p)));
-    let ctx = fresher_context(snapshot.as_ref(), tail.as_ref())?;
-    let pct = ctx.used_ratio() * 100.0;
+    let pct = session_pct(&raw, id)?;
 
     let dir = warned_dir();
     let marker = dir.join(id);
@@ -179,11 +211,169 @@ fn hook() -> Option<String> {
         json!({
             "hookSpecificOutput": {
                 "hookEventName": event,
-                "additionalContext": crate::handoff::context_note(pct, &exe, crate::handoff::auto_close()),
+                "additionalContext": crate::handoff::context_note(pct, &exe, crate::handoff::auto_close(), crate::settings::context_block()),
             }
         })
         .to_string()
     })
+}
+
+/// How full the session's context is, in percent of the auto-compact point, from the status line
+/// report or the transcript, whichever is newer.
+fn session_pct(raw: &Value, id: &str) -> Option<f64> {
+    let snapshot = crate::statusline::load(&crate::statusline::status_dir().join(format!("{id}.json")));
+    let tail = raw["transcript_path"].as_str().and_then(|p| last_context(Path::new(p)));
+    Some(fresher_context(snapshot.as_ref(), tail.as_ref())?.used_ratio() * 100.0)
+}
+
+// ---------- the block before auto-compact ----------
+
+/// Sessions the user let keep working past the block. A marker is removed once the session's
+/// context drops below the block again, which happens at its next compact or `/clear`.
+fn allowed_dir() -> PathBuf {
+    crate::claude_data_dir().join("context-allowed")
+}
+
+fn allow(dir: &Path, id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!id.is_empty() && !id.contains(['/', '\\', '.']), "not a session id: {id:?}");
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(id), b"")?;
+    Ok(())
+}
+
+/// Tools that only read or ask, so a session can still gather what its handoff needs.
+const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob", "LS", "NotebookRead", "TodoWrite", "ToolSearch", "AskUserQuestion", "Skill"];
+
+/// Whether this tool call may run in a session that is past the block: a read-only tool, the
+/// handoff itself, or a jazari command that only reads (`jazari watch context` and the like).
+fn allowed_past_block(raw: &Value, me: &Path) -> bool {
+    let Some(tool) = raw["tool_name"].as_str() else { return false };
+    if READ_ONLY_TOOLS.contains(&tool) {
+        return true;
+    }
+    if tool != "Bash" {
+        return false;
+    }
+    let Some(cmd) = raw["tool_input"]["command"].as_str() else { return false };
+    is_handoff_as(cmd, me) || is_jazari_read(cmd, me) || is_read_only_git(cmd)
+}
+
+/// `jazari build handoff [flags] <<'EOF'` followed by the prompt and the closing `EOF`. The
+/// delimiter must be quoted, so the shell runs nothing inside the prompt, and nothing may follow
+/// the closing line.
+pub(crate) fn is_handoff(cmd: &str) -> bool {
+    std::env::current_exe().is_ok_and(|me| is_handoff_as(cmd, &me))
+}
+
+/// [`is_handoff`], with `me` as the jazari binary that the command must run.
+fn is_handoff_as(cmd: &str, me: &Path) -> bool {
+    let cmd = cmd.trim_end();
+    let (first, rest) = cmd.split_once('\n').unwrap_or((cmd, ""));
+    let Some((head, delim)) = first.split_once("<<") else { return false };
+    let delim = delim.trim();
+    let quoted = ['\'', '"'].iter().find_map(|q| delim.strip_prefix(*q).and_then(|d| d.strip_suffix(*q)));
+    let Some(word) = quoted.filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) else { return false };
+    handoff_head(head, me) && rest.lines().last().is_some_and(|l| l == word) && rest.lines().filter(|l| *l == word).count() == 1
+}
+
+/// `<jazari> build handoff` with only its own flags, and no other shell syntax.
+fn handoff_head(head: &str, me: &Path) -> bool {
+    if head.contains([';', '&', '|', '`', '$', '<', '>', '(', ')']) {
+        return false;
+    }
+    let Some((_, mut words)) = jazari_words(head, me) else { return false };
+    words.next() == Some("build") && words.next() == Some("handoff") && words.all(|w| matches!(w, "--close" | "--keep" | "--no-launch"))
+}
+
+/// The words after the program, when `cmd` runs this jazari: a bare `jazari` (found on PATH), or a
+/// path, quoted or not, that leads to the same file as `me`. A handoff skips the command checks,
+/// so another program named `jazari` in some folder, or `jazari.sh`, must never count.
+fn jazari_words<'a>(cmd: &'a str, me: &Path) -> Option<(&'a str, std::str::SplitWhitespace<'a>)> {
+    let cmd = cmd.trim_start();
+    let (exe, rest) = match cmd.chars().next()? {
+        q @ ('\'' | '"') => {
+            let end = cmd[1..].find(q)? + 1;
+            (&cmd[1..end], &cmd[end + 1..])
+        }
+        _ => cmd.split_once(char::is_whitespace).unwrap_or((cmd, "")),
+    };
+    is_this_jazari(exe, me).then(|| (exe, rest.split_whitespace()))
+}
+
+fn is_this_jazari(exe: &str, me: &Path) -> bool {
+    let named = |name: &str| name == "jazari" || (cfg!(windows) && name.eq_ignore_ascii_case("jazari.exe"));
+    if !exe.contains(['/', '\\']) {
+        return named(exe);
+    }
+    let path = Path::new(exe);
+    path.file_name().and_then(|n| n.to_str()).is_some_and(named)
+        && matches!((std::fs::canonicalize(path), std::fs::canonicalize(me)), (Ok(a), Ok(b)) if a == b)
+}
+
+/// A jazari command that only reads, or `jazari watch context --allow` (which asks the user
+/// first): `jazari watch context|status|system|say`, with no other shell syntax.
+fn is_jazari_read(cmd: &str, me: &Path) -> bool {
+    if cmd.contains([';', '&', '|', '`', '$', '<', '>', '(', ')', '\n']) {
+        return false;
+    }
+    let Some((_, mut words)) = jazari_words(cmd, me) else { return false };
+    let sub = match words.next() {
+        Some("watch") => words.next(),
+        other => other,
+    };
+    match sub {
+        Some("context") => !cmd.contains("--warn") && !cmd.contains("--block"),
+        Some("status" | "system" | "say") => true,
+        _ => false,
+    }
+}
+
+/// `git status`, `git log` or `git diff` with no shell syntax, so the handoff can list the
+/// changed files.
+fn is_read_only_git(cmd: &str) -> bool {
+    if cmd.contains([';', '&', '|', '`', '$', '<', '>', '(', ')', '\n']) || cmd.contains("--output") {
+        return false;
+    }
+    let mut words = cmd.split_whitespace();
+    words.next() == Some("git") && matches!(words.next(), Some("status" | "log" | "diff"))
+}
+
+/// The guard hook's context check before a tool call: the reason to refuse it, when the
+/// session's context is past the block and the call isn't one a handoff needs. A subagent's call
+/// is never refused, because its context is its own.
+pub fn block_check(raw: &Value, id: &str) -> Option<String> {
+    if from_subagent(raw) {
+        return None;
+    }
+    let block = crate::settings::context_block()?;
+    let pct = session_pct(raw, id)?;
+    let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "jazari".into());
+    block_decision(raw, id, pct, block, &allowed_dir(), &exe)
+}
+
+fn block_decision(raw: &Value, id: &str, pct: f64, block: u32, dir: &Path, exe: &str) -> Option<String> {
+    let marker = dir.join(id);
+    if pct < block as f64 {
+        // Below the block again (a compact or `/clear`): a later crossing blocks again.
+        let _ = std::fs::remove_file(&marker);
+        return None;
+    }
+    if marker.exists() || allowed_past_block(raw, Path::new(exe)) {
+        return None;
+    }
+    let jazari = crate::terminal::sh_quote(exe);
+    Some(format!(
+        "[jazari] Refused: this session's context is {pct:.0}% full, and jazari requires a handoff from \
+         {block}% so no work is lost at auto-compact. Don't retry this call. Do this next:\n\
+         1. Write a handoff prompt that a fresh session can start from with no other context: the goal; \
+         what is done; what is left, with the next step first; decisions and why; files changed; dead \
+         ends; how to check the work.\n\
+         2. Run it as one Bash call: `{jazari} build handoff <<'EOF'`, then the prompt, then a line with \
+         only `EOF`. jazari opens a new session from it.\n\
+         Reading and searching files, `git status`, `git diff`, `git log` and `jazari watch context` \
+         still work. Only if the user told you to keep going in this session, run \
+         `{jazari} watch context --allow {id}`. It asks the user first, and it lasts until the next compact."
+    ))
 }
 
 /// A subagent's tool calls carry the parent's session id and their own `agent_id`. Only the main
@@ -340,5 +530,81 @@ mod tests {
         assert_eq!((got.used, got.model.as_deref()), (150_000, Some("claude-opus-5-5")));
         assert!(last_context(&dir.join("missing.jsonl")).is_none());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn bash(cmd: &str) -> Value {
+        json!({ "session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": { "command": cmd } })
+    }
+
+    #[test]
+    fn only_a_quoted_heredoc_handoff_counts_as_the_handoff() {
+        let dir = std::env::temp_dir().join(format!("jazari-me-{}", std::process::id())).join("my tools");
+        std::fs::create_dir_all(&dir).unwrap();
+        let me = dir.join("jazari");
+        std::fs::write(&me, b"").unwrap();
+        let quoted = format!("'{}' build handoff --keep <<\"END_1\"\nhi\nEND_1\n", me.display());
+        assert!(is_handoff_as("jazari build handoff <<'EOF'\nGoal: x\nrun `rm -rf /` later\nEOF", &me));
+        assert!(is_handoff_as(&quoted, &me), "{quoted}");
+        let other = dir.parent().unwrap().join("jazari");
+        std::fs::write(&other, b"").unwrap();
+        let elsewhere = format!("{} build handoff <<'EOF'\nx\nEOF", other.display());
+        for bad in [
+            "jazari build handoff <<EOF\n$(touch /tmp/x)\nEOF",           // unquoted: the shell expands it
+            "jazari build handoff <<'EOF'\nhi\nEOF\nrm -rf ~",           // a command after the prompt
+            "jazari build handoff <<'EOF'\nEOF\nmore\nEOF",              // the delimiter twice
+            "jazari build handoff; rm x <<'EOF'\nhi\nEOF",               // shell syntax in the first line
+            "jazari build handoff --session other <<'EOF'\nhi\nEOF",     // another session's handoff
+            "evil build handoff <<'EOF'\nhi\nEOF",
+            "jazari build handoff --file p.md",
+            "./jazari.sh build handoff <<'EOF'\nx\nEOF",                 // another program, named like jazari
+            "jazari.sh build handoff <<'EOF'\nx\nEOF",
+            "/tmp/x/jazari build handoff <<'EOF'\nx\nEOF",               // a jazari that isn't this binary
+            elsewhere.as_str(),
+        ] {
+            assert!(!is_handoff_as(bad, &me), "{bad}");
+        }
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn past_the_block_only_reading_and_the_handoff_run() {
+        let dir = std::env::temp_dir().join(format!("jazari-allowed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let edit = json!({ "tool_name": "Edit", "tool_input": { "file_path": "/w/a.rs" } });
+        let read = json!({ "tool_name": "Read", "tool_input": { "file_path": "/w/a.rs" } });
+        let reason = block_decision(&edit, "s1", 91.0, 90, &dir, "/opt/jazari").unwrap();
+        assert!(reason.contains("91% full") && reason.contains("Don't retry this call"), "{reason}");
+        assert!(reason.contains("`/opt/jazari build handoff <<'EOF'`"), "the next step is spelled out: {reason}");
+        assert!(reason.contains("`/opt/jazari watch context --allow s1`"), "{reason}");
+        assert_eq!(block_decision(&edit, "s1", 89.9, 90, &dir, "/opt/jazari"), None, "below the block");
+        assert_eq!(block_decision(&read, "s1", 99.0, 90, &dir, "/opt/jazari"), None);
+        for ok in ["jazari build handoff <<'EOF'\nhi\nEOF", "jazari watch context", "git status", "git diff --stat"] {
+            assert_eq!(block_decision(&bash(ok), "s1", 95.0, 90, &dir, "jazari"), None, "{ok}");
+        }
+        assert_eq!(block_decision(&bash("jazari watch context --allow s1"), "s1", 95.0, 90, &dir, "jazari"), None);
+        assert!(block_decision(&bash("./jazari.sh watch context"), "s1", 95.0, 90, &dir, "jazari").is_some());
+        for no in ["cargo build", "jazari watch context --block off", "git commit -m x", "git diff --output=x", "git status; rm x", "jazari watch clean --run"] {
+            assert!(block_decision(&bash(no), "s1", 95.0, 90, &dir, "jazari").is_some(), "{no}");
+        }
+    }
+
+    #[test]
+    fn allow_lasts_until_the_context_drops_below_the_block() {
+        let dir = std::env::temp_dir().join(format!("jazari-allow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let edit = json!({ "tool_name": "Edit", "tool_input": { "file_path": "/w/a.rs" } });
+        allow(&dir, "s1").unwrap();
+        assert_eq!(block_decision(&edit, "s1", 93.0, 90, &dir, "jazari"), None, "allowed");
+        assert!(block_decision(&edit, "s2", 93.0, 90, &dir, "jazari").is_some(), "only that session");
+        assert_eq!(block_decision(&edit, "s1", 20.0, 90, &dir, "jazari"), None, "after a compact");
+        assert!(block_decision(&edit, "s1", 93.0, 90, &dir, "jazari").is_some(), "the next crossing blocks again");
+        assert!(allow(&dir, "../x").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_subagent_is_never_blocked() {
+        let raw = json!({ "session_id": "s1", "agent_id": "a1", "tool_name": "Edit" });
+        assert_eq!(block_check(&raw, "s1"), None);
     }
 }

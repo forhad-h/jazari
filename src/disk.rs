@@ -382,11 +382,19 @@ pub fn hook() -> Option<String> {
         let (note, no) = crate::pressure::hook(&raw, event, id);
         verdict = with_note(verdict, note);
         refuse = no;
+        // A session past the context block may only read, search and hand off.
+        if refuse.is_none() && event == "PreToolUse" {
+            refuse = crate::context::block_check(&raw, id);
+        }
     }
+    // The handoff's prompt is only stored, never run: its text is not checked as commands, so a
+    // prompt that mentions a command can't stop an unattended handoff with a question.
+    let handoff = raw["tool_name"] == "Bash" && raw["tool_input"]["command"].as_str().is_some_and(crate::context::is_handoff);
     // A jazari command that acts, or an edit to jazari's own files, waits for the user's yes first.
-    let ask = if event == "PreToolUse" { crate::act::hook_check(&raw) } else { None };
+    let ask = if event == "PreToolUse" && !handoff { crate::act::hook_check(&raw) } else { None };
     respond(event, verdict, refuse, |note| match ask {
         Some(reason) => Some(crate::act::ask_json(&reason, note)),
+        None if handoff => None,
         None => crate::risk::hook(&raw, id, note),
     })
     .map(|v| v.to_string())
