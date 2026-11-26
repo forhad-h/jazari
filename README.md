@@ -301,8 +301,9 @@ from your phone. It is off until you set it up, and nothing is sent anywhere bef
    - Elsewhere, set `JAZARI_TELEGRAM_TOKEN`.
 3. Pair your chat: `jazari build telegram pair` shows a one-time code of 10 letters and digits,
    such as `ABCDE-FGHJK`. Send that code to the bot in a private chat within 10 minutes. Case,
-   spaces and the dash do not matter. Each chat gets one try. After a wrong code, the bot ignores
-   that chat until you pair again, and the terminal tells you. From then on, the bot obeys
+   spaces and the dash do not matter. Each chat gets one try. Messages that are not shaped like a
+   code, such as `/start`, do not count. After a wrong code, the bot ignores that chat until you
+   pair again, and the terminal tells you. From then on, the bot obeys
    only the paired chat. Every other chat is ignored and gets no reply.
 4. Start the bridge: `jazari build bridge` keeps running until you stop it, so run it in tmux or a
    spare terminal.

@@ -349,9 +349,16 @@ fn normal_code(text: &str) -> String {
     text.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
 }
 
+/// Whether a sent text, after [`normal_code`], has the shape of a pairing code. Only such text
+/// counts as a guess, so `/start` or a greeting doesn't use up a chat's one try.
+fn looks_like_code(normal: &str) -> bool {
+    normal.len() == CODE_LEN && normal.bytes().all(|b| CODE_ALPHABET.contains(&b))
+}
+
 /// Waits for `code` in a private chat and returns that chat's id. Each chat gets one guess: after
 /// a wrong code, that chat is ignored until the window ends. Wrong codes from all chats together
-/// count against [`PAIR_TRIES`]. `note` tells the founder about each wrong code.
+/// count against [`PAIR_TRIES`]. `note` tells the founder about each wrong code. Text that isn't
+/// shaped like a code isn't a guess: the chat gets one hint, and the text is ignored.
 pub fn wait_for_code<T: Transport>(
     bot: &Bot<T>,
     code: &str,
@@ -362,6 +369,7 @@ pub fn wait_for_code<T: Transport>(
 ) -> anyhow::Result<(i64, Option<i64>)> {
     let want = normal_code(code);
     let mut guessed = std::collections::HashSet::new();
+    let mut hinted = std::collections::HashSet::new();
     while now() < deadline {
         let (updates, next) = bot.updates(offset, POLL_SECS)?;
         offset = next.or(offset);
@@ -369,8 +377,15 @@ pub fn wait_for_code<T: Transport>(
             if guessed.contains(&u.chat_id) {
                 continue;
             }
-            if normal_code(&u.text) == want {
+            let sent = normal_code(&u.text);
+            if sent == want {
                 return Ok((u.chat_id, offset));
+            }
+            if !looks_like_code(&sent) {
+                if hinted.insert(u.chat_id) {
+                    let _ = bot.send(u.chat_id, "Send the 10-character code shown in your terminal.");
+                }
+                continue;
             }
             guessed.insert(u.chat_id);
             let wrong = guessed.len() as u32;
@@ -637,7 +652,7 @@ mod tests {
     #[test]
     fn pairing_takes_the_code_from_a_private_chat_only() {
         let fake = Fake::default();
-        fake.replies.borrow_mut().extend([json!([msg(1, -5, "group", "ABCDE-FGHJK"), msg(2, 77, "private", "hello")]), json!([msg(3, 42, "private", " abcde fghjk ")])]);
+        fake.replies.borrow_mut().extend([json!([msg(1, -5, "group", "ABCDE-FGHJK"), msg(2, 77, "private", "AAAAA-AAAAA")]), json!([msg(3, 42, "private", " abcde fghjk ")])]);
         let bot = Bot { transport: fake };
         let mut notes = Vec::new();
         assert_eq!(wait_for_code(&bot, "ABCDE-FGHJK", None, f64::MAX, || 0.0, &mut |n| notes.push(n.to_string())).unwrap(), (42, Some(4)));
@@ -648,6 +663,23 @@ mod tests {
         let fake = Fake::default();
         fake.replies.borrow_mut().extend([json!([msg(1, 42, "private", "AAAAA-AAAAA"), msg(2, 42, "private", "ABCDE-FGHJK")]), json!([msg(3, 43, "private", "ABCDE-FGHJK")])]);
         assert_eq!(wait_for_code(&Bot { transport: fake }, "ABCDE-FGHJK", None, f64::MAX, || 0.0, &mut |_| {}).unwrap(), (43, Some(4)));
+
+        // /start and chat aren't guesses: the chat gets one hint and can still send the code.
+        let fake = Fake::default();
+        fake.replies.borrow_mut().extend([json!([msg(1, 42, "private", "/start"), msg(2, 42, "private", "hi")]), json!({}), json!([msg(3, 42, "private", "ABCDE-FGHJK")])]);
+        let bot = Bot { transport: fake };
+        let mut notes = 0;
+        assert_eq!(wait_for_code(&bot, "ABCDE-FGHJK", None, f64::MAX, || 0.0, &mut |_| notes += 1).unwrap(), (42, Some(4)));
+        assert_eq!(notes, 0, "nothing was a wrong code");
+        let hints = bot.transport.calls.borrow().iter().filter(|(m, _)| m == "sendMessage").count();
+        assert_eq!(hints, 1, "one hint per chat");
+
+        // Chat from 6 chats doesn't end the window. (Each hint takes one fake reply.)
+        let fake = Fake::default();
+        fake.replies.borrow_mut().push(json!((0..6).map(|i| msg(i, 50 + i, "private", "hello")).collect::<Vec<_>>()));
+        fake.replies.borrow_mut().extend((0..6).map(|_| json!({})));
+        fake.replies.borrow_mut().push(json!([msg(6, 42, "private", "abcdefghjk")]));
+        assert_eq!(wait_for_code(&Bot { transport: fake }, "ABCDE-FGHJK", None, f64::MAX, || 0.0, &mut |_| {}).unwrap(), (42, Some(7)));
 
         // Repeats from one chat don't count. Wrong codes from 5 chats end the window.
         let fake = Fake::default();
@@ -672,6 +704,8 @@ mod tests {
         let unique: std::collections::HashSet<_> = codes.iter().collect();
         assert_eq!(unique.len(), codes.len(), "50 random codes are all different");
         assert_eq!(normal_code(" abcde-fghjk\n"), "ABCDEFGHJK");
+        assert!(looks_like_code("ABCDEFGHJK"));
+        assert!(!looks_like_code("START") && !looks_like_code("ABCDEFGHJ0") && !looks_like_code("ABCDEFGHJKM"));
     }
 
     #[test]
