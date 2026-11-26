@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.23.0 - 2026-11-26
 
 - `marsad jazari`: pair a Telegram chat with a one-time code, then check, message, stop and pause sessions from it
 - Sessions' `marsad say --attention` notes reach the paired chat; `marsad jazari notify` sends your own
