@@ -7,11 +7,14 @@
 
 mod audit;
 mod bridge;
+mod cadence;
 mod card;
 mod evals;
 mod git;
 mod limits;
+mod llm;
 mod personas;
+mod profile;
 mod sandbox;
 pub mod secrets;
 mod store;
@@ -91,7 +94,29 @@ pub enum JazariCmd {
         name: String,
         /// The idea, in your own words.
         idea: Vec<String>,
+        /// Keep improving it after your tasks are done (see `mode`).
+        #[arg(long)]
+        autonomous: bool,
     },
+    /// Set how a product works: `normal` stops when your tasks are done; `autonomous` keeps
+    /// improving it (bugs, security, UX, performance, docs, next improvements).
+    Mode { product: String, mode: String },
+    /// Tell the team something about how you like the work done; jazari learns it after a few times.
+    Feedback { product: String, text: Vec<String> },
+    /// Set a preference now: a product (or `all`), an area (design, copy, code, product, process,
+    /// communication) and the rule.
+    Prefer { product: String, area: String, rule: Vec<String> },
+    /// Drop a preference (it stays in the history).
+    Forget { id: i64 },
+    /// List what jazari has learned about how you like the work done.
+    Prefs {
+        #[arg(long)]
+        product: Option<String>,
+    },
+    /// Accept a proposal from jazari (an automatic check for a recurring problem).
+    Accept { id: i64 },
+    /// Ignore a proposal from jazari.
+    Ignore { id: i64 },
     /// Give an existing product a new idea for the Chief of Staff to plan.
     Idea { product: String, idea: Vec<String> },
     /// Answer a blocked task's question; it goes back in the queue with your answer.
@@ -278,9 +303,41 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             }
             Err(e) => anyhow::bail!("the audit record was changed: {e}"),
         },
-        JazariCmd::New { name, idea } => {
-            let (repo, id) = create_product(&open()?, &name, &idea.join(" "))?;
+        JazariCmd::New { name, idea, autonomous } => {
+            let store = open()?;
+            let (repo, id) = create_product(&store, &name, &idea.join(" "))?;
+            if autonomous {
+                store.set_mode(&name, "autonomous")?;
+            }
             println!("Created {name} in {}. Task #{id}: the Chief of Staff turns the idea into a plan.", repo.display());
+            Ok(())
+        }
+        JazariCmd::Mode { product, mode } => {
+            println!("{}", set_mode(&open()?, &product, &mode)?);
+            Ok(())
+        }
+        JazariCmd::Feedback { product, text } => {
+            println!("{}", feedback(&open()?, &product, &text.join(" "))?);
+            Ok(())
+        }
+        JazariCmd::Prefer { product, area, rule } => {
+            println!("{}", prefer(&open()?, &product, &area, &rule.join(" "))?);
+            Ok(())
+        }
+        JazariCmd::Forget { id } => {
+            println!("{}", forget(&open()?, id)?);
+            Ok(())
+        }
+        JazariCmd::Prefs { product } => {
+            println!("{}", profile::summary(&open()?, product.as_deref())?);
+            Ok(())
+        }
+        JazariCmd::Accept { id } => {
+            println!("{}", proposal(&open()?, id, true)?);
+            Ok(())
+        }
+        JazariCmd::Ignore { id } => {
+            println!("{}", proposal(&open()?, id, false)?);
             Ok(())
         }
         JazariCmd::Idea { product, idea } => {
@@ -289,7 +346,7 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
             Ok(())
         }
         JazariCmd::Answer { task, answer } => {
-            open()?.reply(task, &answer.join(" "), crate::now())?;
+            answer_task(&open()?, task, &answer.join(" "))?;
             println!("Task #{task} is back in the queue with your answer.");
             Ok(())
         }
@@ -345,15 +402,84 @@ const INTAKE: &str = "This is a new idea from the founder. Turn it into a plan t
 3. Return the first milestone's tasks as follow-ups, in build order. Each task is small, concrete and
    testable, has the right role, and has a brief with acceptance criteria.
 If the idea is unclear, make the simplest useful reading, write the assumption in VISION.md, and go on.
+Add a short \"Risks and assumptions\" section to VISION.md: who it is really for, what could make it fail, and
+the cheapest way to test it. If the idea has a serious problem (security, law, users' safety, or it can't work as
+described), don't plan it as asked: return blocked with a needs_founder question that offers a better alternative,
+with the evidence.
 
 The founder's idea:
 ";
 
 pub(crate) fn queue_idea(store: &store::Store, product: &str, idea: &str) -> anyhow::Result<i64> {
     anyhow::ensure!(!idea.trim().is_empty(), "describe the idea");
+    anyhow::ensure!(store.product(product)?.is_some(), "no product called {product}");
+    store.add_signal(product, "idea", idea, crate::now())?;
     let brief = format!("{INTAKE}{}", idea.trim());
     let title = format!("Plan: {}", crate::hook::truncate(idea.lines().next().unwrap_or(idea), 80));
     store.add_task(&store::NewTask { product, role: "chief-of-staff", title: &title, brief: &brief, priority: 100, ..Default::default() }, crate::now())
+}
+
+/// The founder's answer to a task's question. The answer is also a signal for the profile.
+pub(crate) fn answer_task(store: &store::Store, task: i64, answer: &str) -> anyhow::Result<()> {
+    let t = store.reply(task, answer, crate::now())?;
+    store.add_signal(&t.product, "answer", answer, crate::now())?;
+    Ok(())
+}
+
+pub(crate) fn feedback(store: &store::Store, product: &str, text: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(!text.trim().is_empty(), "say what you'd like");
+    anyhow::ensure!(product == "all" || store.product(product)?.is_some(), "no product called {product}");
+    store.add_signal(if product == "all" { "*" } else { product }, "feedback", text, crate::now())?;
+    store.put("last_product", product)?;
+    Ok("Noted. jazari learns it as a preference once you have said it a few times. To make it a rule now, use /prefer.".into())
+}
+
+pub(crate) fn prefer(store: &store::Store, product: &str, area: &str, rule: &str) -> anyhow::Result<String> {
+    let scope = if product == "all" { "*" } else { product };
+    anyhow::ensure!(scope == "*" || store.product(scope)?.is_some(), "no product called {product}");
+    let id = profile::prefer(store, scope, area, rule, crate::now())?;
+    write_profile(store);
+    Ok(format!("📌 Preference #{id} set: {}. The team follows it, and the evaluator checks it.", rule.trim()))
+}
+
+pub(crate) fn forget(store: &store::Store, id: i64) -> anyhow::Result<String> {
+    let p = store.pref(id)?.ok_or_else(|| anyhow::anyhow!("no preference #{id}"))?;
+    store.set_pref_status(id, "retired", crate::now())?;
+    write_profile(store);
+    Ok(format!("Forgot #{id}: {}. It stays in the history.", p.rule))
+}
+
+pub(crate) fn set_mode(store: &store::Store, product: &str, mode: &str) -> anyhow::Result<String> {
+    store.set_mode(product, mode)?;
+    Ok(if mode == "autonomous" {
+        format!("{product} is now autonomous: after your tasks, jazari keeps improving it (bugs, security, UX, performance, docs, next improvements).")
+    } else {
+        format!("{product} is now in normal mode: jazari stops when your tasks are done.")
+    })
+}
+
+/// Accepts or ignores a proposal; an accepted one becomes a task.
+pub(crate) fn proposal(store: &store::Store, id: i64, accept: bool) -> anyhow::Result<String> {
+    let key = format!("proposal:{id}");
+    let v: serde_json::Value = store.get(&key)?.and_then(|t| serde_json::from_str(&t).ok()).ok_or_else(|| anyhow::anyhow!("no open proposal #{id}"))?;
+    store.put(&key, "{}")?;
+    let (Some(product), Some(criterion)) = (v["product"].as_str(), v["criterion"].as_str()) else { anyhow::bail!("no open proposal #{id}") };
+    if !accept {
+        return Ok(format!("Ignored proposal #{id}."));
+    }
+    let brief = format!(
+        "Reviews of this product keep failing the criterion \"{criterion}\". Add an automatic check to company/checks.sh that catches this problem before review (for example a linter rule, a test or a coverage limit). Make the checks pass on the main branch.\n\nAcceptance: the new check fails on an example of the problem and passes on correct code."
+    );
+    let task = store.add_task(&store::NewTask { product, role: "platform-engineer", title: &format!("Add an automatic check: {criterion}"), brief: &brief, priority: 5, ..Default::default() }, crate::now())?;
+    Ok(format!("Queued task #{task}: add an automatic check for \"{criterion}\"."))
+}
+
+/// Writes the profile to `~/.marsad/jazari/FOUNDER.md`.
+fn write_profile(store: &store::Store) {
+    if let Ok(text) = profile::render(store) {
+        let _ = std::fs::create_dir_all(dir());
+        let _ = std::fs::write(dir().join("FOUNDER.md"), text);
+    }
 }
 
 /// Where new products' repos go: `jazari.products_dir`, or `products` in jazari's data folder
@@ -526,6 +652,13 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
     let ensure = |p: &str, work: &str| sandbox::ensure(p, work);
     let reset = |name: &str| sandbox::reset(name);
     let skills = |work: &std::path::Path| write_skills(work);
+    let small = |system: &str, prompt: &str, schema: &str| {
+        llm::claude(&llm::Ask { system, prompt, schema, model: llm::SMALL, effort: "low", timeout: std::time::Duration::from_secs(120) })
+    };
+    let founder_md = dir.join("FOUNDER.md");
+    let profile_file = |text: &str| {
+        let _ = std::fs::write(&founder_md, text);
+    };
     let work = |p: &str| work_dir(p);
     let audit = |kind: &str, data: serde_json::Value| {
         if let Err(e) = audit::append(&audit_path, crate::now(), kind, data) {
@@ -544,6 +677,8 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
         ensure: &ensure,
         reset: &reset,
         skills: &skills,
+        llm: &small,
+        profile_file: &profile_file,
         notify: &tell_founder,
         audit: &audit,
     };
@@ -588,6 +723,21 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_accepted_proposal_becomes_a_task_and_each_proposal_is_used_once() {
+        let store = super::store::Store::memory();
+        store.add_product("shop", "/r", 0.0).unwrap();
+        store.put("proposal:1", r#"{"product":"shop","criterion":"Tests prove the behavior"}"#).unwrap();
+        let said = super::proposal(&store, 1, true).unwrap();
+        let task = store.tasks(Some("shop"), 5).unwrap().remove(0);
+        assert!(said.contains(&format!("#{}", task.id)) && task.role == "platform-engineer" && task.brief.contains("company/checks.sh"));
+        assert!(super::proposal(&store, 1, true).is_err(), "a proposal is used once");
+        assert!(super::set_mode(&store, "shop", "autonomous").unwrap().contains("keeps improving"));
+        assert!(super::feedback(&store, "nope", "x").is_err());
+        assert!(super::feedback(&store, "shop", "shorter sentences").is_ok());
+        assert_eq!(store.pending_signals(5).unwrap()[0].text, "shorter sentences");
+    }
+
     #[test]
     fn the_chosen_skills_are_written_fresh_into_the_work_folder() {
         let work = std::env::temp_dir().join(format!("marsad-jazari-skills-{}", std::process::id()));

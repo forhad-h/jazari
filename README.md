@@ -330,6 +330,10 @@ marsad jazari tasks                                                   # the queu
 marsad jazari answer 12 "Use Twilio"                                  # answer a task's question
 marsad jazari approve 14 / deny 14                                    # decide on a deploy, spend or contact
 marsad jazari personas                                                # the roles workers take
+marsad jazari mode notes autonomous                                   # keep improving it after your tasks (or: normal)
+marsad jazari feedback notes "Keep the screen text short"             # how you like the work; learned after a few times
+marsad jazari prefer all design "Primary buttons are green"           # a preference that applies at once
+marsad jazari prefs / forget 4                                        # what jazari learned about you, or drop a rule
 ```
 
 **Before the first run:** save a long-lived Claude login token for the workers. Run `claude setup-token`,
@@ -415,14 +419,62 @@ command in docs or an unproven security finding. `--skip-evals` overrides the bl
 with the role's prompt version, and if a changed role passes clearly less often than its earlier versions, jazari
 tells you.
 
-**What needs you.** A worker that needs a decision asks a question, and you reply with `/answer`. To deploy,
-spend money or contact real users, it must ask for approval, and Telegram shows ✅ Approve and ❌ Deny buttons.
-No production, payment or outreach credentials ever enter the container. Approved work comes back as runbooks
-for you to run.
+**Two modes, set per product.**
+- **Normal (the default):** jazari does the tasks from your ideas and answers, then stops.
+- **Autonomous:** when your tasks are done, jazari keeps improving the product. The jobs are a bug hunt, a dependency
+  vulnerability check, a red-team attack on the local app, a usability and accessibility audit, a performance check,
+  a docs refresh, and finding the next improvement. Each job runs only when it is due and the code changed since it
+  last ran, so an idle product costs no tokens. Cheaper plans run the jobs less often: for example, the bug hunt runs
+  weekly on Pro, every 2 days on Max 5x and daily on Max 20x.
+
+Use `marsad jazari new <name> <idea> --autonomous`, `marsad jazari mode <product> autonomous|normal`, or
+`/mode` in Telegram.
+
+**What needs you.** Every message jazari sends you is a short card in Easy English:
+1. an icon and a title;
+2. what happened or what is needed;
+3. why;
+4. the options, with what each one changes;
+5. the recommendation;
+6. how to reply.
+
+Options come as buttons. A worker that needs a decision asks this way, and you tap a button or reply with
+`/answer`. To deploy, spend money or contact real users, a worker must ask for approval with ✅ Approve and ❌ Deny
+buttons. No production, payment or outreach credentials ever enter the container. Approved work comes back as
+runbooks for you to run.
+
+**It pushes back.** Workers check your instructions against the threat model, the security rules, the ADRs and user
+data. When an instruction conflicts with them, they ask instead of following it silently. They offer a safer
+alternative with the evidence. You decide, and a choice against the advice is recorded as an ADR with your reason.
+A few choices cross a hard line: shipping a known critical vulnerability, a secret in the code, harm to user data,
+or anything illegal. For those, a button isn't enough; you reply with `/answer <task> override: <your reason>`.
+
+**It learns how you like the work.** Everything you tell jazari is a signal: answers, ideas, `/feedback`, and plain
+messages to the bot. A small batched call turns the signals into short rules, such as "Primary buttons are green".
+- **Learning:** a rule becomes active after you say it 3 times, or 2 times when you are firm ("always", "never").
+  `/prefer` sets one at once.
+- **Using:** each role gets only the rules for its area (a designer gets design rules, a writer gets copy rules), and
+  the evaluator checks them, so you don't have to ask a fourth time.
+- **Changing:** when you go in a new direction twice, the new rule replaces the old one, and the old one stays in the
+  history.
+- **Fading:** a rule you haven't mentioned in 60 days becomes a suggestion, which is followed but not checked.
+- **Refusing:** a request that would weaken quality or security, such as "skip the tests", is never learned as a
+  rule.
+- **Telling you:** every change comes as a card with `/forget <id>` to undo it. The whole profile is in
+  `~/.marsad/jazari/FOUNDER.md`, and `/prefs` lists it.
+
+**It learns from its own rework.** When a branch needed fixes before it merged, jazari draws a one-line lesson
+from what the gates found. The next workers get it, and every 5 lessons a task writes them into the product's
+`company/LEARNINGS/`. When the same review criterion fails 3 times in two weeks, jazari proposes an automatic check
+in `company/checks.sh`, which is the cheapest lasting fix. You accept it with one tap.
+
+**Skills.** Workers get marsad's skills in their Claude folder. The default is Easy English, with its checker.
+`"jazari": {"skills": ["easy-english", "ae-bangla-copy"]}` in `settings.json` picks others, and `["all"]` gives
+every skill in the library. The checker's report on changed docs goes to the evaluator as evidence.
 
 **The container.** The first task builds the worker image (`jazari-worker:2`: Node.js, Python 3, a C toolchain, git, ripgrep and shellcheck; workers install anything else in user space) and creates the product's container
 (`jazari-<name>`). The container:
-- sees only the product's work folder (the clones jazari makes), mounted at the same path as on your Mac;
+- sees only the product's work folder (the clones jazari makes), mounted at `/work`;
 - runs as a normal user, with no Linux capabilities;
 - is limited to 2 CPUs, 2 GB of memory and 512 processes;
 - is restarted before every task and every check run, so nothing a worker starts outlives it.

@@ -128,6 +128,10 @@ pub struct Deps<'a> {
     pub reset: &'a dyn Fn(&str) -> anyhow::Result<()>,
     /// Writes the skills the workers get into the product's work folder (`.skills/`).
     pub skills: &'a dyn Fn(&Path) -> anyhow::Result<()>,
+    /// A small Claude call on the host (system, prompt, schema), for learning and lessons.
+    pub llm: super::profile::Llm<'a>,
+    /// Writes the founder's profile where they can read it.
+    pub profile_file: &'a dyn Fn(&str),
     pub notify: &'a dyn Fn(&str, &[Button]),
     pub audit: &'a dyn Fn(&str, serde_json::Value),
 }
@@ -420,6 +424,7 @@ fn merge(d: &Deps, task: &Task, branch: &str, head: &str, title: &str) -> anyhow
             d.store.land_branch(branch)?;
             (d.audit)("merge", json!({ "task": task.id, "branch": branch, "approved": head, "base": base, "commit": sha }));
             say(d, &Card::new("🚀", format!("Merged: {title}"), format!("It is now on {base}.")).detail(format!("{branch} · {}", &sha[..sha.len().min(10)])));
+            learn_from_rework(d, task, branch);
             Ok(Merged::Done)
         }
         Stage::Conflict => {
@@ -484,10 +489,18 @@ pub fn tick(d: &Deps) -> anyhow::Result<Tick> {
         announce_sleep(d, until, &reason, &key);
         return Ok(Tick::Sleeping { until });
     }
+    learn(d, now);
     // One product that can't be set up doesn't stop the others.
     let mut held = held(d, now)?;
     loop {
-        let Some(task) = d.store.next_task_except(&held)? else { return Ok(Tick::Idle) };
+        let Some(task) = d.store.next_task_except(&held)? else {
+            // The founder's tasks are done. Products in autonomous mode get their next improvement
+            // job; normal ones stop here.
+            if improve(d, &held, now)? {
+                continue;
+            }
+            return Ok(Tick::Idle);
+        };
         match run_task(d, &task, now) {
             Ok(t) => return Ok(t),
             Err(e) => {
@@ -502,6 +515,52 @@ pub fn tick(d: &Deps) -> anyhow::Result<Tick> {
             }
         }
     }
+}
+
+/// Turns the founder's new signals into preferences and lets old ones fade. Learning never stops
+/// the work: a failed call is tried again with the next tick.
+fn learn(d: &Deps, now: f64) {
+    match super::profile::learn(d.store, d.llm, now) {
+        Ok(l) => {
+            let changed = !l.cards.is_empty();
+            for c in &l.cards {
+                say(d, c);
+            }
+            if changed && let Ok(text) = super::profile::render(d.store) {
+                (d.profile_file)(&text);
+            }
+        }
+        Err(e) => (d.audit)("learn.failed", json!({ "why": e.to_string() })),
+    }
+    let day = (now / 86_400.0).floor().to_string();
+    if d.store.get("decay_day").ok().flatten().as_deref() != Some(day.as_str()) {
+        let _ = d.store.put("decay_day", &day);
+        if let Ok(Some(card)) = super::profile::decay(d.store, now) {
+            say(d, &card);
+            if let Ok(text) = super::profile::render(d.store) {
+                (d.profile_file)(&text);
+            }
+        }
+    }
+}
+
+/// Queues the next improvement job of an idle product in autonomous mode. True when it queued one.
+fn improve(d: &Deps, held: &[String], now: f64) -> anyhow::Result<bool> {
+    for p in d.store.products()?.into_iter().filter(|p| p.mode == "autonomous" && !held.contains(&p.name)) {
+        if d.store.busy(&p.name)? {
+            continue;
+        }
+        let repo = PathBuf::from(&p.repo);
+        let Ok(base) = d.repo.default_branch(&repo) else { continue };
+        let Some(head) = d.repo.head(&repo, &base) else { continue };
+        let Some(job) = super::cadence::due(d.store, &p.name, &head, d.profile.plan, now) else { continue };
+        super::cadence::mark(d.store, &p.name, job, &head, now)?;
+        let brief = format!("{}\n\nThis is a regular improvement job: the product is in autonomous mode, and the founder's own tasks are done.", job.brief);
+        let id = d.store.add_task(&NewTask { product: &p.name, role: job.role, title: job.title, brief: &brief, priority: -10, ..Default::default() }, now)?;
+        (d.audit)("improve", json!({ "product": p.name, "job": job.key, "task": id }));
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Runs one task. An error means its product couldn't be set up; nothing was spent.
@@ -535,9 +594,13 @@ fn run_task(d: &Deps, task: &Task, now: f64) -> anyhow::Result<Tick> {
     let persona = personas::find(&task.role);
     let system_prompt = if task.kind == "eval" {
         let builder = personas::find(&owner(task));
-        format!("{}\n# How to score\n\n{}\n\n# The rubric for the {}\n\n{}\n", persona.system_prompt(), personas::scoring_rules(), builder.title, builder.rubric())
+        let founder = super::profile::rubric_criteria(d.store, &task.product, &builder.rubric)?;
+        format!("{}\n# How to score\n\n{}\n\n# The rubric for the {}\n\n{}\n{founder}", persona.system_prompt(), personas::scoring_rules(), builder.title, builder.rubric())
     } else {
-        persona.system_prompt()
+        // What the founder taught the team and what earlier rework taught it, for this role only.
+        let taught = super::profile::prompt_section(d.store, &task.product, &persona.rubric)?;
+        let lessons = if judge { String::new() } else { super::profile::lessons_section(d.store, &task.product, &persona.rubric)? };
+        format!("{}{taught}{lessons}", persona.system_prompt())
     };
     let workdir = super::sandbox::inside(&item);
     let setup = Setup {
@@ -601,6 +664,46 @@ fn fix(d: &Deps, task: &Task, branch: &str, title: &str, findings: &str) -> anyh
         say(d, &card);
     }
     Ok(id)
+}
+
+/// When a branch needed fixes before it merged, draws a lesson from what the gates found, and
+/// queues a task that writes the product's lessons into its repo once enough have gathered.
+fn learn_from_rework(d: &Deps, task: &Task, branch: &str) {
+    if task.round == 0 {
+        return;
+    }
+    let findings: Vec<String> = d
+        .store
+        .tasks(Some(&task.product), 500)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.branch.as_deref() == Some(branch) && t.title.starts_with("Fix: "))
+        .map(|t| t.brief.split("\n\nThe original spec:").next().unwrap_or("").to_string())
+        .collect();
+    let now = (d.now)();
+    if let Err(e) = super::profile::lesson_from_rework(d.store, d.llm, &task.product, task.id, &task.spec, &findings, now) {
+        (d.audit)("lesson.failed", json!({ "task": task.id, "why": e.to_string() }));
+    }
+    if let Ok(Some((brief, ids))) = super::profile::lessons_to_record(d.store, &task.product) {
+        let new = NewTask { product: &task.product, role: "technical-writer", title: "Record the team's lessons", brief: &brief, priority: -5, ..Default::default() };
+        if d.store.add_task(&new, now).is_ok() {
+            let _ = d.store.lessons_recorded(&ids);
+        }
+    }
+}
+
+/// When a criterion keeps failing, proposes an automatic check for it, once.
+fn propose_check(d: &Deps, product: &str) -> anyhow::Result<()> {
+    let now = (d.now)();
+    let Some((criterion, n)) = super::profile::recurring(d.store, product, now)? else { return Ok(()) };
+    let id: i64 = d.store.get("proposal_seq")?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
+    d.store.put("proposal_seq", &id.to_string())?;
+    d.store.put(&format!("proposal:{id}"), &serde_json::to_string(&json!({ "product": product, "criterion": criterion }))?)?;
+    let card = Card::new("🔁", format!("\"{criterion}\" keeps failing"), format!("Reviews of {product} failed it {n} times in two weeks."))
+        .why("An automatic check in company/checks.sh would catch it before review. Then the team stops repeating it, and reviews cost less.")
+        .actions(vec![("✅ Add a check".into(), format!("/accept {id}")), ("Ignore".into(), format!("/ignore {id}"))]);
+    say(d, &card);
+    Ok(())
 }
 
 /// Records a judgment of the builder's work, tagged with the builder's current prompt version.
@@ -679,6 +782,9 @@ fn record(d: &Deps, task: &Task, o: &Outcome, gates: Option<Gates>, docs: bool, 
                     let approved = o.verdict.as_deref() == Some("approve");
                     let failed = o.failed.join("; ");
                     judged(d, task, &task.kind, approved, o.score, &failed)?;
+                    if !approved {
+                        propose_check(d, &task.product)?;
+                    }
                     if task.kind == "eval" {
                         maybe_upgrade(d, &owner)?;
                         let version = super::evals::version(&personas::find(&owner));
@@ -980,6 +1086,8 @@ mod tests {
                 Ok(())
             };
             let skills = |_w: &Path| Ok(());
+            let llm = |_s: &str, _p: &str, _sc: &str| Ok(json!({"items": [], "lesson": "Write the test first.", "area": "code"}));
+            let profile_file = |_t: &str| {};
             let notify = |t: &str, b: &[Button]| self.sent.borrow_mut().push((t.to_string(), b.len()));
             let audit = |k: &str, _v: serde_json::Value| self.audit.borrow_mut().push(k.to_string());
             let d = Deps {
@@ -993,6 +1101,8 @@ mod tests {
                 ensure: &ensure,
                 reset: &reset,
                 skills: &skills,
+                llm: &llm,
+                profile_file: &profile_file,
                 notify: &notify,
                 audit: &audit,
             };
@@ -1089,6 +1199,70 @@ mod tests {
         assert_eq!(shell("#!/bin/sh\n"), "sh");
         assert_eq!(shell("pytest -q"), "sh");
         assert_eq!(shell("# not bash\n"), "sh");
+    }
+
+    #[test]
+    fn a_normal_product_stops_when_its_tasks_are_done_and_an_autonomous_one_keeps_improving() {
+        let w = World::new(vec![done(json!({}))]);
+        w.runner.no_bundle.set(true);
+        w.repo.heads.borrow_mut().insert("main".into(), "base0".into());
+        assert_eq!(w.tick(), Tick::Idle, "normal mode: nothing to do, nothing queued");
+        assert!(w.store.tasks(None, 10).unwrap().is_empty());
+        w.store.set_mode("shop", "autonomous").unwrap();
+        let Tick::Ran { task, .. } = w.tick() else { panic!("an improvement job runs") };
+        let t = w.store.task(task).unwrap().unwrap();
+        assert_eq!((t.role.as_str(), t.title.as_str()), ("bug-hunter", "Hunt for bugs"));
+        assert!(t.brief.contains("autonomous mode"));
+        // The next job is due too; it is queued after this one settles, one at a time.
+        *w.runner.runs.borrow_mut() = vec![done(json!({}))];
+        let Tick::Ran { task: next, .. } = w.tick() else { panic!() };
+        assert_eq!(w.store.task(next).unwrap().unwrap().title, "Check dependencies for known vulnerabilities");
+    }
+
+    #[test]
+    fn the_founder_s_preferences_and_the_team_s_lessons_reach_the_roles_they_concern() {
+        let w = World::new(vec![done(json!({})), approve()]);
+        crate::jazari::profile::prefer(&w.store, "*", "copy", "Keep UI sentences short", 0.0).unwrap();
+        crate::jazari::profile::prefer(&w.store, "*", "design", "Primary buttons are green", 0.0).unwrap();
+        w.store.add_lesson("shop", "code", "Build the lockfile on the supported Python.", None, 0.0).unwrap();
+        w.add("Build login");
+        w.tick();
+        let builder = w.runner.of("claude")[0].command.iter().position(|a| a == "--append-system-prompt").map(|i| w.runner.of("claude")[0].command[i + 1].clone()).unwrap();
+        assert!(builder.contains("# The founder's preferences") && builder.contains("Keep UI sentences short"));
+        assert!(!builder.contains("Primary buttons are green"), "a backend engineer doesn't get design rules");
+        assert!(builder.contains("Build the lockfile on the supported Python."));
+        w.tick();
+        let judge = w.runner.of("claude")[1].command.iter().position(|a| a == "--append-system-prompt").map(|i| w.runner.of("claude")[1].command[i + 1].clone()).unwrap();
+        assert!(judge.contains("- [critical] Founder preference (copy): Keep UI sentences short"), "the evaluator enforces it");
+    }
+
+    #[test]
+    fn rework_leaves_a_lesson_and_a_recurring_failure_is_proposed_as_a_check() {
+        let w = World::new(vec![approve()]);
+        w.repo.heads.borrow_mut().insert("jazari/task-1".into(), "h".into());
+        *w.repo.files.borrow_mut() = vec!["company/VISION.md".into()];
+        let fix = NewTask { product: "shop", role: "engineer", title: "Fix: Login", brief: "The evaluator asked for changes:\nNo test.\n\nThe original spec:\nS", branch: Some("jazari/task-1"), ..Default::default() };
+        w.store.add_task(&fix, 0.0).unwrap();
+        let mut t = judge_task("eval", "Evaluate: Login", "h");
+        t.round = 1;
+        let id = w.store.add_task(&NewTask { priority: 90, ..t }, 0.0).unwrap();
+        w.store.set_status(1, "done", None, None, 0.0).unwrap();
+        assert_eq!(w.tick(), Tick::Ran { task: id, kind: Kind::Done });
+        assert_eq!(w.store.lessons("shop", 5).unwrap()[0].lesson, "Write the test first.", "a merge after rework leaves a lesson");
+        let w = World::new(vec![]);
+        w.repo.heads.borrow_mut().insert("jazari/task-1".into(), "h".into());
+        for i in 0..3 {
+            *w.runner.runs.borrow_mut() = vec![done(json!({"verdict": "changes", "summary": "x", "criteria": [{"name": "Tests prove the behavior", "pass": false}]}))];
+            let t = judge_task("eval", &format!("Evaluate: F{i}"), "h");
+            w.store.add_task(&NewTask { priority: 99, ..t }, 0.0).unwrap();
+            w.tick();
+            for t in w.store.tasks(None, 50).unwrap().into_iter().filter(|t| t.status == "queued") {
+                w.store.set_status(t.id, "done", None, None, 0.0).unwrap();
+            }
+        }
+        let (text, buttons) = w.sent.borrow().iter().find(|(t, _)| t.starts_with("🔁")).cloned().expect("a proposal");
+        assert!(text.contains("\"Tests prove the behavior\" keeps failing") && buttons == 2, "{text}");
+        assert!(w.store.get("proposal:1").unwrap().unwrap().contains("Tests prove the behavior"));
     }
 
     #[test]

@@ -51,6 +51,36 @@ CREATE TABLE IF NOT EXISTS evals (
     version TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS evals_role ON evals(role, at);
+CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY,
+    product TEXT NOT NULL,
+    source TEXT NOT NULL,
+    text TEXT NOT NULL,
+    at REAL NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS prefs (
+    id INTEGER PRIMARY KEY,
+    product TEXT NOT NULL,
+    area TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    explicit INTEGER NOT NULL DEFAULT 0,
+    count INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL,
+    supersedes INTEGER,
+    created REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    note TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS lessons (
+    id INTEGER PRIMARY KEY,
+    product TEXT NOT NULL,
+    area TEXT NOT NULL,
+    lesson TEXT NOT NULL,
+    task INTEGER,
+    at REAL NOT NULL,
+    recorded INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -80,7 +110,11 @@ pub const STATUSES: [&str; 5] = ["queued", "running", "done", "blocked", "failed
 pub struct Product {
     pub name: String,
     pub repo: String,
+    /// `normal`: stop when the founder's tasks are done. `autonomous`: keep improving it.
+    pub mode: String,
 }
+
+pub const MODES: [&str; 2] = ["normal", "autonomous"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Task {
@@ -130,6 +164,64 @@ pub struct NewTask<'a> {
     /// Empty: the brief is the spec.
     pub spec: &'a str,
     pub head: Option<&'a str>,
+}
+
+/// Something the founder said that might hold a preference.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Signal {
+    pub id: i64,
+    pub product: String,
+    pub source: String,
+    pub text: String,
+}
+
+/// A preference of the founder's.
+/// - `candidate`: seen, not yet enforced.
+/// - `active`: enforced by the evaluator.
+/// - `suggested`: not confirmed for a while, so followed but not enforced.
+/// - `retired`: replaced or forgotten.
+/// - `refused`: it would weaken quality or security, so it is never learned.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pref {
+    pub id: i64,
+    /// A product name, or `*` for every product.
+    pub product: String,
+    pub area: String,
+    pub rule: String,
+    pub explicit: bool,
+    pub count: i64,
+    pub status: String,
+    pub supersedes: Option<i64>,
+    pub last_seen: f64,
+    pub note: String,
+}
+
+pub const PREF_STATUSES: [&str; 5] = ["candidate", "active", "suggested", "retired", "refused"];
+
+fn pref_from(r: &rusqlite::Row) -> rusqlite::Result<Pref> {
+    Ok(Pref {
+        id: r.get(0)?,
+        product: r.get(1)?,
+        area: r.get(2)?,
+        rule: r.get(3)?,
+        explicit: r.get(4)?,
+        count: r.get(5)?,
+        status: r.get(6)?,
+        supersedes: r.get(7)?,
+        last_seen: r.get(8)?,
+        note: r.get(9)?,
+    })
+}
+
+const PREF_COLUMNS: &str = "id, product, area, rule, explicit, count, status, supersedes, last_seen, note";
+
+/// A lesson the team drew from rework.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lesson {
+    pub id: i64,
+    pub product: String,
+    pub area: String,
+    pub lesson: String,
 }
 
 /// How a role fares at one gate: (role, stage, judgments, passed, average score).
@@ -228,6 +320,10 @@ impl Store {
     fn init(conn: Connection) -> anyhow::Result<Self> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
+        let product_cols: Vec<String> = conn.prepare("SELECT name FROM pragma_table_info('products')")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        if !product_cols.iter().any(|c| c == "mode") {
+            conn.execute_batch("ALTER TABLE products ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'")?;
+        }
         let eval_cols: Vec<String> = conn.prepare("SELECT name FROM pragma_table_info('evals')")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
         if !eval_cols.iter().any(|c| c == "version") {
             conn.execute_batch("ALTER TABLE evals ADD COLUMN version TEXT NOT NULL DEFAULT ''")?;
@@ -251,14 +347,26 @@ impl Store {
     pub fn product(&self, name: &str) -> anyhow::Result<Option<Product>> {
         Ok(self
             .conn
-            .query_row("SELECT name, repo FROM products WHERE name = ?1", [name], |r| Ok(Product { name: r.get(0)?, repo: r.get(1)? }))
+            .query_row("SELECT name, repo, mode FROM products WHERE name = ?1", [name], |r| Ok(Product { name: r.get(0)?, repo: r.get(1)?, mode: r.get(2)? }))
             .optional()?)
     }
 
     pub fn products(&self) -> anyhow::Result<Vec<Product>> {
-        let mut st = self.conn.prepare("SELECT name, repo FROM products ORDER BY name")?;
-        let rows = st.query_map([], |r| Ok(Product { name: r.get(0)?, repo: r.get(1)? }))?;
+        let mut st = self.conn.prepare("SELECT name, repo, mode FROM products ORDER BY name")?;
+        let rows = st.query_map([], |r| Ok(Product { name: r.get(0)?, repo: r.get(1)?, mode: r.get(2)? }))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn set_mode(&self, product: &str, mode: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(MODES.contains(&mode), "the mode is `normal` or `autonomous`");
+        let n = self.conn.execute("UPDATE products SET mode = ?2 WHERE name = ?1", params![product, mode])?;
+        anyhow::ensure!(n == 1, "no product called {product}");
+        Ok(())
+    }
+
+    /// Whether a product has tasks queued or running.
+    pub fn busy(&self, product: &str) -> anyhow::Result<bool> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM tasks WHERE product = ?1 AND status IN ('queued', 'running')", [product], |r| r.get::<_, i64>(0))? > 0)
     }
 
     pub fn add_task(&self, t: &NewTask, now: f64) -> anyhow::Result<i64> {
@@ -446,6 +554,105 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    // ---------- the founder's signals and preferences ----------
+
+    pub fn add_signal(&self, product: &str, source: &str, text: &str, now: f64) -> anyhow::Result<i64> {
+        self.conn.execute("INSERT INTO signals (product, source, text, at) VALUES (?1, ?2, ?3, ?4)", params![product, source, text.trim(), now])?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn pending_signals(&self, limit: usize) -> anyhow::Result<Vec<Signal>> {
+        let mut st = self.conn.prepare("SELECT id, product, source, text FROM signals WHERE done = 0 ORDER BY id LIMIT ?1")?;
+        let rows = st.query_map([limit as i64], |r| Ok(Signal { id: r.get(0)?, product: r.get(1)?, source: r.get(2)?, text: r.get(3)? }))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn signals_done(&self, ids: &[i64]) -> anyhow::Result<()> {
+        for id in ids {
+            self.conn.execute("UPDATE signals SET done = 1 WHERE id = ?1", [id])?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_pref(&self, product: &str, area: &str, rule: &str, explicit: bool, status: &str, supersedes: Option<i64>, note: &str, now: f64) -> anyhow::Result<i64> {
+        anyhow::ensure!(PREF_STATUSES.contains(&status), "not a preference status: {status}");
+        self.conn.execute(
+            "INSERT INTO prefs (product, area, rule, explicit, status, supersedes, note, created, last_seen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![product, area, rule.trim(), explicit, status, supersedes, note, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn pref(&self, id: i64) -> anyhow::Result<Option<Pref>> {
+        Ok(self.conn.query_row(&format!("SELECT {PREF_COLUMNS} FROM prefs WHERE id = ?1"), [id], pref_from).optional()?)
+    }
+
+    /// Preferences with one of these statuses: for a product (with the global ones), or all.
+    pub fn prefs(&self, product: Option<&str>, statuses: &[&str]) -> anyhow::Result<Vec<Pref>> {
+        let mut st = self.conn.prepare(&format!("SELECT {PREF_COLUMNS} FROM prefs WHERE ?1 IS NULL OR product = ?1 OR product = '*' ORDER BY area, id"))?;
+        let rows = st.query_map([product], pref_from)?.collect::<Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().filter(|p| statuses.contains(&p.status.as_str())).collect())
+    }
+
+    /// One more sighting of a preference: its count goes up and it counts as confirmed now.
+    pub fn bump_pref(&self, id: i64, explicit: bool, now: f64) -> anyhow::Result<i64> {
+        self.conn.execute("UPDATE prefs SET count = count + 1, explicit = MAX(explicit, ?2), last_seen = ?3 WHERE id = ?1", params![id, explicit, now])?;
+        Ok(self.conn.query_row("SELECT count FROM prefs WHERE id = ?1", [id], |r| r.get(0))?)
+    }
+
+    pub fn set_pref_status(&self, id: i64, status: &str, now: f64) -> anyhow::Result<()> {
+        anyhow::ensure!(PREF_STATUSES.contains(&status), "not a preference status: {status}");
+        let n = self.conn.execute("UPDATE prefs SET status = ?2, last_seen = MAX(last_seen, CASE WHEN ?2 = 'active' THEN ?3 ELSE last_seen END) WHERE id = ?1", params![id, status, now])?;
+        anyhow::ensure!(n == 1, "no preference #{id}");
+        Ok(())
+    }
+
+    // ---------- lessons from rework ----------
+
+    pub fn add_lesson(&self, product: &str, area: &str, lesson: &str, task: Option<i64>, now: f64) -> anyhow::Result<i64> {
+        self.conn.execute("INSERT INTO lessons (product, area, lesson, task, at) VALUES (?1, ?2, ?3, ?4, ?5)", params![product, area, lesson.trim(), task, now])?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// The newest lessons of a product, at most `n`.
+    pub fn lessons(&self, product: &str, n: usize) -> anyhow::Result<Vec<Lesson>> {
+        let mut st = self.conn.prepare("SELECT id, product, area, lesson FROM lessons WHERE product = ?1 ORDER BY id DESC LIMIT ?2")?;
+        let rows = st.query_map(params![product, n as i64], |r| Ok(Lesson { id: r.get(0)?, product: r.get(1)?, area: r.get(2)?, lesson: r.get(3)? }))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Lessons not yet written into the product's repo.
+    pub fn unrecorded_lessons(&self, product: &str) -> anyhow::Result<Vec<Lesson>> {
+        let mut st = self.conn.prepare("SELECT id, product, area, lesson FROM lessons WHERE product = ?1 AND recorded = 0 ORDER BY id")?;
+        let rows = st.query_map([product], |r| Ok(Lesson { id: r.get(0)?, product: r.get(1)?, area: r.get(2)?, lesson: r.get(3)? }))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn lessons_recorded(&self, ids: &[i64]) -> anyhow::Result<()> {
+        for id in ids {
+            self.conn.execute("UPDATE lessons SET recorded = 1 WHERE id = ?1", [id])?;
+        }
+        Ok(())
+    }
+
+    /// Failed judgment criteria of a product since `since`, with how often each failed.
+    pub fn failing_criteria(&self, product: &str, since: f64) -> anyhow::Result<Vec<(String, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT e.failed FROM evals e JOIN tasks t ON t.id = e.task WHERE t.product = ?1 AND e.passed = 0 AND e.at >= ?2 AND e.failed != ''",
+        )?;
+        let rows = st.query_map(params![product, since], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        let mut counts: std::collections::BTreeMap<String, i64> = Default::default();
+        for failed in rows {
+            for c in failed.split("; ").map(str::trim).filter(|c| !c.is_empty()) {
+                *counts.entry(c.to_string()).or_default() += 1;
+            }
+        }
+        let mut out: Vec<_> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
     pub fn counts(&self) -> anyhow::Result<Vec<(String, i64)>> {
         let mut st = self.conn.prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status ORDER BY status")?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -473,6 +680,10 @@ mod tests {
         s.add_product("shop", "/repos/shop", 1.0).unwrap();
         assert!(s.add_product("shop", "/elsewhere", 2.0).is_err());
         assert!(s.add_product("Shop!", "/x", 2.0).is_err());
+        assert_eq!(s.product("shop").unwrap().unwrap().mode, "normal");
+        s.set_mode("shop", "autonomous").unwrap();
+        assert_eq!(s.product("shop").unwrap().unwrap().mode, "autonomous");
+        assert!(s.set_mode("shop", "wild").is_err() && s.set_mode("nope", "normal").is_err());
         let a = s.add_task(&NewTask { product: "shop", role: "engineer", title: "low", brief: "", priority: 0, parent: None, ..Default::default() }, 1.0).unwrap();
         let b = s.add_task(&NewTask { product: "shop", role: "engineer", title: "high", brief: "", priority: 5, parent: None, ..Default::default() }, 2.0).unwrap();
         let c = s.add_task(&NewTask { product: "shop", role: "engineer", title: "high, newer", priority: 5, ..Default::default() }, 3.0).unwrap();
@@ -561,6 +772,26 @@ mod tests {
         let q = s.quality().unwrap();
         assert_eq!(q[0], ("backend-engineer".into(), "checks".into(), 1, 0, None));
         assert_eq!(q[1], ("backend-engineer".into(), "eval".into(), 2, 1, Some(3.5)));
+    }
+
+    #[test]
+    fn preferences_count_up_change_status_and_include_global_ones() {
+        let s = Store::memory();
+        let p = s.add_pref("shop", "copy", "Use short, plain sentences in UI text", false, "candidate", None, "", 1.0).unwrap();
+        s.add_pref("*", "design", "Primary buttons are green", true, "active", None, "", 1.0).unwrap();
+        s.add_pref("site", "design", "Dark theme by default", true, "active", None, "", 1.0).unwrap();
+        assert_eq!(s.bump_pref(p, false, 5.0).unwrap(), 2);
+        s.set_pref_status(p, "active", 6.0).unwrap();
+        let shop: Vec<_> = s.prefs(Some("shop"), &["active"]).unwrap().into_iter().map(|p| p.rule).collect();
+        assert_eq!(shop, vec!["Use short, plain sentences in UI text", "Primary buttons are green"]);
+        assert!(s.set_pref_status(p, "forgotten", 7.0).is_err() && s.set_pref_status(99, "retired", 7.0).is_err());
+        let sig = s.add_signal("shop", "answer", " make it simpler ", 1.0).unwrap();
+        assert_eq!(s.pending_signals(10).unwrap()[0].text, "make it simpler");
+        s.signals_done(&[sig]).unwrap();
+        assert!(s.pending_signals(10).unwrap().is_empty());
+        s.add_lesson("shop", "code", "Pin the Python version the lockfile is built for.", Some(3), 1.0).unwrap();
+        assert_eq!(s.unrecorded_lessons("shop").unwrap().len(), 1);
+        assert_eq!(s.lessons("shop", 5).unwrap()[0].lesson, "Pin the Python version the lockfile is built for.");
     }
 
     #[test]
