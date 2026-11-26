@@ -305,6 +305,7 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
 
     if !is_newer(&latest, CURRENT) {
         println!("{green}✓ You're on the latest version.{reset}");
+        refresh_hooks_here();
         println!("{}", auto_hint(state.auto));
         return Ok(());
     }
@@ -328,9 +329,32 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     let exe = crate::act::run(&crate::act::Action::new(crate::act::Kind::Update, format!("v{latest}")), || install(&latest, false))?;
     println!();
     println!("{green}✓ Updated v{CURRENT} → v{latest}{reset}  {dim}{}{reset}", exe.display());
+    refresh_hooks(&exe, false);
     println!("{dim}Restart any open jazari dashboards to use the new version.{reset}");
     println!("{}", auto_hint(state.auto));
     Ok(())
+}
+
+/// Has the newly installed binary register its own hooks in Claude Code's settings, so the hooks a
+/// release adds reach users who only ever update. The new binary does it because only it knows
+/// that release's hooks. It changes nothing when jazari's hooks aren't installed.
+fn refresh_hooks(exe: &Path, quiet: bool) {
+    let mut cmd = Command::new(exe);
+    cmd.args(["install", "--refresh"]).stdin(Stdio::null());
+    if quiet {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    if !matches!(cmd.status(), Ok(s) if s.success()) && !quiet {
+        eprintln!("warning: couldn't update the Claude Code hooks; run `jazari install` to add them again.");
+    }
+}
+
+/// On the latest version already: this binary is the new one, so it refreshes its own hooks.
+fn refresh_hooks_here() {
+    let a = crate::act::Action::new(crate::act::Kind::Install, "~/.claude/settings.json").detail("refresh hooks");
+    if let Err(e) = crate::act::run(&a, crate::install::refresh_cli) {
+        eprintln!("warning: couldn't update the Claude Code hooks: {e:#}");
+    }
 }
 
 /// What the dashboard shows in its footer.
@@ -362,7 +386,8 @@ pub fn background() -> Receiver<Notice> {
         let Some(latest) = latest.filter(|v| is_newer(v, CURRENT)) else { return };
         let auto_ok = state.auto && current_exe().ok().and_then(|e| install_root(&e)).is_some();
         let a = crate::act::Action::new(crate::act::Kind::Update, format!("v{latest}")).on_its_own(true);
-        let notice = if auto_ok && crate::act::run(&a, || install(&latest, true)).is_ok() {
+        let notice = if auto_ok && let Ok(exe) = crate::act::run(&a, || install(&latest, true)) {
+            refresh_hooks(&exe, true);
             Notice::Installed(latest)
         } else {
             Notice::Available(latest)
