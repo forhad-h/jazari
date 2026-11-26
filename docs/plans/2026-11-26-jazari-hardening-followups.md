@@ -62,3 +62,6 @@ the fix.
   2.1.332) from time to time. Workers stay on that version until someone changes it.
 - Opt-in Telegram control of manual sessions (founder's choice, later). Today Telegram controls
   only jazari's own work.
+- The tell inbox: any session of the same user can append a fake user message to
+  `~/.jazari/claude/inbox/<session>.jsonl`. The socket that the dashboard will own for prompt
+  answers (it checks the peer pid, and that no Claude process is an ancestor) could carry tell too.
