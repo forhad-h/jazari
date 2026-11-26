@@ -335,7 +335,8 @@ marsad jazari personas                                                # the role
 **Before the first run:** save a long-lived Claude login token for the workers. Run `claude setup-token`,
 then on macOS save the token with `security add-generic-password -a "$USER" -s marsad-jazari-claude-token -w`.
 Elsewhere, set `MARSAD_JAZARI_CLAUDE_TOKEN`. Docker must be running. New products' repos go in
-`~/jazari-products`, or in the folder set by `jazari.products_dir` in `settings.json`.
+`~/.marsad/jazari/products/` (under `MARSAD_HOME` when it is set), or in the folder set by `jazari.products_dir`
+in `settings.json`.
 
 **The company.** Each task names a role from `marsad jazari personas`. There are 36 roles:
 - **Leadership and planning:** Chief of Staff, Product Manager, Architect, Security Architect, CISO, Tech Lead.
@@ -351,16 +352,21 @@ goes to the Chief of Staff. It writes `company/VISION.md`, the roadmap, an archi
 is merged. These files in the product's repo are the team's memory.
 
 **The pipeline: nothing a worker claims is trusted until it is verified.** Every task runs as a fresh
-headless Claude session, in the product's container, inside its own git worktree
-(`.jazari/worktrees/task-<id>`). Your checkout is never switched. A branch with new commits passes these gates
-in order:
+headless Claude session, in the product's container, inside a fresh clone that jazari makes in
+`~/.marsad/jazari/work/<product>/`. The container never sees your repo or its `.git`, and your checkout is
+never switched. The worker's commits come back as a git bundle, which jazari fetches into your repo as
+`jazari/task-<id>`. Every git command jazari runs on your Mac turns off hooks and fsmonitor, so nothing a
+worker writes can run there. A branch with new commits passes these gates in order:
 
 1. **Harness checks.** These are deterministic and cost no tokens:
-   - jazari itself runs the product's `company/checks.sh` on the branch. This one script runs the build, the
-     tests, the linters and the type checks;
-   - it scans the diff for credentials.
+   - jazari runs `company/checks.sh` (build, tests, linters, type checks) in the container, on a fresh clone of
+     the branch. The script comes from `main`, not from the branch, so a worker can't weaken the gate it is
+     judged by. Until `main` has a script, the branch's new one is used once; jazari tells you, and that
+     change gets full code and security review;
+   - it scans the diff for credentials, including key files, tokens, JWTs and passwords in URLs.
 
-   Code without a checks script fails this gate.
+   Code without a checks script fails this gate. The commit that passes is pinned: every later stage judges
+   it, and the merge uses exactly that commit.
 2. **The evaluator.** A separate, read-only judge with a fresh context scores the work against the builder's role
    rubric (`assets/jazari/rubrics.md`):
    - every role is judged on: done as asked, claims match evidence, scope, and no secrets;
@@ -371,7 +377,8 @@ in order:
    - every critical criterion must pass;
    - at least 80% of all criteria must pass;
    - the overall score must be 4 or 5.
-3. **Code review, then security review.** Documentation-only changes skip both.
+3. **Code review, then security review.** Both reviewers are read-only. Changes to `*.md` files only skip both
+   reviews; any other change, `company/checks.sh` included, gets both.
 4. **The merge queue.** The merge commit is built aside, `company/checks.sh` runs again on the merged result, and
    only then does `main` move.
 
@@ -415,12 +422,24 @@ for you to run.
 
 **The container.** The first task builds the worker image (`jazari-worker:2`: Node.js, Python 3, a C toolchain, git, ripgrep and shellcheck; workers install anything else in user space) and creates the product's container
 (`jazari-<name>`). The container:
-- sees only the repo, mounted at the same path as on your Mac;
+- sees only the product's work folder (the clones jazari makes), mounted at the same path as on your Mac;
 - runs as a normal user, with no Linux capabilities;
-- is limited to 2 CPUs, 2 GB of memory and 512 processes.
+- is limited to 2 CPUs, 2 GB of memory and 512 processes;
+- is restarted before every task and every check run, so nothing a worker starts outlives it.
 
-Workers run with permissions bypassed, which applies only inside that container. A run is stopped after 45
-minutes.
+Workers run with permissions bypassed, which applies only inside that container. Only the Claude runs get the
+login token; the checks and git commands don't. A run is stopped after 45 minutes.
+
+**Limits to know.** These are not handled yet; the plan to fix them is in
+`docs/plans/2026-11-26-jazari-hardening-followups.md`:
+- **Open network.** The container can reach the internet. Asking before a deploy, a spend or contacting users
+  is a rule the workers follow, not something the container enforces. A worker that ignores the rule could
+  still use the network on its own.
+- **The audit record has no key.** The hash chain shows an edited or removed entry in the middle. It can't tell
+  if entries were cut from the end, or if someone with access to your Mac rewrote the whole file.
+- **Pairing codes.** Anyone who knows the bot's name can try 5 codes during a pairing window.
+- **Message text in `ps`.** The text of Telegram messages is passed to `curl` as arguments, so other programs on
+  your Mac can see it briefly. The bot token is not passed this way.
 
 **Usage limits.** Each run reports the 5-hour and 7-day windows, and jazari waits when it must.
 - When the next task would eat into the share kept for you, jazari sleeps until that window resets. The share is
