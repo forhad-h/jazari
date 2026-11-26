@@ -3,7 +3,7 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
-## Unreleased
+## 0.24.0 - 2026-11-26
 
 - jazari has two modes per product: normal stops after your tasks; autonomous keeps hunting bugs, fixing vulnerable dependencies, red-teaming, auditing UX and performance, and refreshing docs
 - Every message to you is a short Easy English card: what is needed, why, the options with their effect, the recommendation, and buttons
