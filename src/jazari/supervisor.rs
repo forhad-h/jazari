@@ -936,7 +936,7 @@ fn follow_ups(d: &Deps, task: &Task, o: &Outcome) -> anyhow::Result<usize> {
     let limit = if task.kind == "work" { o.follow_ups.len() } else { 1 };
     let mut queued = 0;
     for f in o.follow_ups.iter().take(limit) {
-        if s.has_similar(&task.product, &f.title)? || (!planner && s.queued(&task.product)? >= MAX_QUEUED) {
+        if s.has_similar(&task.product, &f.title, (d.now)())? || (!planner && s.queued(&task.product)? >= MAX_QUEUED) {
             continue;
         }
         let role = personas::resolve(&f.role);
@@ -1522,7 +1522,7 @@ mod tests {
         w.repo.heads.borrow_mut().insert("jazari/task-1".into(), "h".into());
         let judge = w.store.add_task(&judge_task("eval", "Evaluate: X", "h"), 0.0).unwrap();
         assert_eq!(w.tick(), Tick::Ran { task: judge, kind: Kind::Done });
-        assert!(w.store.has_similar("shop", "One").unwrap() && !w.store.has_similar("shop", "Two").unwrap());
+        assert!(w.store.has_similar("shop", "One", 0.0).unwrap() && !w.store.has_similar("shop", "Two", 0.0).unwrap());
     }
 
     #[test]
