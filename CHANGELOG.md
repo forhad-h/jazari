@@ -3,6 +3,13 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- Each session start installs ticked skills that are missing and updates out-of-date copies, also in the project's `.claude/skills`
+- Skills can carry a `version:`; a newer version replaces an older copy, even one changed by hand, and keeps the old one in `~/.marsad/skill-backups/`
+- `marsad skill sync` runs the same check by hand
+- Easy English 1.1.0 loads only at the writing step, not at the start of reading, debugging or other work
+
 ## 0.20.1 - 2026-11-25
 
 - `marsad scrollback` is removed: terminals keep showing their scrollbar even after the scrollback is erased

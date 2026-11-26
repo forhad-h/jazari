@@ -4,9 +4,14 @@
 //! A skill is a folder with a `SKILL.md`, whose frontmatter `name` and `description` say what it is
 //! and when Claude loads it, plus any scripts and data it needs. Claude Code loads skills only from
 //! `~/.claude/skills/` (and a project's `.claude/skills/`), so a ticked skill is installed there
-//! when its command is copied, unless a copy is already there. marsad never overwrites a copy it
-//! didn't write: it writes `MARKER` into each folder it installs, with a hash of the files, and
-//! updates such a folder only while its files still match that hash.
+//! when its command is copied, and again at the start of every session when it is missing. marsad
+//! writes `MARKER` into each folder it installs, with a hash of the files and the skill's version,
+//! and updates such a folder while its files still match that hash.
+//!
+//! A skill's `SKILL.md` can carry a `version:` in its frontmatter. When the library's version is
+//! newer than an installed copy's, the copy is updated even if it was changed by hand or installed
+//! by someone else: the old folder is kept in `<data dir>/skill-backups/` first. Without a newer
+//! version, marsad never overwrites a copy it didn't write or a copy changed by hand.
 //!
 //! Every edit, rename, restore and delete keeps the folder it replaces under
 //! `.versions/<key>/<number>-<UTC time>/`, as the prompt library keeps prompt files.
@@ -40,6 +45,8 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub own: bool,
+    /// The frontmatter's `version`, when it has one.
+    pub version: Option<String>,
     /// Sorted by path; `SKILL.md` is one of them.
     pub files: Vec<File>,
 }
@@ -123,6 +130,33 @@ pub fn front(text: &str) -> (String, String) {
     (name, description)
 }
 
+/// The frontmatter's top-level `version`, when it has a non-empty one.
+pub fn version_of(text: &str) -> Option<String> {
+    frontmatter(text)?
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .find(|(field, _)| *field == "version")
+        .map(|(_, value)| unquote(value.trim()))
+        .filter(|v| !v.is_empty())
+}
+
+/// Whether version `a` is newer than `b`, comparing dot-separated numbers (`1.10` > `1.9`). A
+/// missing version is older than any version; a part that is not a number counts as 0.
+pub fn newer(a: Option<&str>, b: Option<&str>) -> bool {
+    let parts = |v: &str| v.trim().trim_start_matches('v').split('.').map(|p| p.trim().parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    match (a, b) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(a), Some(b)) => {
+            let (mut a, mut b) = (parts(a), parts(b));
+            let len = a.len().max(b.len());
+            a.resize(len, 0);
+            b.resize(len, 0);
+            a > b
+        }
+    }
+}
+
 /// The text between a leading `---` line and the next one.
 fn frontmatter(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("---")?.strip_prefix('\n').or_else(|| text.strip_prefix("---\r\n"))?;
@@ -191,8 +225,10 @@ fn builtin(b: &Builtin) -> Skill {
 
 fn skill_of(key: String, mut files: Vec<File>, own: bool) -> Skill {
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    let (name, description) = front(files.iter().find(|f| f.path == SKILL_MD).and_then(File::text).unwrap_or(""));
-    Skill { key, name, description, own, files }
+    let text = files.iter().find(|f| f.path == SKILL_MD).and_then(File::text).unwrap_or("");
+    let (name, description) = front(text);
+    let version = version_of(text);
+    Skill { key, name, description, own, version, files }
 }
 
 /// The built-in skills, then the user's own in folder-name order. An own skill named like a
@@ -248,14 +284,19 @@ pub fn launch_section(chosen: &[&Rule]) -> String {
     let mut out = String::from(
         "# Skills\n\
          \n\
-         This session must use these skills. Load each one with the Skill tool before the first step that its \
-         description names, and follow it for the whole session:\n\n",
+         This session must use these skills. Load each one with the Skill tool when you reach a step that its \
+         description names, not earlier (not at the start of a task that has no such step), and follow it from \
+         then on:\n\n",
     );
     for rule in chosen {
         let (_, description) = front(rule.body());
         let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
         out.push_str(&format!("- **{}**: {}\n", rule.key, if description.is_empty() { rule.summary.as_str() } else { &description }));
     }
+    out.push_str(
+        "\nIf one of these skills is not in your list of available skills when you need it, run `marsad skill sync` \
+         once. It installs the missing skill, and Claude Code makes it available a moment later.\n",
+    );
     out
 }
 
@@ -566,6 +607,9 @@ pub enum Installed {
     Theirs,
     /// marsad wrote it, but its files were changed since, so it is used as it is.
     Changed,
+    /// A copy changed by hand or not written by marsad, with an older version: it was kept in the
+    /// backup folder named here and replaced by the library's version.
+    Replaced(PathBuf),
 }
 
 /// One skill's place in Claude Code's skills folder and what happened there.
@@ -580,12 +624,13 @@ impl Report {
     /// A short sentence for the footer or the terminal.
     pub fn message(&self) -> String {
         let at = home_relative(&self.path);
-        match self.outcome {
+        match &self.outcome {
             Installed::New => format!("{}: installed to {at}", self.key),
             Installed::Updated => format!("{}: updated in {at}", self.key),
             Installed::Current => format!("{}: {at} is up to date", self.key),
             Installed::Theirs => format!("{}: your own copy in {at} is used as it is", self.key),
             Installed::Changed => format!("{}: {at} was changed by hand, so it is used as it is and not updated", self.key),
+            Installed::Replaced(backup) => format!("{}: {at} had an older version; updated, and the old copy is kept in {}", self.key, home_relative(backup)),
         }
     }
 }
@@ -604,34 +649,64 @@ struct Marker {
     hash: String,
     #[serde(default)]
     marsad: String,
+    /// The skill's own version (its frontmatter `version`), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
-fn marker_text(key: &str, files: &[File]) -> String {
-    let m = Marker { installed_by: "marsad".into(), key: key.into(), hash: hash(files), marsad: env!("CARGO_PKG_VERSION").into() };
+fn marker_text(skill: &Skill) -> String {
+    let m = Marker {
+        installed_by: "marsad".into(),
+        key: skill.key.clone(),
+        hash: hash(&skill.files),
+        marsad: env!("CARGO_PKG_VERSION").into(),
+        version: skill.version.clone(),
+    };
     serde_json::to_string_pretty(&m).unwrap_or_default() + "\n"
 }
 
+/// Where a copy is kept before marsad replaces it with a newer version.
+fn backups_dir() -> PathBuf {
+    crate::data_dir().join("skill-backups")
+}
+
+/// The version of the copy installed at `path`: its `SKILL.md`'s, else the one marsad recorded.
+fn installed_version(path: &Path, marker: Option<&Marker>) -> Option<String> {
+    std::fs::read_to_string(path.join(SKILL_MD)).ok().and_then(|t| version_of(&t)).or_else(|| marker.and_then(|m| m.version.clone()))
+}
+
 /// Makes sure Claude Code can load `skill`: installs it into `root` when it is missing, updates a
-/// copy marsad installed that nobody changed since, and leaves any other copy alone.
+/// copy marsad installed that nobody changed since, and replaces any other copy only when the
+/// library's version is newer than the copy's (keeping the copy in the backup folder first).
 pub fn provide_in(root: &Path, skill: &Skill) -> anyhow::Result<Report> {
+    provide_at(root, skill, &backups_dir())
+}
+
+fn provide_at(root: &Path, skill: &Skill, backups: &Path) -> anyhow::Result<Report> {
     let path = root.join(&skill.key);
     let report = |outcome| Ok(Report { key: skill.key.clone(), path: path.clone(), outcome });
     if !path.join(SKILL_MD).exists() {
-        write_folder(&path, &skill.files, Some(&marker_text(&skill.key, &skill.files)))?;
+        write_folder(&path, &skill.files, Some(&marker_text(skill)))?;
         return report(Installed::New);
     }
-    let Some(marker) = std::fs::read_to_string(path.join(MARKER)).ok().and_then(|t| serde_json::from_str::<Marker>(&t).ok()) else {
-        return report(Installed::Theirs);
-    };
+    let marker = std::fs::read_to_string(path.join(MARKER)).ok().and_then(|t| serde_json::from_str::<Marker>(&t).ok());
     let current = read_installed(&path)?;
-    if hash(&current) != marker.hash {
-        return report(Installed::Changed);
+    let untouched = marker.as_ref().is_some_and(|m| hash(&current) == m.hash);
+    if untouched {
+        if hash(&current) == hash(&skill.files) {
+            return report(Installed::Current);
+        }
+        write_folder(&path, &skill.files, Some(&marker_text(skill)))?;
+        return report(Installed::Updated);
     }
-    if marker.hash == hash(&skill.files) {
-        return report(Installed::Current);
+    if newer(skill.version.as_deref(), installed_version(&path, marker.as_ref()).as_deref()) {
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let backup = backups.join(&skill.key).join(format!("{stamp}-{}", std::process::id()));
+        write_folder(&backup, &current, None).with_context(|| format!("keeping {} before replacing it", path.display()))?;
+        write_folder(&path, &skill.files, Some(&marker_text(skill)))?;
+        return report(Installed::Replaced(backup));
     }
-    write_folder(&path, &skill.files, Some(&marker_text(&skill.key, &skill.files)))?;
-    report(Installed::Updated)
+    report(if marker.is_some() { Installed::Changed } else { Installed::Theirs })
 }
 
 /// `provide_in` Claude Code's skills folder for each skill among `chosen`.
@@ -644,6 +719,44 @@ pub fn provide(chosen: &[&Rule]) -> anyhow::Result<Vec<Report>> {
         .filter_map(|r| skills.iter().find(|s| s.key == r.key))
         .map(|s| provide_in(&root, s).with_context(|| format!("installing the skill {}", s.key)))
         .collect()
+}
+
+/// At the start of a session in `cwd`: brings every installed copy of a library skill up to date
+/// (in `~/.claude/skills` and in each `.claude/skills` from `cwd` up to the home folder), and
+/// installs each skill in `ticked` into `~/.claude/skills` when no copy is found anywhere.
+/// Returns what was done; copies left as they were are not in the list.
+pub fn sync_on_start(cwd: Option<&Path>, ticked: &[String]) -> Vec<anyhow::Result<Report>> {
+    sync_roots(&claude_skills_dir(), &project_roots(cwd), &library(), ticked, &backups_dir())
+}
+
+/// Each `.claude/skills` folder in `cwd` and the folders above it, stopping before the home folder,
+/// whose `.claude/skills` is the personal one.
+fn project_roots(cwd: Option<&Path>) -> Vec<PathBuf> {
+    let home = dirs::home_dir();
+    let Some(cwd) = cwd else { return Vec::new() };
+    cwd.ancestors()
+        .take_while(|dir| home.as_deref() != Some(*dir) && dir.parent().is_some())
+        .map(|dir| dir.join(".claude").join("skills"))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+fn sync_roots(personal: &Path, projects: &[PathBuf], skills: &[Skill], ticked: &[String], backups: &Path) -> Vec<anyhow::Result<Report>> {
+    let mut out = Vec::new();
+    for skill in skills {
+        let mut found = false;
+        for root in std::iter::once(personal).chain(projects.iter().map(PathBuf::as_path)) {
+            if root.join(&skill.key).join(SKILL_MD).exists() {
+                found = true;
+                out.push(provide_at(root, skill, backups).with_context(|| format!("updating the skill {}", skill.key)));
+            }
+        }
+        if !found && ticked.contains(&skill.key) {
+            out.push(provide_at(personal, skill, backups).with_context(|| format!("installing the skill {}", skill.key)));
+        }
+    }
+    out.retain(|r| !matches!(r, Ok(Report { outcome: Installed::Current | Installed::Theirs | Installed::Changed, .. })));
+    out
 }
 
 /// After an edit in the library: updates the installed copy of `key` only when marsad installed it
@@ -799,6 +912,75 @@ mod tests {
         assert!(sync_in(&root, &skill_of("absent".into(), files("absent"), true)).is_none(), "an edit installs nothing new");
         assert!(Report { key: "k".into(), path: root.join("k"), outcome: Installed::Theirs }.message().contains("used as it is"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn versioned(name: &str, version: &str) -> Skill {
+        let md = format!("---\nname: {name}\ndescription: \"d\"\nversion: {version}\n---\n\nbody {version}\n");
+        skill_of(name.into(), vec![File::new(SKILL_MD, md)], false)
+    }
+
+    #[test]
+    fn versions_are_read_and_compared_by_number() {
+        assert_eq!(version_of("---\nname: a\nversion: \"1.2.0\"\n---\n"), Some("1.2.0".into()));
+        assert_eq!(version_of("---\nname: a\n---\nversion: 9\n"), None, "only the frontmatter counts");
+        assert!(newer(Some("1.10"), Some("1.9")) && newer(Some("1.1.0"), None) && newer(Some("v2"), Some("1.9.9")));
+        assert!(!newer(Some("1.0"), Some("1.0.0")) && !newer(None, Some("1")) && !newer(None, None));
+        let ee = &library_in(Path::new("/nonexistent"))[0];
+        assert!(ee.version.is_some(), "the built-in skill carries a version");
+    }
+
+    #[test]
+    fn a_newer_version_replaces_a_changed_or_foreign_copy_and_keeps_it() {
+        let (root, backups) = (temp_dir("ver-root"), temp_dir("ver-backups"));
+        let old = versioned("s", "1.0.0");
+        provide_at(&root, &old, &backups).unwrap();
+        std::fs::write(root.join("s/SKILL.md"), "---\nname: s\nversion: 1.0.0\n---\nedited by hand\n").unwrap();
+        assert_eq!(provide_at(&root, &old, &backups).unwrap().outcome, Installed::Changed, "same version: the edit stays");
+        let new = versioned("s", "1.1.0");
+        let Installed::Replaced(backup) = provide_at(&root, &new, &backups).unwrap().outcome else { panic!("not replaced") };
+        assert!(std::fs::read_to_string(backup.join(SKILL_MD)).unwrap().contains("edited by hand"));
+        assert!(std::fs::read_to_string(root.join("s/SKILL.md")).unwrap().contains("body 1.1.0"));
+        assert!(root.join("s").join(MARKER).is_file());
+        // A copy marsad never wrote, with no version, is older than any version.
+        std::fs::create_dir_all(root.join("t")).unwrap();
+        std::fs::write(root.join("t/SKILL.md"), "legacy").unwrap();
+        assert!(matches!(provide_at(&root, &versioned("t", "1.0.0"), &backups).unwrap().outcome, Installed::Replaced(_)));
+        // A newer installed copy is never taken back to an older one.
+        std::fs::write(root.join("t/SKILL.md"), "---\nname: t\nversion: 2.0.0\n---\nmine\n").unwrap();
+        assert_eq!(provide_at(&root, &versioned("t", "1.0.0"), &backups).unwrap().outcome, Installed::Changed);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&backups);
+    }
+
+    #[test]
+    fn session_start_installs_missing_ticked_skills_and_updates_project_copies() {
+        let (personal, project, backups) = (temp_dir("sync-personal"), temp_dir("sync-project"), temp_dir("sync-backups"));
+        let (a, b) = (versioned("a", "1.0.0"), versioned("b", "1.0.0"));
+        let lib = vec![a.clone(), b.clone()];
+        let done = sync_roots(&personal, std::slice::from_ref(&project), &lib, &["a".into()], &backups);
+        assert_eq!(done.len(), 1, "only the ticked skill is installed");
+        assert!(personal.join("a/SKILL.md").is_file() && !personal.join("b").exists());
+        assert!(sync_roots(&personal, std::slice::from_ref(&project), &lib, &["a".into()], &backups).is_empty(), "nothing to do twice");
+        // A project copy marsad wrote follows the library, and then the personal copy is not added.
+        provide_at(&project, &b, &backups).unwrap();
+        let lib = vec![versioned("a", "1.1.0"), versioned("b", "1.1.0")];
+        let done: Vec<Report> = sync_roots(&personal, std::slice::from_ref(&project), &lib, &["a".into(), "b".into()], &backups).into_iter().map(Result::unwrap).collect();
+        assert_eq!(done.iter().map(|r| (r.key.as_str(), r.outcome.clone())).collect::<Vec<_>>(), [("a", Installed::Updated), ("b", Installed::Updated)]);
+        assert!(done[1].path.starts_with(&project) && !personal.join("b").exists());
+        // Deleted by hand: the next session start puts it back.
+        std::fs::remove_dir_all(personal.join("a")).unwrap();
+        let done = sync_roots(&personal, &[], &lib, &["a".into()], &backups);
+        assert_eq!(done[0].as_ref().unwrap().outcome, Installed::New);
+        for d in [personal, project, backups] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn project_roots_stop_below_the_home_folder() {
+        let home = dirs::home_dir().unwrap();
+        assert!(project_roots(Some(&home)).is_empty());
+        assert!(project_roots(None).is_empty());
     }
 
     #[test]
