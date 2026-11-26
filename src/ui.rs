@@ -1762,6 +1762,19 @@ fn session_lines(s: &Session, tick: u64) -> Vec<Line<'static>> {
         agents.extend([dim(" · "), Span::raw(format!("{agent_type}{count} ")), Span::styled(format!("{mark} "), mark_style), Span::raw(fmt_tokens(tokens))]);
     }
     lines.push(Line::from(agents));
+    if !s.launch_set.is_empty() {
+        let mut started = vec![label("started")];
+        for (i, (key, why)) in s.launch_set.iter().enumerate() {
+            if i > 0 {
+                started.push(dim(", "));
+            }
+            match why {
+                Some(why) => started.extend([Span::styled(key.clone(), Style::new().fg(Color::Cyan)), dim(format!(" (added: {why})"))]),
+                None => started.push(Span::raw(key.clone())),
+            }
+        }
+        lines.push(Line::from(started));
+    }
     let mut skills_list: Vec<_> = s.all_skills().into_iter().collect();
     skills_list.sort_by(|a, b| b.1.tokens.total().cmp(&a.1.tokens.total()).then(b.1.calls.cmp(&a.1.calls)));
     if !skills_list.is_empty() {
