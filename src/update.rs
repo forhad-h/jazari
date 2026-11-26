@@ -330,6 +330,7 @@ pub fn run(args: UpdateArgs) -> anyhow::Result<()> {
     println!();
     println!("{green}✓ Updated v{CURRENT} → v{latest}{reset}  {dim}{}{reset}", exe.display());
     refresh_hooks(&exe, false);
+    restart_services(&exe, false);
     println!("{dim}Restart any open jazari dashboards to use the new version.{reset}");
     println!("{}", auto_hint(state.auto));
     Ok(())
@@ -346,6 +347,20 @@ fn refresh_hooks(exe: &Path, quiet: bool) {
     }
     if !matches!(cmd.status(), Ok(s) if s.success()) && !quiet {
         eprintln!("warning: couldn't update the Claude Code hooks; run `jazari install` to add them again.");
+    }
+}
+
+/// Has the newly installed binary start the installed background services (the bridge, the
+/// supervisor) again, so they run the new version without a manual reinstall. Only the new
+/// binary knows how its own services should look. Without services, it changes nothing.
+fn restart_services(exe: &Path, quiet: bool) {
+    let mut cmd = Command::new(exe);
+    cmd.args(["build", "service", "refresh"]).stdin(Stdio::null());
+    if quiet {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    if !matches!(cmd.status(), Ok(s) if s.success()) && !quiet {
+        eprintln!("warning: couldn't restart the background services; run `jazari build service install` again.");
     }
 }
 
@@ -388,6 +403,7 @@ pub fn background() -> Receiver<Notice> {
         let a = crate::act::Action::new(crate::act::Kind::Update, format!("v{latest}")).on_its_own(true);
         let notice = if auto_ok && let Ok(exe) = crate::act::run(&a, || install(&latest, true)) {
             refresh_hooks(&exe, true);
+            restart_services(&exe, true);
             Notice::Installed(latest)
         } else {
             Notice::Available(latest)

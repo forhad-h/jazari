@@ -186,6 +186,9 @@ pub enum ServiceCmd {
     },
     /// Whether each service is installed and running, and where its log is.
     Status,
+    /// Start installed services again on this binary (`jazari update` runs it after an update).
+    #[command(hide = true)]
+    Refresh,
 }
 
 /// jazari's own files: `~/.jazari/build`.
@@ -247,6 +250,7 @@ pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
                 ServiceCmd::Install { parts } => service::install(&e, if parts.is_empty() { &[service::Part::Bridge] } else { &parts }, print),
                 ServiceCmd::Uninstall { parts } => service::uninstall(&e, if parts.is_empty() { &service::Part::ALL } else { &parts }, print),
                 ServiceCmd::Status => service::status(&e, print),
+                ServiceCmd::Refresh => service::refresh(&e, print),
             }
         }
         JazariCmd::Notify { message } => {
@@ -778,9 +782,38 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
     println!("jazari supervisor on ({}). Ctrl-C stops it; a task in progress goes back in the queue next start.", profile.plan.label());
     save_audit_head(&audit_path);
     stop_signal::catch();
-    let result = supervise(&deps, once);
+    let started_as = binary_stamp();
+    let result = supervise(&deps, once, &|| !once && started_as.is_some() && binary_stamp() != started_as);
     save_audit_head(&audit_path);
-    result
+    if matches!(result, Ok(Stopped::NewBinary)) {
+        // launchd's KeepAlive starts it again, on the new binary; `service status` reads this code.
+        std::process::exit(service::RESTART_CODE);
+    }
+    result.map(|_| ())
+}
+
+/// What identifies the binary this process was started from: its device, inode and modified time.
+/// An update writes a new file, so a change means the supervisor should restart on it.
+fn binary_stamp() -> Option<(u64, u64, std::time::SystemTime)> {
+    let path = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    };
+    #[cfg(not(unix))]
+    let (dev, ino) = (0, meta.len());
+    Some((dev, ino, meta.modified().ok()?))
+}
+
+/// Why the supervisor's loop ended without an error.
+#[derive(Debug, PartialEq)]
+enum Stopped {
+    /// Done, or a stop was asked for.
+    Done,
+    /// The binary was replaced by an update.
+    NewBinary,
 }
 
 /// Saves the audit record's count and head, so a record cut or written again later doesn't match.
@@ -842,32 +875,36 @@ fn rest(secs: f64, stop: &std::sync::atomic::AtomicBool) -> bool {
 }
 
 /// The supervisor's loop: one task at a time until stopped, or one round with `once`.
-fn supervise(deps: &supervisor::Deps, once: bool) -> anyhow::Result<()> {
+fn supervise(deps: &supervisor::Deps, once: bool, replaced: &dyn Fn() -> bool) -> anyhow::Result<Stopped> {
     let mut errors = 0u32;
     loop {
         if stop_signal::ASKED.load(std::sync::atomic::Ordering::SeqCst) {
             println!("Stopping: the audit head is saved, and a task left running goes back in the queue next start.");
-            return Ok(());
+            return Ok(Stopped::Done);
+        }
+        if replaced() {
+            println!("The jazari binary was updated: restarting on the new version.");
+            return Ok(Stopped::NewBinary);
         }
         let wait = match supervisor::tick(deps) {
             Ok(supervisor::Tick::Ran { .. }) => {
                 errors = 0;
                 if once {
-                    return Ok(());
+                    return Ok(Stopped::Done);
                 }
                 0.0
             }
             Ok(supervisor::Tick::Idle) if once => {
                 println!("No queued tasks.");
-                return Ok(());
+                return Ok(Stopped::Done);
             }
             Ok(supervisor::Tick::Sleeping { until }) if once => {
                 println!("Waiting for usage to free up until {until:.0}.");
-                return Ok(());
+                return Ok(Stopped::Done);
             }
             Ok(supervisor::Tick::Paused) if once => {
                 println!("jazari is paused (`jazari watch resume` turns it back on).");
-                return Ok(());
+                return Ok(Stopped::Done);
             }
             Ok(supervisor::Tick::Idle | supervisor::Tick::Paused) => 60.0,
             Ok(supervisor::Tick::Sleeping { until }) => (until - crate::now()).clamp(5.0, 300.0),

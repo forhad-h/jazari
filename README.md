@@ -369,7 +369,10 @@ jazari build service uninstall             # stop and remove both; the logs stay
   `jazari.supervisor.plist`).
 - Its output goes to `~/.jazari/logs/bridge.log` or `supervisor.log`.
 - The service gets the `PATH` of the shell that installed it, so it finds `docker` and `git`. After
-  you update jazari or change your `PATH`, run `install` again.
+  you change your `PATH`, run `install` again.
+- `jazari update`, and the dashboard's automatic update, start the installed services again on the
+  new version. A supervisor in the middle of a task finishes it first, then restarts by itself.
+  `jazari watch pause` holds these restarts, and `jazari watch actions` lists them.
 - Stop any bridge you started by hand first. Only one bridge can run at a time. If another copy
   is still running, the service keeps stopping and starting again every minute, and
   `service status` tells you.
