@@ -27,6 +27,9 @@ Live data is not in the usage database; use `marsad status` for it.
 
 ## Talking to marsad and to other sessions
 
+The same program also answers as `jazari` (build: products, tasks, handoff, prompts, skills) and `mamal` (the whole
+system). The `marsad …` lines below always work, so use them as written.
+
 ```sh
 marsad say "what this session is doing"            # shown on this session in marsad's dashboard
 marsad say --attention "what you need from the user" # also notifies the user

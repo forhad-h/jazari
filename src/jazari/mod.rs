@@ -28,6 +28,18 @@ use telegram::{Bot, Curl};
 
 #[derive(Subcommand)]
 pub enum JazariCmd {
+    /// Save a handoff prompt (stdin or --file) and open a new terminal where a fresh session starts from it.
+    Handoff(crate::handoff::HandoffArgs),
+    /// List the rules a Claude Code session can start with, or print the command that loads a chosen set.
+    Rules(crate::rules::RulesArgs),
+    /// Write, edit, copy or delete your own prompts: `new` drafts one from a rough idea with Claude.
+    #[command(subcommand)]
+    Prompt(crate::prompt_gen::PromptCmd),
+    /// List, write, edit, copy, delete or install skills: `new` writes one from a rough idea with Claude.
+    #[command(subcommand)]
+    Skill(crate::prompt_gen::SkillCmd),
+    /// Print the `claude` command that starts a session with the coordination rules.
+    Coordination(crate::rules::CoordinationArgs),
     /// Connect your Telegram bot: pair a chat, send a test message, check or remove the pairing.
     #[command(subcommand)]
     Telegram(TelegramCmd),
@@ -174,6 +186,11 @@ fn chat() -> anyhow::Result<i64> {
 
 pub fn run(cmd: JazariCmd) -> anyhow::Result<()> {
     match cmd {
+        JazariCmd::Handoff(a) => crate::handoff::run(a),
+        JazariCmd::Rules(a) => crate::rules::run(a),
+        JazariCmd::Prompt(c) => crate::prompt_gen::run(c),
+        JazariCmd::Skill(c) => crate::prompt_gen::run_skill(c),
+        JazariCmd::Coordination(a) => crate::rules::run_coordination(a),
         JazariCmd::Telegram(TelegramCmd::Pair) => bridge::pair(&bot()?, &dir()),
         JazariCmd::Telegram(TelegramCmd::Test) => {
             bot()?.send(chat()?, "Test message from jazari: the bridge can reach you.")?;

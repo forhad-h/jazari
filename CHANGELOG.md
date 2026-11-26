@@ -3,6 +3,13 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- One program, three names: `marsad` watches and protects, `jazari` acts and builds, `mamal` is the whole system (`mamal build …`, `mamal watch …`)
+- The installer adds `jazari` and `mamal` next to `marsad`; the program picks its part from the name it was started as
+- `jazari` holds the build commands: products and tasks, Telegram, `handoff`, `prompt`, `skill`, `rules` and `coordination`
+- Every `marsad …` command line keeps working, including the ones that moved; typed in a terminal, a moved one shows its new spelling
+
 ## 0.24.0 - 2026-11-26
 
 - jazari has two modes per product: normal stops after your tasks; autonomous keeps hunting bugs, fixing vulnerable dependencies, red-teaming, auditing UX and performance, and refreshing docs

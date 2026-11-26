@@ -39,6 +39,17 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/forhad-h/marsad/re
 Or download a binary from [Releases](https://github.com/forhad-h/marsad/releases), or build from
 source with `cargo install --git https://github.com/forhad-h/marsad`.
 
+**One program, three names.** The installer also adds `jazari` and `mamal`, which run the same program:
+- `marsad` watches and protects: the dashboard, status, usage reports, badges and the safety guards.
+- `jazari` acts and builds: products and tasks, Telegram, handoff, and the prompt and skill library.
+- `mamal` (معمل, workshop and laboratory) is the whole system: `mamal` opens the dashboard,
+  `mamal build …` is `jazari …`, and `mamal watch …` is `marsad …`.
+
+The program picks its part from the name it was started as. After `cargo install`, add the names yourself
+with `ln -s "$(which marsad)" ~/.cargo/bin/jazari` (and the same for `mamal`). Every `marsad …` command works
+as before, including the ones that moved to jazari (`marsad handoff`, `marsad skill`, `marsad jazari …`). When you
+type one of those in a terminal, marsad shows a one-line tip with the new spelling.
+
 ## Usage
 
 ```sh
