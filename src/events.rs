@@ -9,7 +9,22 @@ pub fn apply(sessions: &mut HashMap<String, Session>, ev: &Value) {
     let s = |k: &str| ev.get(k).and_then(Value::as_str);
     let (Some(id), Some(event)) = (s("session_id"), s("hook_event_name")) else { return };
     let ts = ev["ts"].as_f64().unwrap_or_else(crate::now);
+    let known = sessions.contains_key(id);
     let session = sessions.entry(id.to_string()).or_insert_with(|| Session::new(id, ts));
+    // Written before the session starts: it says nothing about the session's activity. Until its
+    // first hook, the session counts as ended, so a start that failed leaves no row.
+    if event == crate::handoff::LAUNCH_SET_EVENT {
+        if !known {
+            session.set_status(Status::Ended, ts);
+        }
+        session.launch_set = ev["launch_set"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|i| Some((i["key"].as_str()?.to_string(), i["why"].as_str().filter(|w| !w.is_empty()).map(str::to_string))))
+            .collect();
+        return;
+    }
     session.last_event = session.last_event.max(ts);
     if ev.get("agent_id").is_none() {
         session.last_hook = session.last_hook.max(ts);
@@ -445,5 +460,21 @@ mod tests {
         assert!(!s.subagents["a1"].running);
         assert_eq!(s.subagents["a1"].agent_type, "Explore");
         assert_eq!(s.status, Status::Ended);
+    }
+
+    #[test]
+    fn a_launch_set_shows_once_the_session_starts() {
+        let set = json!({"session_id": "n1", "ts": 1.0, "hook_event_name": crate::handoff::LAUNCH_SET_EVENT, "launch_set": [
+            {"key": "coordination", "from": "last session", "why": ""},
+            {"key": "chrome-testing", "from": "added", "why": "UI tests in Chrome"},
+        ]});
+        let mut sessions = HashMap::new();
+        apply(&mut sessions, &set);
+        let s = &sessions["n1"];
+        assert_eq!(s.status, Status::Ended, "no row until the session starts");
+        assert_eq!(s.launch_set, [("coordination".to_string(), None), ("chrome-testing".to_string(), Some("UI tests in Chrome".to_string()))]);
+        apply(&mut sessions, &json!({"session_id": "n1", "ts": 2.0, "hook_event_name": "SessionStart", "source": "startup"}));
+        assert_ne!(sessions["n1"].status, Status::Ended);
+        assert_eq!(sessions["n1"].launch_set.len(), 2);
     }
 }

@@ -199,7 +199,23 @@ jazari build handoff --auto-close off # keep the old session by default (`--clos
 jazari build handoff --no-launch      # only save it
 jazari build handoff list             # saved handoffs, newest first
 jazari build handoff resume <id>      # start a saved handoff in this terminal
+jazari build handoff resume <id> --no-pick  # start it with the old set and your defaults only
+jazari build handoff --pick off       # never let the model add prompts or skills
 ```
+
+The new session starts with prompts and skills from your library:
+
+1. The prompts and skills of the old session. jazari reads them from the name of the file that the
+   old session was started with (`--append-system-prompt-file`). On Windows, or when jazari can't
+   read the old session's command line, this part is empty.
+2. Your ticked defaults (`jazari build rules`).
+3. Up to 3 more that a small model (Haiku, through `claude -p`) picks for the next step in the
+   handoff. The model sees each prompt's and skill's key, title and summary, never its text. It can
+   only add keys from your library, and it never removes one. If it fails or takes longer than
+   20 seconds, the session starts with parts 1 and 2 only.
+
+The new session's first reply lists the set, with the reason for each added key. The details view
+of the session in the dashboard (`Enter`) shows it too. Each pick is in `jazari watch actions`.
 
 Closing ends the old Claude Code process; inside tmux it closes the pane. In other terminals the tab
 stays open at its shell prompt. A session handed to a detached tmux session is never closed, since

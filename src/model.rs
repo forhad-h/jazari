@@ -410,6 +410,9 @@ pub struct Session {
     pub flag: Option<String>,
     /// The latest status line the session posted with `jazari watch say`.
     pub said: Option<String>,
+    /// The prompts and skills jazari started the session with after a handoff: key, then the
+    /// reason when a model added it.
+    pub launch_set: Vec<(String, Option<String>)>,
     /// Messages queued with `jazari watch tell` that the session hasn't picked up yet.
     pub waiting: usize,
     /// A stop request from jazari waits for the session's next tool call.
@@ -441,6 +444,7 @@ impl Session {
             halted: None,
             flag: None,
             said: None,
+            launch_set: Vec::new(),
             waiting: 0,
             stop_requested: false,
             subagents: BTreeMap::new(),

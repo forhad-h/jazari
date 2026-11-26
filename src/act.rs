@@ -95,6 +95,8 @@ pub enum Kind {
     Setting,
     Update,
     Install,
+    /// Starting a session: which prompts and skills it gets.
+    Launch,
 }
 
 impl Kind {
@@ -108,6 +110,7 @@ impl Kind {
             Kind::Setting => "setting",
             Kind::Update => "update",
             Kind::Install => "install",
+            Kind::Launch => "launch",
         }
     }
 
@@ -122,6 +125,7 @@ impl Kind {
             Kind::Setting => "change the setting",
             Kind::Update => "install",
             Kind::Install => "edit",
+            Kind::Launch => "start",
         }
     }
 

@@ -14,6 +14,7 @@ mod context;
 mod disk;
 mod events;
 mod handoff;
+mod handoff_pick;
 mod hook;
 mod install;
 mod jazari;

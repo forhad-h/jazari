@@ -9,6 +9,7 @@ GitHub release. Keep each bullet to one short line.
 
 ## 1.0.4 - 2026-11-26
 
+- After a handoff, the new session starts with the old session's prompts and skills, your defaults, and up to 3 that a small model picks for the next step (`--pick off` turns this off)
 - Values jazari saves in the Keychain no longer show in the process list while they are saved
 - Ctrl-C or stopping the service lets the supervisor save the audit head before it exits; a second Ctrl-C stops it at once
 

@@ -36,12 +36,21 @@ pub struct HandoffArgs {
     /// Whether a handoff ends the old session by default: on or off.
     #[arg(long, value_name = "on|off")]
     auto_close: Option<String>,
+    /// Whether a small model adds prompts and skills from your library that fit the next step:
+    /// on (the default) or off. The old session's set and your ticked defaults are always used.
+    #[arg(long, value_name = "on|off")]
+    pick: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum HandoffCmd {
     /// Start a Claude Code session from a saved handoff, in the folder it was written for.
-    Resume { id: String },
+    Resume {
+        id: String,
+        /// Start with the old session's prompts and skills and your defaults only.
+        #[arg(long)]
+        no_pick: bool,
+    },
     /// List saved handoffs, newest first.
     List,
     /// Ends the old session after a handoff (started detached by `jazari build handoff --close`).
@@ -62,12 +71,24 @@ struct Record {
     cwd: String,
     from_session: Option<String>,
     prompt: String,
+    /// The prompt and skill keys the old session started with; None when they couldn't be read
+    /// (a handoff from outside a session, Windows, or a handoff saved by an older version).
+    #[serde(default)]
+    inherited: Option<Vec<String>>,
 }
 
 /// Seconds the old session gets to finish the tool call that ran `jazari build handoff`.
 const CLOSE_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 const CLOSE_SETTING: &str = "handoff_close";
+
+const PICK_SETTING: &str = "handoff_pick";
+
+/// Whether a small model adds prompts and skills to a session started from a handoff (on unless
+/// turned off).
+pub fn pick_on() -> bool {
+    crate::settings::get(PICK_SETTING).and_then(|v| v.as_bool()).unwrap_or(true)
+}
 
 fn dir() -> PathBuf {
     crate::claude_data_dir().join("handoffs")
@@ -81,7 +102,7 @@ pub fn auto_close() -> bool {
 
 pub fn run(a: HandoffArgs) -> anyhow::Result<()> {
     match a.cmd {
-        Some(HandoffCmd::Resume { id }) => return resume(&id),
+        Some(HandoffCmd::Resume { id, no_pick }) => return resume(&id, no_pick),
         Some(HandoffCmd::List) => return list(),
         Some(HandoffCmd::Close { session, tmux_pane }) => {
             std::thread::sleep(CLOSE_DELAY);
@@ -89,6 +110,12 @@ pub fn run(a: HandoffArgs) -> anyhow::Result<()> {
             return crate::act::run(&a, || close(&session, tmux_pane.as_deref()));
         }
         None => {}
+    }
+    if let Some(v) = a.pick {
+        let on = parse_on_off(&v)?;
+        crate::settings::set(PICK_SETTING, serde_json::json!(on))?;
+        println!("{}", if on { "A session started from a handoff now gets prompts and skills that a small model picks for the next step, as well as the old set." } else { "A session started from a handoff now gets only the old session's prompts and skills and your defaults." });
+        return Ok(());
     }
     if let Some(v) = a.auto_close {
         let on = parse_on_off(&v)?;
@@ -107,7 +134,8 @@ pub fn run(a: HandoffArgs) -> anyhow::Result<()> {
     let here = std::env::current_dir().unwrap_or_default();
     let cwd = session.map(|s| PathBuf::from(&s.cwd)).filter(|p| p.is_dir()).unwrap_or(here);
     let from = session.map(|s| s.id.clone());
-    let record = Record { id: new_id(chrono::Local::now(), from.as_deref()), created: crate::now(), cwd: cwd.to_string_lossy().into_owned(), from_session: from, prompt };
+    let inherited = session.and_then(|s| s.pid).and_then(old_set);
+    let record = Record { id: new_id(chrono::Local::now(), from.as_deref()), created: crate::now(), cwd: cwd.to_string_lossy().into_owned(), from_session: from, prompt, inherited };
     let path = save(&dir(), &record)?;
     println!("Saved the handoff to {}", path.display());
 
@@ -252,14 +280,57 @@ fn claude() -> std::ffi::OsString {
     std::env::var_os("JAZARI_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into())
 }
 
-fn resume(id: &str) -> anyhow::Result<()> {
+/// The prompt and skill keys the Claude Code process `pid` was started with, read from the name of
+/// its `--append-system-prompt-file`. None when its command line can't be read; an empty list when
+/// it started without one.
+fn old_set(pid: u32) -> Option<Vec<String>> {
+    let args = crate::handoff_pick::command_line(pid)?;
+    let lib = crate::rules::library();
+    Some(crate::handoff_pick::launch_file_in(&args).map(|f| crate::handoff_pick::keys_from_launch_file(Path::new(f), &lib)).unwrap_or_default())
+}
+
+/// The event that records the prompts and skills a session started with, for the dashboard.
+pub const LAUNCH_SET_EVENT: &str = "JazariLaunchSet";
+
+fn resume(id: &str, no_pick: bool) -> anyhow::Result<()> {
+    use crate::handoff_pick::Pick;
     let r = load(&dir(), id)?;
     let cwd = PathBuf::from(&r.cwd);
     if !cwd.is_dir() {
         bail!("the handoff's folder {} no longer exists", r.cwd);
     }
+    let lib = crate::rules::library();
+    let mut pick = Pick::base(&lib, r.inherited.as_deref(), &crate::settings::rules());
+    if pick_on() && !no_pick {
+        println!("Choosing prompts and skills for this session…");
+        let project = cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let data = crate::data_dir();
+        let log = crate::handoff_pick::add_extras(&mut pick, &r.prompt, &project, &lib, &crate::handoff_pick::claude_runner(&data));
+        let a = crate::act::Action::new(crate::act::Kind::Launch, format!("handoff {}", r.id)).detail(log).on_its_own(true);
+        crate::act::record(&a, "done", "");
+    }
+    let chosen = crate::rules::known(&lib, &pick.key_list());
+    let file = if chosen.is_empty() {
+        None
+    } else {
+        for report in crate::skills::provide(&chosen).unwrap_or_default() {
+            println!("{}", report.message());
+        }
+        Some(crate::rules::ensure(&chosen, crate::rules::Mode::Session)?)
+    };
+    let first = pick.first_line();
+    println!("{first}");
+    let session_id = crate::handoff_pick::new_session_id();
+    log_launch_set(&session_id, &pick);
+    let prompt = format!("Begin your first reply with this line, unchanged:\n{first}\n\n{}", r.prompt);
+
+    let mut args: Vec<std::ffi::OsString> = vec!["--session-id".into(), session_id.into()];
+    if let Some(f) = &file {
+        args.extend(["--append-system-prompt-file".into(), f.as_os_str().to_owned()]);
+    }
+    args.push(prompt.into());
     let mut cmd = std::process::Command::new(claude());
-    cmd.arg(&r.prompt).current_dir(&cwd);
+    cmd.args(&args).current_dir(&cwd);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -269,13 +340,33 @@ fn resume(id: &str) -> anyhow::Result<()> {
     #[cfg(not(unix))]
     {
         let status = match cmd.status() {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::process::Command::new("claude.cmd").arg(&r.prompt).current_dir(&cwd).status()
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::process::Command::new("claude.cmd").args(&args).current_dir(&cwd).status(),
             other => other,
         }
         .context("couldn't start claude")?;
         std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
+/// Logs the set a session starts with, under the id it is started with, so the dashboard shows it
+/// from the session's first second.
+fn log_launch_set(session: &str, pick: &crate::handoff_pick::Pick) {
+    let set: Vec<serde_json::Value> = pick
+        .keys
+        .iter()
+        .map(|(k, s)| {
+            let (from, why) = match s {
+                crate::handoff_pick::Source::Inherited => ("last session", ""),
+                crate::handoff_pick::Source::Default => ("default", ""),
+                crate::handoff_pick::Source::Added(why) => ("added", why.as_str()),
+            };
+            serde_json::json!({ "key": k, "from": from, "why": why })
+        })
+        .collect();
+    let ev = serde_json::json!({ "ts": crate::now(), "session_id": session, "hook_event_name": LAUNCH_SET_EVENT, "launch_set": set });
+    if let Ok(mut line) = serde_json::to_vec(&ev) {
+        line.push(b'\n');
+        let _ = crate::hook::append(&crate::claude_data_dir(), &line);
     }
 }
 
@@ -381,7 +472,7 @@ mod tests {
     #[test]
     fn saves_loads_and_lists_newest_first() {
         let d = temp("store");
-        let rec = |id: &str, created| Record { id: id.into(), created, cwd: "/w".into(), from_session: None, prompt: "Goal: x".into() };
+        let rec = |id: &str, created| Record { id: id.into(), created, cwd: "/w".into(), from_session: None, prompt: "Goal: x".into(), inherited: None };
         save(&d, &rec("a", 1.0)).unwrap();
         save(&d, &rec("b", 2.0)).unwrap();
         std::fs::write(d.join("junk.json"), "not json").unwrap();
