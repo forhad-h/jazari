@@ -3,6 +3,12 @@
 `jazari update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- `jazari claude` starts Claude Code here with the project's prompts and skills; `--pick` chooses them, `--team` starts a team lead
+- `jazari build project` shows, edits, adds to, removes from or clears the prompts and skills saved for a project
+- A handoff starts with the old session's prompts and skills plus the project's set
+
 ## 1.0.7 - 2026-11-26
 
 - Every session jazari starts gets "Working with jazari" first; it is no longer a choice in `c` or `jazari build rules`

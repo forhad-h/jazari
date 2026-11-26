@@ -276,7 +276,7 @@ fn list() -> anyhow::Result<()> {
 }
 
 /// The `claude` program; `JAZARI_CLAUDE` overrides it.
-fn claude() -> std::ffi::OsString {
+pub(crate) fn claude() -> std::ffi::OsString {
     std::env::var_os("JAZARI_CLAUDE").filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into())
 }
 
@@ -300,11 +300,14 @@ fn resume(id: &str, no_pick: bool) -> anyhow::Result<()> {
         bail!("the handoff's folder {} no longer exists", r.cwd);
     }
     let lib = crate::rules::pickable();
-    let mut pick = Pick::base(&lib, r.inherited.as_deref(), &crate::settings::rules());
+    // The old session's set, plus the project's set (the global defaults when it has none).
+    let data = crate::data_dir();
+    let (project, _, base) = crate::project::set_for(&data, &cwd, &crate::project::git_common_dir, &lib, &crate::settings::rules());
+    let from_project = base.from == crate::project::Source::Project;
+    let mut pick = Pick::base(&lib, r.inherited.as_deref(), &base.keys, from_project);
     if pick_on() && !no_pick {
         println!("Choosing prompts and skills for this session…");
-        let project = cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let data = crate::data_dir();
+        let project = project.name.clone();
         let log = crate::handoff_pick::add_extras(&mut pick, &r.prompt, &project, &lib, &crate::handoff_pick::claude_runner(&data));
         let a = crate::act::Action::new(crate::act::Kind::Launch, format!("handoff {}", r.id)).detail(log).on_its_own(true);
         crate::act::record(&a, "done", "");
@@ -321,7 +324,7 @@ fn resume(id: &str, no_pick: bool) -> anyhow::Result<()> {
     let first = pick.first_line();
     println!("{first}");
     let session_id = crate::handoff_pick::new_session_id();
-    log_launch_set(&session_id, &pick);
+    log_launch_set(&session_id, &pick.log_entries());
     let prompt = format!("Begin your first reply with this line, unchanged:\n{first}\n\n{}", r.prompt);
 
     let mut args: Vec<std::ffi::OsString> = vec!["--session-id".into(), session_id.into()];
@@ -350,19 +353,9 @@ fn resume(id: &str, no_pick: bool) -> anyhow::Result<()> {
 
 /// Logs the set a session starts with, under the id it is started with, so the dashboard shows it
 /// from the session's first second.
-fn log_launch_set(session: &str, pick: &crate::handoff_pick::Pick) {
-    let set: Vec<serde_json::Value> = pick
-        .keys
-        .iter()
-        .map(|(k, s)| {
-            let (from, why) = match s {
-                crate::handoff_pick::Source::Inherited => ("last session", ""),
-                crate::handoff_pick::Source::Default => ("default", ""),
-                crate::handoff_pick::Source::Added(why) => ("added", why.as_str()),
-            };
-            serde_json::json!({ "key": k, "from": from, "why": why })
-        })
-        .collect();
+/// `set` holds each key, where it came from and why it was added (empty unless added).
+pub(crate) fn log_launch_set(session: &str, set: &[(String, String, String)]) {
+    let set: Vec<serde_json::Value> = set.iter().map(|(k, from, why)| serde_json::json!({ "key": k, "from": from, "why": why })).collect();
     let ev = serde_json::json!({ "ts": crate::now(), "session_id": session, "hook_event_name": LAUNCH_SET_EVENT, "launch_set": set });
     if let Ok(mut line) = serde_json::to_vec(&ev) {
         line.push(b'\n');
