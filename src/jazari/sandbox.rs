@@ -1,0 +1,109 @@
+//! One Docker container per product. It sees only the product's work folder in jazari's data
+//! (the task clones the host makes), never the product's repo or its `.git`. The folder is
+//! mounted at [`WORK`] inside the container, so no host path (a Windows `C:\…` path, or the
+//! founder's home folder) reaches the container. The container runs as a normal user with no Linux
+//! capabilities and fixed CPU, memory and process limits. Workers are `docker exec`'d into it,
+//! one task at a time, and it is restarted before each task and each check run, so nothing a
+//! worker starts outlives it.
+
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+pub const IMAGE: &str = "jazari-worker:2";
+/// Where the product's work folder is inside the container.
+pub const WORK: &str = "/work";
+/// The label that records which host folder a container mounts.
+const WORK_LABEL: &str = "marsad.jazari.work";
+
+/// A path inside the container for an item of the work folder: always `/`-joined.
+pub fn inside(item: &str) -> String {
+    format!("{WORK}/{item}")
+}
+const DOCKERFILE: &str = include_str!("../../assets/jazari/Dockerfile");
+
+pub fn container(product: &str) -> String {
+    format!("jazari-{product}")
+}
+
+/// The `docker run` arguments that create a product's container around its work folder.
+pub fn run_args(product: &str, repo: &str) -> Vec<String> {
+    let mut a: Vec<String> = ["run", "--detach", "--name"].map(String::from).to_vec();
+    a.push(container(product));
+    a.extend(
+        [
+            "--memory", "2g", "--cpus", "2", "--pids-limit", "512", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--label", "marsad.jazari=1", "--label",
+        ]
+        .map(String::from),
+    );
+    a.push(format!("{WORK_LABEL}={repo}"));
+    a.push("--volume".into());
+    a.push(format!("{repo}:{WORK}"));
+    a.push(IMAGE.into());
+    a
+}
+
+fn docker(args: &[&str]) -> anyhow::Result<std::process::Output> {
+    Command::new("docker").args(args).stdin(Stdio::null()).output().map_err(|e| anyhow::anyhow!("docker couldn't run ({e}); is Docker Desktop running?"))
+}
+
+fn ensure_image() -> anyhow::Result<()> {
+    if docker(&["image", "inspect", IMAGE])?.status.success() {
+        return Ok(());
+    }
+    println!("Building the worker image {IMAGE} (a few minutes, once)…");
+    let mut child = Command::new("docker").args(["build", "--quiet", "--tag", IMAGE, "-"]).stdin(Stdio::piped()).stdout(Stdio::null()).spawn()?;
+    child.stdin.take().expect("stdin is piped").write_all(DOCKERFILE.as_bytes())?;
+    anyhow::ensure!(child.wait()?.success(), "building {IMAGE} failed");
+    Ok(())
+}
+
+/// Restarts a container: every process a worker left behind ends.
+pub fn reset(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(docker(&["restart", "--time", "2", name])?.status.success(), "couldn't restart the container {name}");
+    Ok(())
+}
+
+/// Starts the product's container around `repo` (its work folder) if it isn't running, creating
+/// it the first time. Returns its name.
+pub fn ensure(product: &str, repo: &str) -> anyhow::Result<String> {
+    let name = container(product);
+    let format = format!("{{{{.State.Running}}}}\t{{{{.Config.Image}}}}\t{{{{range .Mounts}}}}{{{{.Destination}}}}{{{{end}}}}\t{{{{index .Config.Labels \"{WORK_LABEL}\"}}}}");
+    let state = docker(&["inspect", "--format", &format, &name])?;
+    if state.status.success() {
+        let text = String::from_utf8_lossy(&state.stdout).trim().to_string();
+        let mut parts = text.splitn(4, '\t');
+        let (running, image, mount, source) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        if mount == WORK && source == repo && image == IMAGE {
+            if running != "true" {
+                anyhow::ensure!(docker(&["start", &name])?.status.success(), "couldn't start the container {name}");
+            }
+            return Ok(name);
+        }
+        // Made by an older jazari (another image or mount): the repo is on the host, so nothing is lost.
+        anyhow::ensure!(docker(&["rm", "--force", &name])?.status.success(), "couldn't replace the container {name}");
+    }
+    std::fs::create_dir_all(repo)?;
+    ensure_image()?;
+    let args = run_args(product, repo);
+    let out = Command::new("docker").args(&args).stdin(Stdio::null()).output()?;
+    anyhow::ensure!(out.status.success(), "couldn't create the container {name}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    Ok(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_container_sees_only_the_repo_and_has_limits() {
+        let a = run_args("shop", r"C:\Users\me\.marsad\jazari\work\shop");
+        let has = |k: &str, v: &str| a.windows(2).any(|w| w[0] == k && w[1] == v);
+        assert!(has("--name", "jazari-shop") && has("--volume", r"C:\Users\me\.marsad\jazari\work\shop:/work") && has("--label", r"marsad.jazari.work=C:\Users\me\.marsad\jazari\work\shop") && has("--cap-drop", "ALL"));
+        assert!(has("--memory", "2g") && has("--pids-limit", "512") && has("--security-opt", "no-new-privileges"));
+        assert_eq!(a.iter().filter(|x| *x == "--volume").count(), 1);
+        assert_eq!(a.last().unwrap(), IMAGE);
+        assert!(DOCKERFILE.contains("USER node"));
+        assert_eq!(inside("task-7"), "/work/task-7", "container paths are /-joined on every host");
+    }
+}

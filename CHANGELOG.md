@@ -3,6 +3,29 @@
 `marsad update` shows the bullets under a version as "What's new", and `dist` copies them into the
 GitHub release. Keep each bullet to one short line.
 
+## Unreleased
+
+- `marsad jazari`: pair a Telegram chat with a one-time code, then check, message, stop and pause sessions from it
+- Sessions' `marsad say --attention` notes reach the paired chat; `marsad jazari notify` sends your own
+- Credentials are redacted from everything sent to Telegram, and actions taken from it are recorded with the origin `telegram`
+- `marsad jazari run` works through a task queue: each task is a headless Claude run in the product's own locked-down Docker container
+- jazari sleeps until the 5-hour or 7-day window resets, keeps a share for you by plan (`marsad jazari plan pro|max5|max20`), and spreads the week evenly
+- Finished, blocked and failing tasks are reported on Telegram; `marsad jazari audit` checks the hash-chained audit record
+- `marsad jazari new` and `/new` start a product from an idea: the Chief of Staff writes the vision, roadmap, ADR and threat model, then queues the first tasks
+- 36 roles (`marsad jazari personas`), from Chief of Staff to red team, each with its own mandate and model tier
+- Each task works in a fresh clone in jazari's data folder; the container never sees your repo or its `.git`, and the work comes back as a git bundle
+- jazari's own git commands run with hooks and fsmonitor off, and the merge uses exactly the commit the gates approved
+- Workers' questions wait for `/answer`, and deploy, spend or contact requests wait for the Approve or Deny button
+- A worker run stops after 45 minutes
+- Quality gates before every merge: the harness runs `main`'s `company/checks.sh` in the container and a secret scan, an independent read-only evaluator scores the work against the role's rubric, then read-only code and security review
+- The merge queue runs the checks again on the merged result before `main` moves
+- `marsad jazari quality` shows each role's pass rate and score per gate; a role that keeps failing moves up to the lead model
+- `marsad jazari evals` checks changes to personas, rubrics or the evaluator: free lint, then calibration cases with planted defects, with effort matched to the size of the change; nothing changed costs nothing
+- A judge that misses a planted defect blocks `marsad jazari run`; a changed role that does worse in live work is reported
+- `marsad jazari personas --export` lets you edit the roster and rubrics; role names workers use (developer, devops, qa) map to roster roles, and reworded duplicate tasks are dropped
+- A plan's tasks run in order: each starts once the one before it is merged into `main`
+- The worker image (`jazari-worker:2`) has Python 3, a C toolchain, ripgrep and shellcheck; workers install other tools in user space
+
 ## 0.22.0 - 2026-11-26
 
 - `y` copies the session name with its id, e.g. `fix login (1234abcd-…)`

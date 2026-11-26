@@ -273,6 +273,192 @@ works. Start sessions with the **Working with marsad** prompt (`c`, or `marsad r
 Claude knows to read marsad's notes, post its progress with `marsad say`, wait for resources with
 `marsad system --wait`, and stop when asked.
 
+### Telegram (jazari)
+
+`marsad jazari` connects marsad to a Telegram bot, so you can check on sessions and steer them
+from your phone. It is off until you set it up, and nothing is sent anywhere before that.
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`), and send it `/setjoingroups`
+   → Disable so it can't be added to groups.
+2. Save the bot token where marsad reads it, without it passing through a command line or a chat.
+   - On macOS, use the Keychain: `security add-generic-password -a "$USER" -s marsad-jazari-telegram-token -w`.
+   - Elsewhere, set `MARSAD_JAZARI_TELEGRAM_TOKEN`.
+3. Pair your chat: `marsad jazari telegram pair` shows a one-time code. Send that code to the bot in
+   a private chat within 10 minutes. From then on, the bot obeys only that chat. Every other chat
+   is ignored and gets no reply.
+4. Start the bridge: `marsad jazari bridge` keeps running until you stop it, so run it in tmux or a
+   spare terminal.
+
+In the paired chat:
+
+| Command | What it does |
+|---|---|
+| `/status` | Live sessions, which ones need you, and the 5-hour and 7-day usage |
+| `/tell <id> <message>` | A message for a session; give at least 4 letters of its id |
+| `/stop <id>` | Stops a session before its next tool call |
+| `/pause [30m\|2h\|1d]` and `/resume` | The same as `marsad pause` and `marsad resume` |
+| `/new <name> <idea>`, `/idea <product> <idea>` | Start a product, or give one a new idea (see the jazari engine) |
+| `/tasks` | What the team is doing, and what waits for you |
+| `/answer <task> <answer>` | Answer a task's question |
+| `/approve <task>`, `/deny <task>` | Decide on a deploy, spend or contact; the buttons do the same |
+
+When a session runs `marsad say --attention "…"`, the bridge sends the note to the chat.
+`marsad jazari notify "…"` sends your own message, from a script or from stdin. `marsad actions`
+lists everything done from Telegram with the origin `telegram`.
+
+Before anything is sent, credentials are replaced with `[redacted]`:
+- known token prefixes (`sk-ant-`, `ghp_`, `github_pat_` and others);
+- Telegram bot tokens;
+- the value in `KEY=value` when the key names a token, secret or password.
+
+`marsad jazari telegram status` checks the setup, `telegram test` sends a test message, and
+`telegram unpair` forgets the chat.
+
+### The jazari engine
+
+jazari runs a small AI software company on your Claude subscription. You bring the ideas, and it plans, builds,
+reviews and merges them. It asks you only for decisions and approvals.
+
+```sh
+marsad jazari new notes "A private, end-to-end encrypted notes app"   # a new repo, planned by the Chief of Staff
+marsad jazari idea notes "Add sharing a note by link"                 # a new idea for an existing product
+marsad jazari product add shop ~/code/shop                            # or bring a repo you already have
+marsad jazari task shop "Add rate limiting to login" --role backend-engineer --priority 2
+marsad jazari plan max5                                               # pro, max5 or max20: how hard it works
+marsad jazari run                                                     # the supervisor; --once runs at most one task
+marsad jazari tasks                                                   # the queue, and what waits for you
+marsad jazari answer 12 "Use Twilio"                                  # answer a task's question
+marsad jazari approve 14 / deny 14                                    # decide on a deploy, spend or contact
+marsad jazari personas                                                # the roles workers take
+```
+
+**Before the first run:** save a long-lived Claude login token for the workers. Run `claude setup-token`,
+then on macOS save the token with `security add-generic-password -a "$USER" -s marsad-jazari-claude-token -w`.
+Elsewhere, set `MARSAD_JAZARI_CLAUDE_TOKEN`. Docker must be running. New products' repos go in
+`~/.marsad/jazari/products/` (under `MARSAD_HOME` when it is set), or in the folder set by `jazari.products_dir`
+in `settings.json`.
+
+**The company.** Each task names a role from `marsad jazari personas`. There are 36 roles:
+- **Leadership and planning:** Chief of Staff, Product Manager, Architect, Security Architect, CISO, Tech Lead.
+- **Engineering:** backend, frontend, mobile, data, ML, edge/offline, platform/SRE, database.
+- **Design:** UX, UI, accessibility, technical writing.
+- **Quality:** QA, bug hunter, performance, code review.
+- **Security:** AppSec, red team, blue team, supply chain, cryptography, privacy, compliance, incident response.
+- **Growth:** market, research, growth, communications, support.
+
+Planning roles use the plan's lead model (Opus on Max), building roles use Sonnet, and support uses Haiku. A new idea
+goes to the Chief of Staff. It writes `company/VISION.md`, the roadmap, an architecture ADR, the threat model and
+`SECURITY.md`, and then queues the first milestone's tasks. They run in order: each starts once the one before it
+is merged. These files in the product's repo are the team's memory.
+
+**The pipeline: nothing a worker claims is trusted until it is verified.** Every task runs as a fresh
+headless Claude session, in the product's container, inside a fresh clone that jazari makes in
+`~/.marsad/jazari/work/<product>/`. The container never sees your repo or its `.git`, and your checkout is
+never switched. The worker's commits come back as a git bundle, which jazari fetches into your repo as
+`jazari/task-<id>`. Every git command jazari runs on your Mac turns off hooks and fsmonitor, so nothing a
+worker writes can run there. A branch with new commits passes these gates in order:
+
+1. **Harness checks.** These are deterministic and cost no tokens:
+   - jazari runs `company/checks.sh` (build, tests, linters, type checks) in the container, on a fresh clone of
+     the branch. The script comes from `main`, not from the branch, so a worker can't weaken the gate it is
+     judged by. Until `main` has a script, the branch's new one is used once; jazari tells you, and that
+     change gets full code and security review;
+   - it scans the diff for credentials, including key files, tokens, JWTs and passwords in URLs.
+
+   Code without a checks script fails this gate. The commit that passes is pinned: every later stage judges
+   it, and the merge uses exactly that commit.
+2. **The evaluator.** A separate, read-only judge with a fresh context scores the work against the builder's role
+   rubric (`assets/jazari/rubrics.md`):
+   - every role is judged on: done as asked, claims match evidence, scope, and no secrets;
+   - each kind of work adds its own criteria: code, plan, design, docs or security.
+
+   Each criterion is pass or fail, with evidence. The harness's check output is given to the judge as evidence,
+   so a claim like "the tests pass" is verified, not believed. To pass:
+   - every critical criterion must pass;
+   - at least 80% of all criteria must pass;
+   - the overall score must be 4 or 5.
+3. **Code review, then security review.** Both reviewers are read-only. Changes to `*.md` files only skip both
+   reviews; any other change, `company/checks.sh` included, gets both.
+4. **The merge queue.** The merge commit is built aside, `company/checks.sh` runs again on the merged result, and
+   only then does `main` move.
+
+A failed gate sends a fix task back to the role that built the branch. The fix carries the findings, the failed
+criteria and the original spec. After three rounds the task waits for you. A merge that conflicts goes back to
+the builder. If your checkout of `main` has uncommitted changes, the merge waits until it is clean. jazari doesn't
+push.
+
+**Quality per role.** Every judgment is recorded. `marsad jazari quality` shows, for each role and gate:
+- how often it ran;
+- how often it passed;
+- the average score.
+
+A building role that fails most of its last 8 evaluations moves up to the plan's lead model, and jazari tells you.
+
+**Changing the team.** `marsad jazari personas --export` copies the built-in `personas.md` and `rubrics.md` to
+`~/.marsad/jazari/`. jazari uses your copies from then on. `marsad jazari evals` checks a change with effort
+matched to its size, so a small edit costs little or nothing:
+
+- **Nothing changed:** each role, each rubric group and the evaluator have a fingerprint. If none changed, no
+  tokens are spent.
+- **Lint, always run, free:** duplicate or missing roles, unknown rubric groups, rubrics with no critical
+  criterion, unsafe instructions (such as "git push" or "always approve") and the prompt-size budget.
+- **A minor edit (a few words):** lint only, then the canary watches live results.
+- **A moderate edit:** the judges see only the known-bad calibration cases (`assets/jazari/evals.json`), in one
+  batched call per rubric group, on the small model at low effort.
+- **A major change:** every case, on the production judge model at high effort. A change counts as major when a
+  criterion is added, removed or re-weighted, a role's tier or rubric changes, more than a third of the text
+  changes, or it is the first check.
+
+A judge that approves one of the planted defects blocks `marsad jazari run`. Such defects include missing tests
+behind a "tests pass" claim, SQL injection, scope creep, a committed key, a vague plan, poor contrast, a wrong
+command in docs or an unproven security finding. `--skip-evals` overrides the block. Live judgments are tagged
+with the role's prompt version, and if a changed role passes clearly less often than its earlier versions, jazari
+tells you.
+
+**What needs you.** A worker that needs a decision asks a question, and you reply with `/answer`. To deploy,
+spend money or contact real users, it must ask for approval, and Telegram shows ✅ Approve and ❌ Deny buttons.
+No production, payment or outreach credentials ever enter the container. Approved work comes back as runbooks
+for you to run.
+
+**The container.** The first task builds the worker image (`jazari-worker:2`: Node.js, Python 3, a C toolchain, git, ripgrep and shellcheck; workers install anything else in user space) and creates the product's container
+(`jazari-<name>`). The container:
+- sees only the product's work folder (the clones jazari makes), mounted at the same path as on your Mac;
+- runs as a normal user, with no Linux capabilities;
+- is limited to 2 CPUs, 2 GB of memory and 512 processes;
+- is restarted before every task and every check run, so nothing a worker starts outlives it.
+
+Workers run with permissions bypassed, which applies only inside that container. Only the Claude runs get the
+login token; the checks and git commands don't. A run is stopped after 45 minutes.
+
+**Limits to know.** These are not handled yet; the plan to fix them is in
+`docs/plans/2026-11-26-jazari-hardening-followups.md`:
+- **Open network.** The container can reach the internet. Asking before a deploy, a spend or contacting users
+  is a rule the workers follow, not something the container enforces. A worker that ignores the rule could
+  still use the network on its own.
+- **The audit record has no key.** The hash chain shows an edited or removed entry in the middle. It can't tell
+  if entries were cut from the end, or if someone with access to your Mac rewrote the whole file.
+- **Pairing codes.** Anyone who knows the bot's name can try 5 codes during a pairing window.
+- **Message text in `ps`.** The text of Telegram messages is passed to `curl` as arguments, so other programs on
+  your Mac can see it briefly. The bot token is not passed this way.
+
+**Usage limits.** Each run reports the 5-hour and 7-day windows, and jazari waits when it must.
+- When the next task would eat into the share kept for you, jazari sleeps until that window resets. The share is
+  30%/25% on Pro, 15%/15% on Max 5x and 10%/10% on Max 20x.
+- It also sleeps if a window refused the run.
+- It sleeps when it is ahead of an even pace through the week.
+- A task refused for usage goes back in the queue without counting as a failure.
+- `marsad jazari limits` shows the last reading.
+
+**Telling you.** When Telegram is paired, jazari tells you when:
+- work is built, merged, blocked or waiting for you;
+- a task fails three times;
+- it goes to sleep.
+
+**Pausing.** `marsad pause` (or `/pause`) pauses it.
+
+**The record.** Every start, finish, merge and sleep is added to `~/.marsad/jazari/audit.jsonl`. Each entry
+carries the hash of the one before it, so `marsad jazari audit` finds an edited or deleted entry.
+
 ### Disk cleanup
 
 `D` in the dashboard (or `marsad clean`) lists what can be removed, measured on disk, in three tiers.

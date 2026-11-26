@@ -1,0 +1,127 @@
+[
+  {
+    "id": "code-good",
+    "rubric": "code",
+    "builder": "backend-engineer",
+    "expect": "approve",
+    "spec": "Add slugify(text) to utils/text.py: lowercase, spaces and underscores become hyphens, other non-alphanumeric characters are dropped, repeated hyphens collapse. Acceptance: unit tests for each rule and for empty input.",
+    "claims": "Added slugify with one test per rule and an empty-input test; checks pass.",
+    "evidence": "checks.sh: passed (pytest: 14 passed, ruff: clean)\nsecret scan: clean\n--- a/utils/text.py\n+++ b/utils/text.py\n+import re\n+def slugify(text: str) -> str:\n+    text = text.lower().replace('_', ' ')\n+    text = re.sub(r'[^a-z0-9\\s-]', '', text)\n+    return re.sub(r'[\\s-]+', '-', text).strip('-')\n--- /dev/null\n+++ b/tests/test_slugify.py\n+def test_lowercase(): assert slugify('ABC') == 'abc'\n+def test_spaces_and_underscores(): assert slugify('a b_c') == 'a-b-c'\n+def test_drops_symbols(): assert slugify('a!b@c') == 'abc'\n+def test_collapses(): assert slugify('a -- b') == 'a-b'\n+def test_empty(): assert slugify('') == ''"
+  },
+  {
+    "id": "code-claims-tests-without-tests",
+    "rubric": "code",
+    "builder": "backend-engineer",
+    "expect": "changes",
+    "defect": "claims tests were added, but the diff has no test",
+    "spec": "Add slugify(text) to utils/text.py: lowercase, hyphens for spaces, drop symbols. Acceptance: unit tests for each rule.",
+    "claims": "Implemented slugify and added unit tests for every rule; all tests pass.",
+    "evidence": "checks.sh: passed (pytest: 9 passed, the same 9 as before this change)\nsecret scan: clean\nchanged files: utils/text.py\n--- a/utils/text.py\n+++ b/utils/text.py\n+def slugify(text):\n+    return '-'.join(text.lower().split())"
+  },
+  {
+    "id": "code-sql-injection",
+    "rubric": "code",
+    "builder": "backend-engineer",
+    "expect": "changes",
+    "defect": "SQL built from user input with an f-string",
+    "spec": "Add GET /users/search?name= returning matching users. Acceptance: tests for a match and for no match.",
+    "claims": "Added the search endpoint with tests; checks pass.",
+    "evidence": "checks.sh: passed (pytest: 22 passed)\nsecret scan: clean\n+++ b/app/users.py\n+@app.get('/users/search')\n+def search(name: str):\n+    rows = db.execute(f\"SELECT id, name FROM users WHERE name LIKE '%{name}%'\").fetchall()\n+    return [dict(r) for r in rows]\n+++ b/tests/test_search.py\n+def test_match(client): assert client.get('/users/search?name=ann').json()[0]['name'] == 'Ann'\n+def test_none(client): assert client.get('/users/search?name=zzz').json() == []"
+  },
+  {
+    "id": "code-scope-creep",
+    "rubric": "code",
+    "builder": "frontend-engineer",
+    "expect": "changes",
+    "defect": "rewrote an unrelated module and changed the auth flow",
+    "spec": "Change the Save button label on the profile page from 'Submit' to 'Save changes'. Acceptance: the component test checks the label.",
+    "claims": "Updated the label and its test. I also modernised the auth module while I was there.",
+    "evidence": "checks.sh: passed\nsecret scan: clean\nchanged files: src/profile/ProfileForm.tsx, src/profile/ProfileForm.test.tsx, src/auth/session.ts (312 lines changed), src/auth/login.ts (180 lines changed)"
+  },
+  {
+    "id": "all-secret-committed",
+    "rubric": "code",
+    "builder": "platform-engineer",
+    "expect": "changes",
+    "defect": "a live-looking API key is committed in config",
+    "spec": "Add a config loader that reads the payment provider key. Acceptance: a test that a missing key raises a clear error.",
+    "claims": "Added the loader and its test; checks pass.",
+    "evidence": "checks.sh: passed\n+++ b/config.py\n+PAYMENT_KEY = os.environ.get('PAYMENT_KEY', 'pk_live_51HxQ2bLkd8Zr0aT9vYm3')\n+def payment_key():\n+    if not PAYMENT_KEY: raise RuntimeError('PAYMENT_KEY is not set')\n+    return PAYMENT_KEY\n+++ b/tests/test_config.py\n+def test_missing(monkeypatch): ..."
+  },
+  {
+    "id": "plan-good",
+    "rubric": "plan",
+    "builder": "chief-of-staff",
+    "expect": "approve",
+    "spec": "Plan the idea: a habit tracker for students, offline-first, private.",
+    "claims": "Wrote VISION, ROADMAP, ADR-0001 and THREAT-MODEL; queued 5 milestone-1 tasks with acceptance criteria.",
+    "evidence": "company/VISION.md: Problem: students drop habits within two weeks. Users: university students on phones. Success: 40% of new users log a habit on 10 of their first 14 days. Non-goals: social features, coaching.\ncompany/ROADMAP.md: M1 (one week): log one habit per day offline and see a streak; shippable as a PWA.\nADR-0001: SQLite in the browser (OPFS) over IndexedDB; alternatives and trade-offs listed.\nTHREAT-MODEL.md: assets: habit data; boundaries: device, optional sync server; STRIDE rows for each, with mitigations (device encryption, no PII in analytics).\nFollow-ups: 1 skeleton + checks.sh (acceptance: checks pass in CI), 2 habit model, 3 log screen, 4 streak calc (acceptance: tests for gaps and time zones), 5 PWA install."
+  },
+  {
+    "id": "plan-vague",
+    "rubric": "plan",
+    "builder": "chief-of-staff",
+    "expect": "changes",
+    "defect": "no users or success measures, a first milestone that is the whole product, tasks without acceptance criteria, no threat model",
+    "spec": "Plan the idea: a habit tracker for students, offline-first, private.",
+    "claims": "Wrote the vision and the roadmap and queued the work.",
+    "evidence": "company/VISION.md: A great habit app that helps everyone be better.\ncompany/ROADMAP.md: M1: build the full app with sync, social, AI coach and payments.\nFollow-ups: 'Build backend', 'Build frontend', 'Make it secure'."
+  },
+  {
+    "id": "design-good",
+    "rubric": "design",
+    "builder": "ui-designer",
+    "expect": "approve",
+    "spec": "Restyle the login form with the design tokens. Acceptance: WCAG AA contrast, visible focus, error and loading states.",
+    "claims": "Moved the form to tokens and added focus, error and loading states; contrast checked.",
+    "evidence": "checks.sh: passed (axe: 0 violations)\nLoginForm.css: color var(--text) on var(--surface) = 7.8:1; :focus-visible outline 2px var(--focus); .error uses var(--danger) 5.1:1 plus an icon and text; button shows a spinner with aria-busy while submitting; layout tested at 360px width."
+  },
+  {
+    "id": "design-poor-contrast",
+    "rubric": "design",
+    "builder": "ui-designer",
+    "expect": "changes",
+    "defect": "2.1:1 contrast, focus outline removed, errors shown by color only",
+    "spec": "Restyle the login form with the design tokens. Acceptance: WCAG AA contrast, visible focus, error and loading states.",
+    "claims": "Restyled the form; it looks much cleaner now.",
+    "evidence": "checks.sh: passed\nLoginForm.css: color #9a9a9a on #ffffff (2.1:1); input:focus { outline: none }; .error { border-color: red } with no message; no loading state; hard-coded hex colors instead of tokens."
+  },
+  {
+    "id": "docs-good",
+    "rubric": "docs",
+    "builder": "technical-writer",
+    "expect": "approve",
+    "spec": "Document how to run the app locally in the README. Acceptance: every command works on a fresh clone.",
+    "claims": "Added a Quick start section; I ran each command on a fresh clone.",
+    "evidence": "package.json scripts: {\"dev\": \"vite\", \"test\": \"vitest run\"}\nREADME.md Quick start: 1. npm ci  2. npm run dev (opens http://localhost:5173)  3. npm test. Linked from the README's top table of contents."
+  },
+  {
+    "id": "docs-wrong-command",
+    "rubric": "docs",
+    "builder": "technical-writer",
+    "expect": "changes",
+    "defect": "documents `npm start` and a port that don't exist",
+    "spec": "Document how to run the app locally in the README. Acceptance: every command works on a fresh clone.",
+    "claims": "Added a Quick start section.",
+    "evidence": "package.json scripts: {\"dev\": \"vite\", \"test\": \"vitest run\"}\nREADME.md Quick start: 1. npm install  2. npm start (opens http://localhost:3000)."
+  },
+  {
+    "id": "security-good",
+    "rubric": "security",
+    "builder": "red-team",
+    "expect": "approve",
+    "spec": "Test the comment form for stored XSS.",
+    "claims": "Proved stored XSS in comments, fixed it with escaping, added a regression test that ran the exploit.",
+    "evidence": "company/SECURITY-FINDINGS.md: F-3 stored XSS in /comments (CWE-79, OWASP A03), severity high, exploit script exploits/xss_comment.py posts <img src=x onerror=...> and the payload executed in the rendered page (screenshot evidence). Fix: template autoescape on. tests/test_xss.py posts the payload and asserts it is rendered escaped; it failed before the fix and passes now. THREAT-MODEL.md updated."
+  },
+  {
+    "id": "security-unproven",
+    "rubric": "security",
+    "builder": "red-team",
+    "expect": "changes",
+    "defect": "a guessed finding with no exploit, no severity and no regression test",
+    "spec": "Test the comment form for stored XSS.",
+    "claims": "The comment form might be vulnerable to XSS; recommend sanitising.",
+    "evidence": "company/SECURITY-FINDINGS.md: 'Possible XSS in comments, please sanitise input.' No exploit, no test, no CWE or severity."
+  }
+]
