@@ -358,7 +358,7 @@ pub fn run_tell(a: TellArgs) -> anyhow::Result<()> {
         println!("{name} stops before its next tool call; `claude --resume {}` continues it.", s.id);
     } else {
         if tell_and_wake(&s.id, &a.message.join(" "))? {
-            println!("Queued for {name}, and woke the idle session: Claude reads it now.");
+            println!("Queued for {name}, and sent a wake-up to the idle session.");
         } else {
             println!("Queued for {name}: Claude reads it at the session's next tool call or prompt.");
         }

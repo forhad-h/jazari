@@ -300,8 +300,9 @@ you through jazari.
 
 - **`t`** (or `jazari watch tell <id> "…"`) sends the selected session a message. The guard hook hands it
   to Claude at the session's next tool call or prompt, as a note to act on before going on. If the
-  session is idle, jazari also wakes it through Claude Code's session socket (macOS and Linux), so
-  Claude reads the message now. The wake-up carries none of the message text. The details pane
+  session is idle, jazari also sends it a wake-up through Claude Code's session socket (macOS and
+  Linux). The wake-up starts a turn, unless the session holds it, and carries none of the message
+  text. The details pane
   shows messages still waiting.
 - **`x`** (`jazari watch tell <id> --stop`) stops the session before its next tool call. The turn ends
   cleanly and `claude --resume <id>` continues it. A prompt you send the session first cancels it.

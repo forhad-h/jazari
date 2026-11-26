@@ -5,7 +5,7 @@ GitHub release. Keep each bullet to one short line.
 
 ## Unreleased
 
-- `jazari watch tell` and `t` wake an idle session, so it reads the message now (macOS and Linux)
+- `jazari watch tell` and `t` send an idle session a wake-up, so it can read the message now (macOS and Linux)
 
 ## 1.0.3 - 2026-11-26
 
