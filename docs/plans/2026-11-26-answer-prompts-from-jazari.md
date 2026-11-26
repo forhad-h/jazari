@@ -39,29 +39,51 @@ The full results are in
    answer for a host prompt.
 2. If the wait ends with no answer, the hook writes nothing. Then the terminal prompt stays, and
    the session waits for the user as before. No answer never means "allow".
-3. The feature is off by default. The founder turns it on for all sessions or for one session.
+3. The feature is off by default. The founder turns it on with `jazari watch answer --on`.
 4. The wait is short, 120 seconds by default, and set in config. Each waiting hook is a running
    process, so the wait has a limit.
 5. jazari never turns a deny into an allow. A deny and "leave it to the terminal" are always safe.
+6. Every allow and every answer asks for Touch ID or the Mac password, inside the hook, before the
+   hook prints anything. The dialog names the session and the action from the hook's own input, so
+   a fake dashboard or injected key presses cannot approve a tool call. A cancelled or failed check
+   means no output. A deny needs no check. On Linux the dashboard offers only deny.
 
 ### The hook
 
-1. `install.rs` adds a second, synchronous hook on `PermissionRequest` only:
-   `jazari watch answer --hook`. Its `timeout` is the wait plus 10 seconds. The async event hook
-   stays as it is. `jazari install` adds the hook only when the setting is on.
-2. The hook reads the input: `session_id`, `tool_name`, `tool_input`, `permission_suggestions`.
-   If the feature is off for this session, or the tool is ExitPlanMode, the hook exits at once with
-   no output.
-3. The hook writes a request file in jazari's data dir: `prompts/<session>/<id>.json`, mode 600.
-   The file holds a random one-time code, the tool, a preview, the options and the start time.
-   The preview is redacted with `telegram::redact`, so that no secret is stored.
-4. The hook checks for an answer file every 500 ms until the wait ends.
-5. The hook stops early when the terminal answered first. The signal is a later hook event from the
-   main agent of the same session, after the request's start time. Examples are PostToolUse,
-   PreToolUse, Stop and UserPromptSubmit. The spike showed that the hook keeps running after a
-   terminal answer, so this check is needed.
-6. When the hook stops, it closes the request with one outcome: `dashboard`, `desk` or
-   `timeout`. A late answer to a closed request does nothing.
+1. `install.rs` always registers a second, synchronous hook on `PermissionRequest` only, as the
+   hook kind `answer`: `jazari watch answer --hook`. Its `timeout` is the longest allowed wait
+   (600 seconds) plus 10 seconds. The async event hook stays as it is. Always registering the hook
+   fits the record of installed hooks, and turning the feature on needs no reinstall.
+2. While the feature is off, the hook reads only the setting, does not read its input, writes no
+   file and prints nothing. So the terminal prompt behaves as without jazari.
+3. The hook reads the input: `session_id`, `tool_name`, `tool_input`, `permission_suggestions`.
+   For ExitPlanMode it exits at once with no output.
+4. The hook connects to the dashboard's Unix socket in jazari's data dir. The socket has mode 600,
+   in a folder with mode 700. Before it sends anything, the hook checks the server through the
+   kernel's peer credentials (`LOCAL_PEERPID` and `getpeereid` on macOS, `SO_PEERCRED` on Linux):
+   - the server runs as the same user;
+   - the server is a jazari process;
+   - no Claude Code process is among the server's parent processes.
+   A dashboard that a session started directly fails the last check. No socket or a failed check
+   means that the hook prints nothing, so the terminal decides.
+5. The hook sends the request over the socket: the tool, a preview, the questions and the time
+   limit. The preview is redacted with `telegram::redact`. No request or answer is written to a
+   file, so a session cannot answer by writing a file.
+6. The hook waits for one answer line. It checks that the answer fits the request: an offered
+   option for a question, and an offered rule for "always allow".
+7. The hook stops early when the terminal answered first. The signal is a later hook event from the
+   main agent of the same session. Examples are PostToolUse, PreToolUse, Stop and
+   UserPromptSubmit. The spike showed that the hook keeps running after a terminal answer, so this
+   check is needed.
+8. The hook logs `JazariPromptOpened` and `JazariPromptClosed` to the event log. The closing event
+   has the outcome (`dashboard`, `desk`, `timeout` or `dropped`) and the answer.
+9. The risk check refuses any tool call that names the answer socket or the message inbox, as a
+   second layer.
+10. Windows has no Unix socket here, so the hook never answers there.
+
+Limit: a process of the same user that starts a real dashboard outside Claude Code's process tree
+is not stopped. For example, a session can start a dashboard through tmux, whose server leaves
+the session's process tree.
 
 ### What the hook returns
 
@@ -78,16 +100,15 @@ Free-text answers ("Type something") are not in the first version. A test must f
 
 ### The dashboard
 
-1. A session in APPROVE or QUESTION with an open request shows a mark in the list.
-2. The details view shows the request: the tool and the full command or file path, or each
-   question with its options.
-3. Key `a` opens the answer view. For a permission prompt the keys are `y` (allow), `A` (always
-   allow, only when a suggestion exists) and `n` (deny). For a question the founder picks an option
-   for each question, then presses Enter.
-4. The answer view writes the answer file. It does not call the hook directly.
-5. The view keeps `t` (tell) next to `a`, so that the founder can answer and send messages to many
-   sessions from one place.
-6. Update the footer key hints in `ui.rs`, the README key list, and `CHANGELOG.md`.
+1. The dashboard starts the socket server when it opens. A second dashboard does not start one.
+2. The footer shows `r answer (N waiting)` first, while prompts wait.
+3. Key `r` opens the answer box for the selected session. For a permission prompt the keys are `y`
+   (allow), `A` (always allow, only when a suggestion exists) and `n` (deny). For a question, `1`-`9`
+   chooses an option, one question after another. In a multi-select question, `1`-`9` marks options
+   and Enter sends them. Esc leaves the prompt to the terminal.
+4. The box closes by itself when the prompt was answered at the terminal or timed out.
+5. `t` (tell) stays next to `r`, so that the founder can answer and send messages to many sessions
+   from one place.
 
 ### Telegram
 
@@ -96,8 +117,8 @@ founder opts in.
 
 ### The record
 
-Every outcome is written to the audit record (`src/jazari/audit.rs`) and to the actions log
-(`act::record`). The entry has the session, the tool, the preview, the answer and who answered.
+Every outcome is written to the event log, with the session, the tool, the preview, the answer and
+the outcome.
 
 ## Part B: jazari answers routine sandbox questions
 
@@ -159,10 +180,12 @@ The list lives in one constant in a new module, `src/jazari/routine.rs`, with it
 
 | File | Change |
 |---|---|
-| `src/install.rs` | The synchronous `PermissionRequest` hook, only when the setting is on |
-| `src/answer.rs` (new) | The hook, request and answer files, the outcome, the output JSON |
-| `src/settings.rs` | `answer_prompts` (off), `answer_wait_secs` (120) |
-| `src/app.rs`, `src/ui.rs` | The answer view and key `a` |
+| `src/install.rs` | The synchronous `PermissionRequest` hook, kind `answer`, always registered |
+| `src/answer.rs` (new) | The hook, the socket server and its peer check, the output JSON |
+| `src/answer_view.rs` (new) | The dashboard's answer box |
+| `src/risk.rs` | The rule that refuses tool calls naming the socket or the inbox |
+| settings (through `settings::get` and `set`) | `answer_prompts` (off), `answer_wait_secs` (120) |
+| `src/app.rs`, `src/ui.rs` | Key `r`, the server's poll, and the footer hint |
 | `src/jazari/routine.rs` (new) | The deterministic check for Part B |
 | `src/jazari/supervisor.rs` | Part B: check before the founder card |
 | `src/jazari/store.rs` | The per-product auto-answer setting |
@@ -174,7 +197,7 @@ clock and file reads are injected, like `share::Desktop::for_tests()`.
 ## Order of work
 
 1. This plan and the test note, as a doc PR.
-2. Part A: hook and request files, then the dashboard. Each step is its own PR.
+2. Part A: the hook, the socket and the dashboard view, as one PR.
 3. Part B, as one PR.
 
 ## Verification

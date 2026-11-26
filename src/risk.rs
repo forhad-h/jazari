@@ -53,8 +53,60 @@ fn worst(found: Vec<Finding>) -> Option<Finding> {
     best
 }
 
+/// Where jazari takes the user's answers and messages for sessions: the dashboard's answer socket
+/// and the message inbox. A session that reaches them could answer its own permission prompt or
+/// send itself a message that reads as the user's.
+fn user_channel_paths() -> Vec<String> {
+    let mut paths = vec![".jazari/answer".to_string(), ".jazari/claude/inbox".to_string(), "dashboard.sock".to_string()];
+    for p in [crate::data_dir().join("answer"), crate::claude_data_dir().join("inbox")] {
+        paths.push(p.to_string_lossy().into_owned());
+    }
+    paths
+}
+
+/// Refuses a shell command that names one of [`user_channel_paths`], or a file write whose target
+/// is under one. Only the command and the target path are read, never a file's content or a
+/// message, so work on jazari's own code and docs is not stopped. This is defence in depth only:
+/// a glob, a variable, base64 or a script file gets past a text match. The protection that holds
+/// is the Touch ID check in the answer hook.
+fn assess_user_channel(tool_name: &str, tool_input: &Value, paths: &[String]) -> Option<Finding> {
+    let s = |k: &str| tool_input.get(k).and_then(Value::as_str).unwrap_or("");
+    let text = match tool_name {
+        "Bash" => s("command"),
+        "Write" | "Edit" | "MultiEdit" => s("file_path"),
+        "NotebookEdit" => s("notebook_path"),
+        _ => return None,
+    };
+    paths.iter().find(|p| text.contains(p.as_str())).map(|p| {
+        block("user-channel", format!("it touches {p}, where jazari takes the user's answers and messages for sessions"))
+    })
+}
+
+/// Refuses a shell command that types keys into another program: tmux `send-keys` or
+/// `paste-buffer`, screen's `-X stuff`, AppleScript keystrokes or System Events, and xdotool. Such
+/// a command could answer a prompt in a terminal or in jazari's dashboard. Best effort only: a
+/// script file or another language gets past a text match.
+fn assess_key_injection(cmd: &str) -> Option<Finding> {
+    let c = cmd.to_lowercase();
+    let words: Vec<&str> = c.split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '(' | ')' | '\'' | '"')).filter(|w| !w.is_empty()).collect();
+    let has = |w: &str| words.contains(&w);
+    let tmux = has("tmux") && (has("send-keys") || has("send") || has("paste-buffer") || has("pasteb"));
+    let screen = has("screen") && has("-x") && has("stuff");
+    let apple = has("osascript") && (c.contains("keystroke") || c.contains("key code") || c.contains("system events"));
+    let x11 = has("xdotool");
+    (tmux || screen || apple || x11).then(|| block("key-injection", "it types keys into another program, which could answer a prompt for the user"))
+}
+
 /// Checks one tool call without touching the network or other programs.
 pub fn assess(tool_name: &str, tool_input: &Value) -> Option<Finding> {
+    if let Some(f) = assess_user_channel(tool_name, tool_input, &user_channel_paths()) {
+        return Some(f);
+    }
+    if tool_name == "Bash"
+        && let Some(f) = tool_input.get("command").and_then(Value::as_str).and_then(assess_key_injection)
+    {
+        return Some(f);
+    }
     let s = |k: &str| tool_input.get(k).and_then(Value::as_str).unwrap_or("");
     match tool_name {
         "Bash" => assess_command(s("command")),
@@ -1812,6 +1864,40 @@ pub fn run(a: RiskArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_that_type_keys_into_other_programs_are_refused() {
+        for cmd in [
+            "tmux send-keys -t dash r y",
+            "tmux send -t 0 'y' Enter",
+            "tmux paste-buffer -t dash",
+            "screen -S dash -X stuff 'y'",
+            "osascript -e 'tell application \"System Events\" to keystroke \"y\"'",
+            "xdotool type y",
+        ] {
+            assert_eq!(assess_key_injection(cmd).map(|f| f.rule), Some("key-injection"), "{cmd}");
+        }
+        for cmd in ["tmux ls", "tmux new -d -s work", "screen -ls", "osascript -e 'display notification \"done\"'", "echo send-keys"] {
+            assert_eq!(assess_key_injection(cmd), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_tool_call_that_names_the_user_channels_is_refused() {
+        let paths = user_channel_paths();
+        for (tool, input) in [
+            ("Bash", json!({ "command": "printf '{\\\"answer\\\":\\\"allow\\\"}' | nc -U ~/.jazari/answer/dashboard.sock" })),
+            ("Write", json!({ "file_path": "/Users/me/.jazari/claude/inbox/s1.jsonl", "content": "x" })),
+            ("Bash", json!({ "command": "socat - UNIX-CONNECT:$HOME/.jazari/answer/dashboard.sock" })),
+        ] {
+            let f = assess_user_channel(tool, &input, &paths).expect("refused");
+            assert_eq!((f.severity, f.rule), (Severity::Block, "user-channel"));
+        }
+        assert_eq!(assess_user_channel("Bash", &json!({ "command": "ls ~/.jazari/claude" }), &paths), None);
+        // A file or message that only mentions the socket is not refused.
+        assert_eq!(assess_user_channel("Write", &json!({ "file_path": "/w/src/answer.rs", "content": "dashboard.sock" }), &paths), None);
+        assert_eq!(assess_user_channel("SendMessage", &json!({ "message": "dashboard.sock" }), &paths), None);
+    }
 
     fn verdict(cmd: &str) -> Option<(Severity, &'static str)> {
         assess_command(cmd).map(|f| (f.severity, f.rule))

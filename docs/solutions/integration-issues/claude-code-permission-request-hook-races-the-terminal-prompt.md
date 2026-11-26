@@ -60,3 +60,14 @@ For ExitPlanMode, the hook input `tool_input` has `plan` and `planFilePath`. The
 
 After a Claude Code update, repeat the AskUserQuestion test in a scratch session. The test passes
 if the question is visible while the hook waits and the hook's answer applies.
+
+### How to run a live test safely
+
+Start each scratch Claude session with its own config folder, for example
+`CLAUDE_CONFIG_DIR=<scratch dir>`, and a scratch `HOME` if needed. Then nothing reads or writes the
+real `~/.claude`. Never run a debug jazari from a session that loads the real settings.
+
+On 2026-11-26 a scratch session loaded the real settings and ran a debug jazari on `SessionStart`.
+That hook re-registered jazari's hooks in the real `~/.claude/settings.json` with the debug
+binary's path, so every session on the machine ran unmerged code until `jazari update` fixed it.
+`JAZARI_HOME` does not protect `~/.claude`.

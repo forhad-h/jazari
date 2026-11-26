@@ -15,6 +15,12 @@ impl JsonlTail {
         Self { path, offset: 0, partial: Vec::new() }
     }
 
+    /// A reader that returns only lines appended after this call.
+    pub fn at_end(path: PathBuf) -> Self {
+        let offset = std::fs::metadata(&path).map_or(0, |m| m.len());
+        Self { path, offset, partial: Vec::new() }
+    }
+
     /// Returns values parsed from lines appended since the last call.
     /// If the file shrank (rotated or rewritten), it is re-read from the start.
     pub fn read_new(&mut self) -> Vec<Value> {

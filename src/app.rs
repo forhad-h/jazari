@@ -176,6 +176,11 @@ pub struct App {
     pub compose: Option<Compose>,
     /// A stop (`x`) or interrupt (`X`) of a session waiting for `y`.
     pub control: Option<Control>,
+    /// The socket server that receives sessions' permission prompts and questions; started by
+    /// [`run`] only, so tests never open a socket.
+    pub answers: Option<crate::answer::server::Server>,
+    /// A session's waiting prompt being answered (`r`), drawn over the list while open.
+    pub answer_view: Option<crate::answer_view::AnswerView>,
     /// The cleanup view's state while it is open.
     pub clean: Option<crate::clean_view::CleanView>,
     sampler: crate::system::Sampler,
@@ -524,6 +529,8 @@ impl App {
             clean: None,
             compose: None,
             control: None,
+            answers: None,
+            answer_view: None,
             sampler: crate::system::Sampler::default(),
             pin: None,
         }
@@ -1054,6 +1061,61 @@ impl App {
         }
     }
 
+    /// Takes in new prompts, and closes the answer box when its prompt was answered at the
+    /// terminal or timed out.
+    fn poll_answers(&mut self) {
+        let Some(server) = self.answers.as_mut() else { return };
+        server.poll(crate::now());
+        if !server.intact() {
+            self.error = Some("another process replaced jazari's answer socket: prompts no longer reach this dashboard; restart it ".into());
+            self.answers = None;
+            self.answer_view = None;
+            return;
+        }
+        if let Some(v) = &self.answer_view
+            && !server.waiting(&v.session).contains(&&v.req)
+        {
+            self.info = Some(format!("{}'s prompt was answered at the terminal or has closed ", v.name));
+            self.answer_view = None;
+        }
+    }
+
+    /// Opens the answer box for the selected session's waiting prompt.
+    fn open_answer(&mut self) {
+        let Some(s) = self.selected_session() else { return };
+        let Some(answers) = self.answers.as_ref() else {
+            self.info = Some("another jazari dashboard answers prompts, or this system can't (macOS and Linux only) ".into());
+            return;
+        };
+        let waiting = answers.waiting(&s.id);
+        match waiting.first() {
+            Some(req) => {
+                let view = crate::answer_view::AnswerView::open(&s.id, s.project(), (*req).clone(), waiting.len(), crate::presence::available());
+                self.answer_view = Some(view);
+            }
+            None if !crate::answer::enabled() => self.info = Some("answering from the dashboard is off: turn it on with `jazari watch answer --on` ".into()),
+            None => self.info = Some(format!("{} has no prompt waiting for jazari ", s.project())),
+        }
+    }
+
+    fn on_answer_key(&mut self, code: KeyCode) {
+        let Some(v) = self.answer_view.as_mut() else { return };
+        match v.on_key(code) {
+            crate::answer_view::Key::Stay => {}
+            crate::answer_view::Key::Close => self.answer_view = None,
+            crate::answer_view::Key::Send(answer) => {
+                let v = self.answer_view.take().unwrap();
+                let confirm = !matches!(answer, crate::answer::Answer::Deny);
+                match self.answers.as_mut().map(|a| a.answer(&v.req, answer)) {
+                    Some(Ok(())) if confirm => self.info = Some(format!("sent to {}: confirm it with Touch ID or your password ", v.name)),
+                    Some(Ok(())) => self.info = Some(format!("denied {}'s prompt ", v.name)),
+                    Some(Err(e)) => self.error = Some(format!("couldn't answer: {e:#} ")),
+                    None => {}
+                }
+            }
+        }
+    }
+
     /// Text pasted while composing goes into the message, on one line.
     pub fn on_compose_paste(&mut self, text: &str) -> bool {
         let Some(c) = self.compose.as_mut() else { return false };
@@ -1143,6 +1205,7 @@ impl App {
     fn on_wheel(&mut self, down: bool) {
         let asking = self.compose.is_some()
             || self.control.is_some()
+            || self.answer_view.is_some()
             || self.prompt_view.is_some()
             || self.share.as_ref().is_some_and(|s| s.editing())
             || self.rules_picker.as_ref().is_some_and(|p| p.deleting.is_some())
@@ -1176,6 +1239,10 @@ impl App {
             self.on_compose_key(key.code);
             return Action::None;
         }
+        if self.answer_view.is_some() {
+            self.on_answer_key(key.code);
+            return Action::None;
+        }
         if let Some(c) = self.control.take() {
             if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
                 self.apply_control(&c);
@@ -1204,6 +1271,7 @@ impl App {
                     self.compose = Some(Compose { session: s.id.clone(), name: s.project(), text: String::new() });
                 }
             }
+            (View::List, KeyCode::Char('r')) => self.open_answer(),
             (View::List, KeyCode::Char(k @ ('x' | 'X'))) => {
                 if let Some(s) = self.selected_session().filter(|s| s.status != Status::Ended) {
                     self.control = Some(Control { session: s.id.clone(), name: s.project(), interrupt: k == 'X' });
@@ -1385,6 +1453,7 @@ fn edit_suspended(text: &str, kind: &str, ext: &str) -> std::io::Result<(Tui, Re
 
 pub fn run() -> anyhow::Result<()> {
     let mut app = App::new();
+    app.answers = crate::answer::server::start();
     app.refresh();
     on_signal::install();
     let mut terminal = init_terminal()?;
@@ -1433,6 +1502,7 @@ pub fn run() -> anyhow::Result<()> {
                 }
             }
             app.tick = app.tick.wrapping_add(1);
+            app.poll_answers();
             app.refresh();
         }
     })();
