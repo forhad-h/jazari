@@ -448,12 +448,17 @@ mod tests {
         assert!(queue_at(&dir, "../s1", "message", "x", None).is_err());
     }
 
-    /// A registry with one entry per session: (pid, session, status, socket path).
+    /// A registry with one entry per session: (pid, session, status, socket path). A path that
+    /// starts with `/` is placed under the temp dir, so that it is absolute on every platform.
     fn registry(name: &str, entries: &[(i64, &str, &str, &str)]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("jazari-registry-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (pid, id, status, sock) in entries {
+            let sock = match sock.strip_prefix('/') {
+                Some(rest) => std::env::temp_dir().join(rest).to_string_lossy().into_owned(),
+                None => sock.to_string(),
+            };
             let v = json!({ "pid": pid, "sessionId": id, "status": status, "messagingSocketPath": sock });
             std::fs::write(dir.join(format!("{pid}.json")), v.to_string()).unwrap();
         }
