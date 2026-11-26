@@ -76,10 +76,6 @@ fn queue(session: &str, kind: &str, text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn tell(session: &str, text: &str) -> anyhow::Result<()> {
-    tell_and_wake(session, text).map(drop)
-}
-
 /// Queues a message and, when the session is idle, wakes it so that it reads the message now.
 /// Returns whether the session was woken. The message itself goes only through the inbox, so the
 /// hook hands it over with the user's authority; the wake-up carries none of its text.

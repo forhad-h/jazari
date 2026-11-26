@@ -192,6 +192,18 @@ fn wait(timeout: u64) -> anyhow::Result<()> {
     }
 }
 
+/// One line about the disk that holds jazari's data and the memory, for a short status.
+pub fn health_line() -> String {
+    let cfg = crate::disk::Config::load();
+    let data = crate::data_dir();
+    let snap = Sampler::default().sample([data.as_path()], &cfg.thresholds);
+    let mut line = format!("Memory {:.0}% used, {:.1} GiB available", snap.mem_used_ratio() * 100.0, snap.mem_available as f64 / GIB);
+    if let Some((_, r)) = &snap.disk {
+        line = format!("Disk {:.0}% full, {:.1} GB free · {line}", r.used_pct(), r.free_gb());
+    }
+    line
+}
+
 pub fn run(a: SystemArgs) -> anyhow::Result<()> {
     if a.wait {
         return wait(a.timeout);

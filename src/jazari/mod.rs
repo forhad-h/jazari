@@ -1,6 +1,6 @@
 //! jazari: the part of jazari that runs an AI software company.
-//! - Telegram: pairing, the bridge that takes commands and forwards sessions' `--attention`
-//!   notes, and `notify` for scripts.
+//! - Telegram: pairing, the bridge that takes commands about jazari's own work, and `notify` for
+//!   scripts.
 //! - The engine: products, a task queue, and a supervisor that runs each task as a headless
 //!   Claude worker in the product's container. It sleeps whenever the subscription's usage windows
 //!   call for it.
@@ -44,7 +44,7 @@ pub enum JazariCmd {
     /// Connect your Telegram bot: pair a chat, send a test message, check or remove the pairing.
     #[command(subcommand)]
     Telegram(TelegramCmd),
-    /// Take commands from the paired Telegram chat and forward sessions' --attention notes (runs until stopped).
+    /// Take commands about jazari's own work from the paired Telegram chat (runs until stopped).
     Bridge,
     /// Run the bridge or the supervisor in the background on macOS: it starts at login and again
     /// after a crash. Nothing runs this way until you install it.
@@ -685,6 +685,36 @@ pub(crate) fn task_summary(store: &store::Store) -> anyhow::Result<String> {
     Ok(out.join("\n\n"))
 }
 
+/// `/status` on Telegram: jazari's own work (products, tasks, the supervisor's pause and the usage
+/// its runs last saw) and the machine's disk and memory. Nothing about the founder's own sessions.
+pub(crate) fn sandbox_status(store: &store::Store) -> anyhow::Result<String> {
+    let mut out = Vec::new();
+    let products = store.products()?;
+    out.push(if products.is_empty() {
+        "No products yet. Send /new <name> <idea> to start.".to_string()
+    } else {
+        format!("Products: {}", products.iter().map(|p| format!("{} ({})", p.name, p.mode)).collect::<Vec<_>>().join(", "))
+    });
+    let counts: Vec<String> = store.counts()?.iter().map(|(s, n)| format!("{n} {s}")).collect();
+    if !counts.is_empty() {
+        out.push(format!("Tasks: {}", counts.join(" · ")));
+    }
+    let l: limits::Limits = store.get("limits")?.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let pct = |w: Option<limits::Window>| w.map_or("no reading yet".into(), |w| format!("{:.0}%", w.used_pct));
+    out.push(format!("Usage at the last run: 5h {} · 7d {}", pct(l.five_hour), pct(l.seven_day)));
+    if supervisor_paused() {
+        out.push("Product work is paused (/resume turns it back on).".into());
+    }
+    out.push(crate::system::health_line());
+    Ok(out.join("\n"))
+}
+
+/// Whether product work is paused from Telegram (`/pause`). The founder's own `jazari watch pause`
+/// holds the supervisor too.
+pub(crate) fn supervisor_paused() -> bool {
+    crate::act::paused_in(&dir())
+}
+
 fn open() -> anyhow::Result<store::Store> {
     store::Store::open(&dir().join("jazari.db"))
 }
@@ -736,7 +766,7 @@ fn run_supervisor(once: bool, skip_evals: bool) -> anyhow::Result<()> {
     let runner = worker::Docker { token };
     let audit_path = dir.join("audit.jsonl");
     let now = crate::now;
-    let paused = crate::act::paused;
+    let paused = || crate::act::paused() || supervisor_paused();
     let ensure = |p: &str, work: &str| sandbox::ensure(p, work);
     let reset = |name: &str| sandbox::reset(name);
     let skills = |work: &std::path::Path| write_skills(work);
@@ -924,6 +954,22 @@ fn supervise(deps: &supervisor::Deps, once: bool, replaced: &dyn Fn() -> bool) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn telegram_status_shows_only_jazaris_own_work_and_the_machine() {
+        let store = super::store::Store::memory();
+        let empty = super::sandbox_status(&store).unwrap();
+        assert!(empty.starts_with("No products yet."), "{empty}");
+        store.add_product("shop", "/r", 0.0).unwrap();
+        store.add_task(&super::store::NewTask { product: "shop", role: "engineer", title: "Add search", ..Default::default() }, 0.0).unwrap();
+        let text = super::sandbox_status(&store).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "Products: shop (normal)");
+        assert_eq!(lines[1], "Tasks: 1 queued");
+        assert_eq!(lines[2], "Usage at the last run: 5h no reading yet · 7d no reading yet");
+        assert!(lines.last().unwrap().contains("Memory"), "{text}");
+        assert!(!text.to_lowercase().contains("session"), "no word about the founder's own sessions: {text}");
+    }
+
     #[test]
     fn rest_ends_early_when_a_stop_is_asked() {
         use std::sync::atomic::{AtomicBool, Ordering};

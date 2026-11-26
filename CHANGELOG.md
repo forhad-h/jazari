@@ -6,6 +6,9 @@ GitHub release. Keep each bullet to one short line.
 ## Unreleased
 
 - Every session jazari starts gets "Working with jazari" first; it is no longer a choice in `c` or `jazari build rules`
+- Telegram controls only jazari's own work: /tell and /stop are gone, and the sessions you start yourself are controlled at your computer
+- /status on Telegram shows products, tasks, usage and the machine's disk and memory; /pause and /resume pause only product work
+- Notes from the sessions you start yourself (`--attention`) no longer go to Telegram; they still sound, notify and show on the dashboard
 
 ## 1.0.6 - 2026-11-26
 

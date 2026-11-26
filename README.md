@@ -381,20 +381,22 @@ jazari build service uninstall             # stop and remove both; the logs stay
 - Other systems are not supported yet. There, run `jazari build bridge` and `jazari build run` in
   tmux or a terminal that stays open.
 
-In the paired chat:
+Telegram controls only jazari's own work: products, tasks, the workers' questions and approvals,
+and the supervisor. The sessions you start yourself are controlled only at your computer, from the
+jazari dashboard. In the paired chat:
 
 | Command | What it does |
 |---|---|
-| `/status` | Live sessions, which ones need you, and the 5-hour and 7-day usage |
-| `/tell <id> <message>` | A message for a session; give at least 4 letters of its id |
-| `/stop <id>` | Stops a session before its next tool call |
-| `/pause [30m\|2h\|1d]` and `/resume` | The same as `jazari watch pause` and `jazari watch resume` |
+| `/status` | Products, tasks, the usage at the last run, and the machine's disk and memory |
+| `/pause [30m\|2h\|1d]` and `/resume` | Pause product work: the supervisor starts no new task. Your own sessions are not affected |
 | `/new <name> <idea>`, `/idea <product> <idea>` | Start a product, or give one a new idea (see Building products) |
 | `/tasks` | What the team is doing, and what waits for you |
 | `/answer <task> <answer>` | Answer a task's question |
 | `/approve <task>`, `/deny <task>` | Decide on a deploy, spend or contact; the buttons do the same |
 
-When a session runs `jazari watch say --attention "…"`, the bridge sends the note to the chat.
+Nothing about the sessions you start yourself goes to Telegram. A `jazari watch say --attention "…"` note
+sounds, notifies you on the desktop and shows on the dashboard, because only you at your computer can answer
+it.
 `jazari build notify "…"` sends your own message, from a script or from stdin. `jazari watch actions`
 lists everything done from Telegram with the origin `telegram`.
 
@@ -606,12 +608,12 @@ login token; the checks and git commands don't. A run is stopped after 45 minute
 - a proposal to add a check, or a role that got worse after a change;
 - a product on hold, or a supervisor that won't start or keeps failing;
 - an audit record that was changed;
-- a session that asks for you with `--attention`.
 
 News (built, merged, sleeping until a limit resets, preferences learned) is not sent. Ask with `/status`,
 `/tasks` or `/prefs`, and the supervisor's output has all of it.
 
-**Pausing.** `jazari watch pause` (or `/pause`) pauses it.
+**Pausing.** `jazari watch pause` pauses it, together with everything else jazari does on its own. `/pause`
+on Telegram pauses only the supervisor.
 
 **The record.** Every start, finish, merge and sleep is added to `~/.jazari/build/audit.jsonl`. Each entry
 carries the hash of the one before it, so `jazari build audit` finds an edited or deleted entry.
