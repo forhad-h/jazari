@@ -1,6 +1,6 @@
 [package]
 name = "jazari"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2024"
 description = "An AI software company on your Claude subscription, and a live dashboard for every Claude Code session"
 license = "MIT"
